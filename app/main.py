@@ -438,3 +438,4 @@ async def azure_band_test(
     parsed["inference_time_ms"] = elapsed_ms
     parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
     return parsed
+
