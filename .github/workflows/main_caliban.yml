@@ -61,10 +61,9 @@ jobs:
 
       - name: Deploy directly via Kudu zipdeploy (bypasses OneDeploy)
         run: |
-          curl -X POST \
+          curl -v -X POST \
             -u "$KUDU_USER:$KUDU_PASS" \
             -H "Content-Type:" \
             -H "Expect:" \
             -T deploy.zip \
-            -w "\nHTTP_STATUS:%{http_code}\n" \
             "https://caliban-ascchkhycdeuf9ew.scm.canadacentral-01.azurewebsites.net/api/zipdeploy"
