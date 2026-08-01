@@ -1,0 +1,21 @@
+# --- Training ---
+ultralytics>=8.3.0
+opencv-python-headless>=4.9.0
+
+# --- Backend / API ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+
+# --- Supabase (auth, DB, storage) ---
+supabase>=2.7.0
+
+# --- Claude Vision test endpoint ---
+anthropic>=0.40.0
+
+# --- SharePoint via Microsoft Graph API ---
+msal>=1.31.0
+
+# --- Azure AI Foundry (GPT-4o) vision test endpoint ---
+openai>=1.54.0
