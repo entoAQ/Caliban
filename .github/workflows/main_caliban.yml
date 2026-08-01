@@ -39,15 +39,19 @@ jobs:
         with:
           name: python-app
 
+      - name: Package and report size
+        run: |
+          zip -rq deploy.zip . -x "deploy.zip"
+          du -h deploy.zip
+
       - name: Deploy directly via Kudu zipdeploy (bypasses OneDeploy)
         run: |
           echo "${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}" > publish_profile.xml
           USERNAME=$(grep -o 'userName="[^"]*"' publish_profile.xml | head -1 | sed 's/userName="//;s/"//')
           PASSWORD=$(grep -o 'userPWD="[^"]*"' publish_profile.xml | head -1 | sed 's/userPWD="//;s/"//')
           rm publish_profile.xml
-          zip -r deploy.zip . -x "deploy.zip"
           curl --fail --show-error \
             -X POST \
             -u "$USERNAME:$PASSWORD" \
-            --data-binary @deploy.zip \
+            -T deploy.zip \
             "https://caliban-ascchkhycdeuf9ew.scm.canadacentral-01.azurewebsites.net/api/zipdeploy"
