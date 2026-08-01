@@ -7,6 +7,15 @@ pydantic>=2.7.0
 # --- Supabase (auth, DB, storage) ---
 supabase>=2.7.0
 
+# Pinned specifically: newer cryptography releases (a supabase
+# dependency, via its auth library) bundle compiled binaries requiring a
+# newer glibc than Azure App Service's runtime container has -- this
+# exact mismatch (GLIBC_2.33 not found) crashed every deployment until
+# traced to this package. Pinning below that threshold avoids it
+# structurally, rather than routing around it with a different build
+# environment each time this gets reinstalled.
+cryptography<42.0
+
 # --- Claude Vision test endpoint ---
 anthropic>=0.40.0
 
@@ -15,4 +24,3 @@ msal>=1.31.0
 
 # --- Azure AI Foundry (GPT-4o) vision test endpoint ---
 openai>=1.54.0
-
