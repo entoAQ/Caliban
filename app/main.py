@@ -112,7 +112,7 @@ async def vision_upload(
 # Automate's own SharePoint connector fetches the image and POSTs it
 # here directly; this endpoint never touches SharePoint or Supabase --
 # Power Automate is responsible for writing the result to Supabase
-# itself afterward, using this JSON  plus the correlation_id it
+# itself afterward, using this JSON response plus the correlation_id it
 # already extracted from the triggering file's name.
 @app.post("/detect")
 async def detect(
@@ -257,7 +257,7 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 
 def parse_band_response(text):
     """Extracts the structured band/confidence fields from BAND_PROMPT's
-     -- falls back to returning the raw text untouched if the
+    response -- falls back to returning the raw text untouched if the
     model didn't follow the exact format, rather than silently dropping
     a real answer that just wasn't formatted as expected."""
     band = confidence = justification = None
@@ -317,7 +317,16 @@ async def claude_detect(
 #
 # Requires these Render environment variables (from your Azure AI Foundry
 # / Azure OpenAI resource -- portal.azure.com or ai.azure.com):
-#   AZURE_OPENAI_ENDPOINT     e.g. https://your-resource.openai.azure.com
+#   AZURE_OPENAI_ENDPOINT     the bare resource URL only, no path after it.
+#                             For newer AI Foundry resources this looks like
+#                             https://<resource>.services.ai.azure.com --
+#                             NOT the "Project endpoint" (.../api/projects/...)
+#                             or the newer Responses API URL
+#                             (.../openai/v1/responses) shown elsewhere in
+#                             the Foundry portal. Confirmed directly against
+#                             Microsoft's own current documentation for this
+#                             resource type after a real 404 traced to using
+#                             the wrong one of these three.
 #   AZURE_OPENAI_API_KEY
 #   AZURE_OPENAI_DEPLOYMENT   the name YOU gave the deployed model when
 #                             you deployed gpt-4o in the Foundry portal
@@ -438,4 +447,3 @@ async def azure_band_test(
     parsed["inference_time_ms"] = elapsed_ms
     parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
     return parsed
-
