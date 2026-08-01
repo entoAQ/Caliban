@@ -112,7 +112,7 @@ async def vision_upload(
 # Automate's own SharePoint connector fetches the image and POSTs it
 # here directly; this endpoint never touches SharePoint or Supabase --
 # Power Automate is responsible for writing the result to Supabase
-# itself afterward, using this JSON response plus the correlation_id it
+# itself afterward, using this JSON  plus the correlation_id it
 # already extracted from the triggering file's name.
 @app.post("/detect")
 async def detect(
@@ -257,7 +257,7 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 
 def parse_band_response(text):
     """Extracts the structured band/confidence fields from BAND_PROMPT's
-    response -- falls back to returning the raw text untouched if the
+     -- falls back to returning the raw text untouched if the
     model didn't follow the exact format, rather than silently dropping
     a real answer that just wasn't formatted as expected."""
     band = confidence = justification = None
@@ -370,7 +370,7 @@ async def azure_detect(
     start = time.time()
     response = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
-        max_tokens=1000,
+        max_completion_tokens=1000,
         messages=[{
             "role": "user",
             "content": [
@@ -423,7 +423,7 @@ async def azure_band_test(
     start = time.time()
     response = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
-        max_tokens=200,
+        max_completion_tokens=200,
         messages=[{
             "role": "user",
             "content": [
