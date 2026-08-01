@@ -64,5 +64,6 @@ jobs:
           curl --fail --show-error \
             -X POST \
             -u "$KUDU_USER:$KUDU_PASS" \
+            -H "Content-Type:" \
             -T deploy.zip \
             "https://caliban-ascchkhycdeuf9ew.scm.canadacentral-01.azurewebsites.net/api/zipdeploy"
