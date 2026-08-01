@@ -33,25 +33,36 @@ jobs:
     needs: build
     permissions:
       contents: read
+    env:
+      PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
     steps:
       - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
           name: python-app
 
-      - name: Package and report size
+      - name: Package
+        run: zip -rq deploy.zip . -x "deploy.zip"
+
+      - name: Extract Kudu credentials
         run: |
-          zip -rq deploy.zip . -x "deploy.zip"
-          du -h deploy.zip
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          import os
+          root = ET.fromstring(os.environ['PUBLISH_PROFILE'])
+          for profile in root.findall('publishProfile'):
+              if profile.get('publishMethod') == 'MSDeploy':
+                  print(f\"::add-mask::{profile.get('userPWD')}\")
+                  with open(os.environ['GITHUB_ENV'], 'a') as f:
+                      f.write(f\"KUDU_USER={profile.get('userName')}\n\")
+                      f.write(f\"KUDU_PASS={profile.get('userPWD')}\n\")
+                  break
+          "
 
       - name: Deploy directly via Kudu zipdeploy (bypasses OneDeploy)
         run: |
-          echo "${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}" > publish_profile.xml
-          USERNAME=$(grep -o 'userName="[^"]*"' publish_profile.xml | head -1 | sed 's/userName="//;s/"//')
-          PASSWORD=$(grep -o 'userPWD="[^"]*"' publish_profile.xml | head -1 | sed 's/userPWD="//;s/"//')
-          rm publish_profile.xml
           curl --fail --show-error \
             -X POST \
-            -u "$USERNAME:$PASSWORD" \
+            -u "$KUDU_USER:$KUDU_PASS" \
             -T deploy.zip \
             "https://caliban-ascchkhycdeuf9ew.scm.canadacentral-01.azurewebsites.net/api/zipdeploy"
