@@ -14,10 +14,18 @@ Run locally:
   export POWER_AUTOMATE_API_KEY=... (any long random string you choose)
   uvicorn app.main:app --reload --port 8000
 """
+import datetime
 import os
 import re
 import time
 import uuid
+
+# Set once, the moment this process actually starts (module import time --
+# exactly when a container boots). Exposed via /health specifically to
+# answer "has my latest change actually taken effect" directly, rather
+# than guessing based on how long ago a deploy command was run -- compare
+# this timestamp against when you committed/pushed a change.
+STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,7 +82,12 @@ def verify_power_automate_key(x_api_key: str = Header(None)):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_version": MODEL_VERSION, "model_loaded": get_model() is not None}
+    return {
+        "status": "ok",
+        "model_version": MODEL_VERSION,
+        "model_loaded": get_model() is not None,
+        "started_at": STARTUP_TIME,
+    }
 
 
 # ── Browser-facing: capture a photo ──────────────────────────────────
