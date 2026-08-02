@@ -410,19 +410,34 @@ async def azure_detect(
 # string you choose -- separate from POWER_AUTOMATE_API_KEY so revoking
 # one doesn't affect the other).
 
-VALIDATION_API_KEY = os.environ.get("VALIDATION_API_KEY")
+# ── Standalone band-estimate validation tool ──────────────────────────
+# Originally a quick, standalone experiment outside SGSC's auth entirely
+# -- now promoted to a real, role-gated feature. Uses the same Supabase
+# JWT verification as every other authenticated endpoint (get_current_operator),
+# plus a role check matching the app's own hierarchy (user_profiles.role),
+# rather than the standalone VALIDATION_API_KEY used during initial testing.
+
+ROLE_HIERARCHY = {"viewer": 0, "qc": 1, "qa": 2, "qa_director": 3, "osa": 4}
 
 
-def verify_validation_key(x_api_key: str = Header(None)):
-    if not VALIDATION_API_KEY or x_api_key != VALIDATION_API_KEY:
-        raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
-    return True
+def require_role(min_role: str):
+    """Returns a FastAPI dependency that verifies the caller's Supabase
+    session AND that their user_profiles.role meets the given minimum,
+    matching the same role names and ordering used throughout the rest
+    of the app (roleGte() client-side, role_gte() in RLS policies)."""
+    def dependency(operator: dict = Depends(get_current_operator)):
+        profile_resp = supabase.table("user_profiles").select("role").eq("id", operator["id"]).single().execute()
+        role = (profile_resp.data or {}).get("role", "viewer")
+        if ROLE_HIERARCHY.get(role, 0) < ROLE_HIERARCHY.get(min_role, 0):
+            raise HTTPException(status_code=403, detail=f"Accès refusé -- rôle {min_role} ou supérieur requis.")
+        return operator
+    return dependency
 
 
 @app.post("/azure-band-test")
 async def azure_band_test(
     file: UploadFile = File(...),
-    _: bool = Depends(verify_validation_key),
+    operator: dict = Depends(require_role("qc")),
 ):
     client = get_azure_client()
     contents = await file.read()
