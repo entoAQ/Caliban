@@ -26,4 +26,11 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/entoaq/caliban:latest
+          tags: |
+            ghcr.io/entoaq/caliban:latest
+            ghcr.io/entoaq/caliban:${{ github.sha }}
+
+      - name: Print the exact deploy command to run
+        run: |
+          echo "::notice::Run this in Cloud Shell to deploy this exact build:"
+          echo "::notice::az webapp config container set --name Caliban --resource-group Caliban_group --container-image-name ghcr.io/entoaq/caliban:${{ github.sha }}"
