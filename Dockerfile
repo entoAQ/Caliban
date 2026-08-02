@@ -21,3 +21,5 @@ EXPOSE 8000
 # Same exact command already confirmed working on App Service -- moving
 # environments, not reinventing how the app starts.
 CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "app.main:app"]
+
+CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "120", "-b", "0.0.0.0:8000", "app.main:app"]
