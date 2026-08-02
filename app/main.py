@@ -15,6 +15,7 @@ Run locally:
   uvicorn app.main:app --reload --port 8000
 """
 import datetime
+import hashlib
 import os
 import re
 import time
@@ -87,6 +88,8 @@ def health():
         "model_version": MODEL_VERSION,
         "model_loaded": get_model() is not None,
         "started_at": STARTUP_TIME,
+        "prompt_version": CALIBAN_PROMPT_VERSION,
+        "prompt_hash": PROMPT_HASH,
     }
 
 
@@ -278,6 +281,17 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
+
+# Manually bumped -- update this any time BAND_PROMPT changes meaningfully
+# (wording, band boundaries, new instructions). Human-readable label for
+# discussing results ("v1.2 was clearly better at the high end").
+CALIBAN_PROMPT_VERSION = "1.1"
+
+# Computed automatically from the actual prompt text every time this
+# module loads -- guaranteed accurate even if CALIBAN_PROMPT_VERSION
+# above is forgotten. This is the real, tamper-proof way to know
+# whether two results actually came from the same prompt.
+PROMPT_HASH = hashlib.md5(BAND_PROMPT.encode("utf-8")).hexdigest()[:8]
 
 
 def parse_band_response(text):
@@ -607,6 +621,9 @@ async def azure_band_test(
             "inference_time_ms": elapsed_ms,
             "created_by": operator["id"],
             "is_training": is_training,
+            "prompt_version": CALIBAN_PROMPT_VERSION,
+            "prompt_hash": PROMPT_HASH,
+            "reference_count": len(references),
         }).execute()
 
         # Defensive: some client/API combinations can return a response
