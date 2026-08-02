@@ -15,6 +15,7 @@ Run locally:
   uvicorn app.main:app --reload --port 8000
 """
 import os
+import re
 import time
 import uuid
 
@@ -250,7 +251,7 @@ de densité, comme le ferait une personne qui regarde rapidement le plateau.
 
 Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 
-BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, >7%]
+BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 
@@ -434,11 +435,24 @@ def require_role(min_role: str):
     return dependency
 
 
+def band_slug(band):
+    """Turns a predicted band like '3-7%' into a clean identifier
+    fragment like '3_7'. Falls back safely for an unstructured or
+    missing band, rather than let a stray character or space leak into
+    an auto-generated ID."""
+    if not band:
+        return "inconnu"
+    s = band.replace("%", "").replace("<", "lt").replace(">", "gt").replace("-", "_")
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", s)
+    return s[:20]
+
+
 @app.post("/azure-band-test")
 async def azure_band_test(
     file: UploadFile = File(...),
     lot_number: str = Form(""),
     real_pct: str = Form(""),
+    is_training: bool = Form(False),
     operator: dict = Depends(require_role("qc")),
 ):
     client = get_azure_client()
@@ -465,13 +479,28 @@ async def azure_band_test(
     parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
 
     # Recording is best-effort -- a write failure here should never hide
-    # the actual analysis result the operator is waiting on. lot_id stays
-    # null if the typed lot_number doesn't match a real lot; lot_number_text
-    # preserves exactly what was typed either way.
+    # the actual analysis result the operator is waiting on.
     try:
         lot_id = None
-        if lot_number.strip():
-            lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_number.strip()).limit(1).execute()
+        lot_text = lot_number.strip() or None
+
+        if is_training and not lot_text:
+            # Auto-ID rather than require a human to invent and track one
+            # by hand -- self-organizing by predicted band, ready to
+            # extend with a detected material type once that exists
+            # (e.g. plastic detection), not just contamination level.
+            slug = band_slug(parsed.get("band"))
+            count_resp = (
+                supabase.table("vision_band_estimates")
+                .select("id", count="exact")
+                .eq("is_training", True)
+                .eq("predicted_band", parsed.get("band"))
+                .execute()
+            )
+            seq = (count_resp.count or 0) + 1
+            lot_text = f"CALIB-{slug}-{seq:04d}"
+        elif not is_training and lot_text:
+            lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_text).limit(1).execute()
             if lot_resp.data:
                 lot_id = lot_resp.data[0]["id"]
 
@@ -484,7 +513,7 @@ async def azure_band_test(
 
         supabase.table("vision_band_estimates").insert({
             "lot_id": lot_id,
-            "lot_number_text": lot_number.strip() or None,
+            "lot_number_text": lot_text,
             "predicted_band": parsed.get("band"),
             "confidence": parsed.get("confidence"),
             "justification": parsed.get("justification"),
@@ -493,7 +522,9 @@ async def azure_band_test(
             "model": parsed["model"],
             "inference_time_ms": elapsed_ms,
             "created_by": operator["id"],
+            "is_training": is_training,
         }).execute()
+        parsed["recorded_as"] = lot_text
     except Exception as e:
         parsed["recording_error"] = str(e)
 
