@@ -246,6 +246,11 @@ BAND_PROMPT = """Tu examines une photo d'un échantillon de larves de mouche sol
 (Hermetia illucens) mélangées à du frass, pour estimer le niveau de contamination organique \
 visible (frass, matière étrangère organique -- pas les larves elles-mêmes).
 
+Important : mesure la densité par rapport à la surface couverte par l'échantillon lui-même \
+(larves + frass), PAS par rapport à l'ensemble de la photo. Le plateau contient souvent de \
+l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
+espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
+
 Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
 de densité, comme le ferait une personne qui regarde rapidement le plateau.
 
@@ -511,7 +516,7 @@ async def azure_band_test(
             except ValueError:
                 pass
 
-        supabase.table("vision_band_estimates").insert({
+        insert_resp = supabase.table("vision_band_estimates").insert({
             "lot_id": lot_id,
             "lot_number_text": lot_text,
             "predicted_band": parsed.get("band"),
@@ -524,8 +529,19 @@ async def azure_band_test(
             "created_by": operator["id"],
             "is_training": is_training,
         }).execute()
+
+        # Defensive: some client/API combinations can return a response
+        # with no error raised but also no actual row -- treat "insert
+        # claimed success but nothing came back" as a real failure to
+        # surface, rather than silently report success when the table
+        # stayed untouched.
+        if not insert_resp.data:
+            raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
+
         parsed["recorded_as"] = lot_text
+        parsed["recorded_id"] = insert_resp.data[0].get("id")
     except Exception as e:
-        parsed["recording_error"] = str(e)
+        parsed["recording_error"] = f"{type(e).__name__}: {e}"
+        print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
 
     return parsed
