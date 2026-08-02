@@ -256,13 +256,19 @@ serrées -- donne plutôt une impression qualitative (peu, modéré, abondant)."
 # glancing at a tray, since that's the more plausible task for a general
 # vision model, not counting individual touching objects.
 BAND_PROMPT = """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
-(Hermetia illucens) mélangées à du frass, pour estimer le niveau de contamination organique \
-visible (frass, matière étrangère organique -- pas les larves elles-mêmes).
+(Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
+aussi appelé frass), pour estimer le niveau de contamination visible.
 
 Important : mesure la densité par rapport à la surface couverte par l'échantillon lui-même \
-(larves + frass), PAS par rapport à l'ensemble de la photo. Le plateau contient souvent de \
+(larves + MEO), PAS par rapport à l'ensemble de la photo. Le plateau contient souvent de \
 l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
 espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
+
+Important également : la MEO empile et se chevauche facilement, même dans un échantillon bien \
+étalé -- une partie de la matière reste cachée sous la surface visible. Si tu observes des \
+signes d'empilement, de relief ou de superposition plutôt qu'une couche unique et bien étalée, \
+considère que la quantité réelle de MEO est probablement plus élevée que ce que la surface \
+visible seule suggère, et penche vers une bande supérieure en conséquence.
 
 Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
 de densité, comme le ferait une personne qui regarde rapidement le plateau.
@@ -465,6 +471,50 @@ def band_slug(band):
     return s[:20]
 
 
+REFERENCE_BUCKET = "vision-reference-images"
+_reference_cache = None
+
+
+def clear_reference_cache():
+    """Called after a new reference photo is captured, so it's picked up
+    on the very next request rather than waiting for a container restart
+    -- the whole reason this moved off the old baked-into-the-image
+    approach in the first place."""
+    global _reference_cache
+    _reference_cache = None
+
+
+def get_reference_images(category="meo_density"):
+    """Loads reference images for the given category from Supabase
+    (metadata table + Storage bucket), caching the result until
+    explicitly invalidated by clear_reference_cache(). Returns an empty
+    list gracefully if none exist yet for this category, so the tool
+    keeps working exactly as before until real reference photos are
+    actually captured."""
+    global _reference_cache
+    if _reference_cache is None:
+        _reference_cache = {}
+        try:
+            rows = supabase.table("vision_reference_images").select("*").execute().data or []
+        except Exception:
+            rows = []
+        by_category = {}
+        for row in rows:
+            by_category.setdefault(row["category"], []).append(row)
+        for cat, items in by_category.items():
+            loaded = []
+            for item in items:
+                try:
+                    file_bytes = supabase.storage.from_(REFERENCE_BUCKET).download(item["storage_path"])
+                    b64 = base64.b64encode(file_bytes).decode("utf-8")
+                    loaded.append({**item, "b64": b64})
+                except Exception:
+                    continue  # a single missing/corrupt file shouldn't block the rest
+            by_category[cat] = loaded
+        _reference_cache = by_category
+    return _reference_cache.get(category, [])
+
+
 @app.post("/azure-band-test")
 async def azure_band_test(
     file: UploadFile = File(...),
@@ -478,23 +528,39 @@ async def azure_band_test(
     media_type = file.content_type or "image/jpeg"
     b64_image = base64.b64encode(contents).decode("utf-8")
 
+    # Few-shot grounding: real reference photos with known values, judged
+    # alongside the new photo rather than asked to reason about density
+    # in the abstract. Falls back to prompt-only (references empty) until
+    # real reference photos are provided -- see reference_images/README.
+    content = [{"type": "text", "text": BAND_PROMPT}]
+    references = get_reference_images("meo_density")
+    if references:
+        content.append({
+            "type": "text",
+            "text": "\n\nVoici des photos de référence avec leur pourcentage réel connu de "
+                    "MEO, pour calibrer ton estimation :",
+        })
+        for ref in references:
+            label = f"Référence -- {ref['real_pct']}% MEO réel"
+            if ref.get("description"):
+                label += f" ({ref['description']})"
+            content.append({"type": "text", "text": label + " :"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
+        content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
+    content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}})
+
     start = time.time()
     response = client.chat.completions.create(
         model=AZURE_OPENAI_DEPLOYMENT,
         max_completion_tokens=200,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": BAND_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}},
-            ],
-        }],
+        messages=[{"role": "user", "content": content}],
     )
     elapsed_ms = int((time.time() - start) * 1000)
     text = response.choices[0].message.content or ""
     parsed = parse_band_response(text)
     parsed["inference_time_ms"] = elapsed_ms
     parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
+    parsed["reference_count"] = len(references)
 
     # Recording is best-effort -- a write failure here should never hide
     # the actual analysis result the operator is waiting on.
@@ -558,3 +624,55 @@ async def azure_band_test(
         print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
 
     return parsed
+
+
+@app.post("/reference-capture")
+async def reference_capture(
+    file: UploadFile = File(...),
+    category: str = Form("meo_density"),
+    real_pct: str = Form(""),
+    description: str = Form(""),
+    operator: dict = Depends(require_role("qc")),
+):
+    """Saves a new reference photo directly to Supabase Storage plus its
+    metadata row -- no Azure call involved, this purely records a known
+    example for future band-test calls to reference. Verifies both
+    writes actually succeeded rather than trusting the absence of an
+    exception alone, same lesson learned the hard way with
+    vision_band_estimates -- a request completing without an error isn't
+    proof a row or file genuinely landed."""
+    contents = await file.read()
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    storage_path = f"{category}/{uuid.uuid4().hex}{ext}"
+
+    try:
+        upload_resp = supabase.storage.from_(REFERENCE_BUCKET).upload(
+            storage_path, contents, file_options={"content-type": file.content_type or "image/jpeg"}
+        )
+        if not upload_resp:
+            raise RuntimeError(f"Storage upload returned no response: {upload_resp!r}")
+
+        real_pct_value = None
+        if real_pct.strip():
+            try:
+                real_pct_value = float(real_pct.strip())
+            except ValueError:
+                pass
+
+        insert_resp = supabase.table("vision_reference_images").insert({
+            "category": category,
+            "storage_path": storage_path,
+            "real_pct": real_pct_value,
+            "description": description.strip() or None,
+            "created_by": operator["id"],
+        }).execute()
+
+        if not insert_resp.data:
+            raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
+
+        clear_reference_cache()
+        return {"status": "ok", "storage_path": storage_path, "id": insert_resp.data[0].get("id")}
+
+    except Exception as e:
+        print(f"[reference_capture failed] {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Échec de l'enregistrement : {type(e).__name__}: {e}")
