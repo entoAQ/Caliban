@@ -437,6 +437,8 @@ def require_role(min_role: str):
 @app.post("/azure-band-test")
 async def azure_band_test(
     file: UploadFile = File(...),
+    lot_number: str = Form(""),
+    real_pct: str = Form(""),
     operator: dict = Depends(require_role("qc")),
 ):
     client = get_azure_client()
@@ -461,4 +463,38 @@ async def azure_band_test(
     parsed = parse_band_response(text)
     parsed["inference_time_ms"] = elapsed_ms
     parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
+
+    # Recording is best-effort -- a write failure here should never hide
+    # the actual analysis result the operator is waiting on. lot_id stays
+    # null if the typed lot_number doesn't match a real lot; lot_number_text
+    # preserves exactly what was typed either way.
+    try:
+        lot_id = None
+        if lot_number.strip():
+            lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_number.strip()).limit(1).execute()
+            if lot_resp.data:
+                lot_id = lot_resp.data[0]["id"]
+
+        real_pct_value = None
+        if real_pct.strip():
+            try:
+                real_pct_value = float(real_pct.strip())
+            except ValueError:
+                pass
+
+        supabase.table("vision_band_estimates").insert({
+            "lot_id": lot_id,
+            "lot_number_text": lot_number.strip() or None,
+            "predicted_band": parsed.get("band"),
+            "confidence": parsed.get("confidence"),
+            "justification": parsed.get("justification"),
+            "raw_response": parsed.get("raw"),
+            "real_me_pct": real_pct_value,
+            "model": parsed["model"],
+            "inference_time_ms": elapsed_ms,
+            "created_by": operator["id"],
+        }).execute()
+    except Exception as e:
+        parsed["recording_error"] = str(e)
+
     return parsed
