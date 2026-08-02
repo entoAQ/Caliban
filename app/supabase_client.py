@@ -19,6 +19,16 @@ SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
+# Separate client dedicated to auth.get_user() calls specifically. Per
+# Supabase's own troubleshooting docs: auth functions like get_user()
+# can mutate a client's internal Authorization header, replacing its
+# service-role credentials with whatever user token was just validated.
+# Sharing one client between token validation and regular data queries
+# (the `supabase` client above, used everywhere else) risks exactly this
+# kind of state collision -- a real, documented cause of intermittent
+# "invalid token" failures, not something specific to any one token.
+_auth_client: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
 STORAGE_BUCKET = os.environ.get("SUPABASE_BUCKET", "inspection-images")
 
 
@@ -32,7 +42,7 @@ def get_current_operator(authorization: str = Header(...)):
     token = authorization.removeprefix("Bearer ").strip()
 
     try:
-        user_resp = supabase.auth.get_user(token)
+        user_resp = _auth_client.auth.get_user(token)
     except Exception:
         raise HTTPException(401, "Invalid or expired token")
 
