@@ -404,6 +404,25 @@ def get_azure_client():
     return _azure_client
 
 
+_component_test_ids = "__unset__"  # sentinel distinct from None, so a genuine "not found" isn't re-queried every request
+
+
+def get_me_pct_component_ids():
+    """ME% is never stored as its own test_results row -- confirmed
+    directly against real data, where a fully-tested lot had
+    me_organic_wt and bulk_density but no me_pct entry at all. SGSC
+    computes the percentage itself (me_organic_wt / bulk_density * 100),
+    same formula already used elsewhere in the app (PeriodTab). This
+    looks up the two real, stored component tests instead of searching
+    for a percentage that structurally doesn't exist as a row."""
+    global _component_test_ids
+    if _component_test_ids == "__unset__":
+        resp = supabase.table("test_definitions").select("id, code").in_("code", ["me_organic_wt", "bulk_density"]).execute()
+        ids = {row["code"]: row["id"] for row in (resp.data or [])}
+        _component_test_ids = (ids.get("me_organic_wt"), ids.get("bulk_density")) if ids else None
+    return _component_test_ids
+
+
 @app.post("/azure-detect")
 async def azure_detect(
     file: UploadFile = File(...),
@@ -603,9 +622,45 @@ async def azure_band_test(
                 lot_id = lot_resp.data[0]["id"]
 
         real_pct_value = None
-        if real_pct.strip():
+        real_pct_source = None
+
+        if lot_id:
+            # Real lot matched -- pull the authoritative lab values
+            # directly, rather than trust a manually re-typed duplicate
+            # of something already recorded elsewhere. If the lab result
+            # simply hasn't landed yet, this correctly stays null --
+            # exactly the "run this only once results exist" workflow.
+            #
+            # ME% is computed here, not looked up -- confirmed directly
+            # against real data that it's never stored as its own row,
+            # only its two components (me_organic_wt, bulk_density) are.
+            component_ids = get_me_pct_component_ids()
+            if component_ids and component_ids[0] and component_ids[1]:
+                wt_id, density_id = component_ids
+                comp_resp = (
+                    supabase.table("test_results")
+                    .select("result_value, test_id")
+                    .eq("lot_id", lot_id)
+                    .in_("test_id", [wt_id, density_id])
+                    .eq("is_superseded", False)
+                    .execute()
+                )
+                values = {row["test_id"]: row["result_value"] for row in (comp_resp.data or [])}
+                wt = values.get(wt_id)
+                density = values.get(density_id)
+                if wt is not None and density is not None and density > 0:
+                    real_pct_value = round((wt / density) * 100, 2)
+                    real_pct_source = "lot_lookup"
+                else:
+                    real_pct_source = "lot_matched_no_result_yet"
+        elif real_pct.strip():
+            # Training/reference modes, or a real-mode lot number that
+            # didn't match -- these have no lot to look anything up
+            # from, so a manually-entered known value is genuinely
+            # necessary here, not a workaround.
             try:
                 real_pct_value = float(real_pct.strip())
+                real_pct_source = "manual"
             except ValueError:
                 pass
 
@@ -635,6 +690,8 @@ async def azure_band_test(
             raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
 
         parsed["recorded_as"] = lot_text
+        parsed["real_pct_used"] = real_pct_value
+        parsed["real_pct_source"] = real_pct_source
         parsed["recorded_id"] = insert_resp.data[0].get("id")
     except Exception as e:
         parsed["recording_error"] = f"{type(e).__name__}: {e}"
