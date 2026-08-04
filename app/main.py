@@ -267,12 +267,6 @@ Important : mesure la densité par rapport à la surface couverte par l'échanti
 l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
 espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
 
-Important également : la MEO empile et se chevauche facilement, même dans un échantillon bien \
-étalé -- une partie de la matière reste cachée sous la surface visible. Si tu observes des \
-signes d'empilement, de relief ou de superposition plutôt qu'une couche unique et bien étalée, \
-considère que la quantité réelle de MEO est probablement plus élevée que ce que la surface \
-visible seule suggère, et penche vers une bande supérieure en conséquence.
-
 Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
 de densité, comme le ferait une personne qui regarde rapidement le plateau.
 
@@ -285,7 +279,18 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 # Manually bumped -- update this any time BAND_PROMPT changes meaningfully
 # (wording, band boundaries, new instructions). Human-readable label for
 # discussing results ("v1.2 was clearly better at the high end").
-CALIBAN_PROMPT_VERSION = "1.1"
+#
+# v1.2 (this version): removed the one-directional "if you see stacking,
+# lean toward a higher band" instruction from v1.1. That instruction had
+# no corresponding downward pull, and real samples almost never spread
+# into a perfectly flat single layer -- meaning it likely fired on most
+# photos, always in the same direction. Suspected root cause of a
+# consistent over-read, especially pronounced at the low end (1-3%),
+# where the narrow band width means even a small nudge crosses a
+# boundary. Deliberately isolated as the only change in this version,
+# so the next accuracy-by-version check actually tells us whether this
+# was the real cause.
+CALIBAN_PROMPT_VERSION = "1.2"
 
 # Computed automatically from the actual prompt text every time this
 # module loads -- guaranteed accurate even if CALIBAN_PROMPT_VERSION
