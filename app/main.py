@@ -267,6 +267,19 @@ Important : mesure la densité par rapport à la surface couverte par l'échanti
 l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
 espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
 
+Attention à ne pas confondre une prépupe avec de la MEO/frass. En approchant le stade de \
+prépupe, la larve fonce considérablement -- brun foncé à presque noir -- et peut, par sa \
+seule couleur, ressembler à un amas de frass. Une prépupe reste une larve normale du produit, \
+PAS une matière étrangère : avant de compter un élément foncé comme de la MEO, regarde sa \
+forme (silhouette allongée et segmentée d'une larve, souvent encore reconnaissable même très \
+foncée) plutôt que sa seule teinte.
+
+Ignore aussi les fragments minuscules -- poussière fine, résidu pulvérulent, grains isolés de \
+la taille d'un point -- qui ne forment pas un amas ou une particule clairement visible \
+individuellement. Seule une matière qui se distingue nettement à l'œil nu, comme le ferait un \
+inspecteur qui jette un coup d'œil rapide au plateau (pas un examen à la loupe), doit compter \
+dans l'estimation de densité.
+
 Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
 de densité, comme le ferait une personne qui regarde rapidement le plateau.
 
@@ -280,17 +293,33 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 # (wording, band boundaries, new instructions). Human-readable label for
 # discussing results ("v1.2 was clearly better at the high end").
 #
-# v1.2 (this version): removed the one-directional "if you see stacking,
-# lean toward a higher band" instruction from v1.1. That instruction had
-# no corresponding downward pull, and real samples almost never spread
-# into a perfectly flat single layer -- meaning it likely fired on most
+# v1.2: removed the one-directional "if you see stacking, lean toward a
+# higher band" instruction from v1.1. That instruction had no
+# corresponding downward pull, and real samples almost never spread into
+# a perfectly flat single layer -- meaning it likely fired on most
 # photos, always in the same direction. Suspected root cause of a
 # consistent over-read, especially pronounced at the low end (1-3%),
 # where the narrow band width means even a small nudge crosses a
-# boundary. Deliberately isolated as the only change in this version,
-# so the next accuracy-by-version check actually tells us whether this
-# was the real cause.
-CALIBAN_PROMPT_VERSION = "1.2"
+# boundary.
+#
+# v1.3 (this version): v1.2 did NOT fix the over-read -- checked against
+# vision_band_estimates for real (non-training) lots with a known lab
+# ME%: v1.1 over-estimated 12/12 real-lot samples (avg +3.6 band-midpoint
+# points over real ME%), v1.2 still over-estimated 24/32 (75%, avg +2.6),
+# frequently at "Élevée" confidence while wrong. Rather than add another
+# blind directional nudge (the exact mistake v1.2 just corrected for),
+# this version targets two specific, hypothesized causes instead:
+#   1. Prepupae darken to near-black as they mature and were plausibly
+#      being read as frass/MEO by color alone -- added a shape-over-color
+#      instruction to tell them apart.
+#   2. No prior instruction excluded fine dust/tiny fragments from the
+#      density impression -- added one, since the "impression visuelle
+#      globale" framing without a floor may have let dust inflate the
+#      apparent density.
+# Isolated together as one version bump since they're both aimed at the
+# same over-read symptom; if the next accuracy check still shows a
+# systematic over-read after this, they should be evaluated separately.
+CALIBAN_PROMPT_VERSION = "1.3"
 
 # Computed automatically from the actual prompt text every time this
 # module loads -- guaranteed accurate even if CALIBAN_PROMPT_VERSION
