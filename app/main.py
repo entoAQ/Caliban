@@ -14,6 +14,7 @@ Run locally:
   export POWER_AUTOMATE_API_KEY=... (any long random string you choose)
   uvicorn app.main:app --reload --port 8000
 """
+import asyncio
 import datetime
 import hashlib
 import os
@@ -90,7 +91,17 @@ def health():
         "started_at": STARTUP_TIME,
         "prompt_version": CALIBAN_PROMPT_VERSION,
         "prompt_hash": PROMPT_HASH,
+        "available_prompt_variants": list(BAND_PROMPT_VARIANTS.keys()),
     }
+
+
+# ── Browser-facing: which prompt variants exist right now ────────────
+# Lets the validation UI build its variant-selection checkboxes without
+# hardcoding the list -- adding a key to BAND_PROMPT_VARIANTS is enough
+# to make a new candidate selectable, no frontend deploy needed.
+@app.get("/prompt-variants")
+async def prompt_variants(operator: dict = Depends(get_current_operator)):
+    return {"variants": list(BAND_PROMPT_VARIANTS.keys()), "default": DEFAULT_PROMPT_VARIANT}
 
 
 # ── Browser-facing: capture a photo ──────────────────────────────────
@@ -258,7 +269,19 @@ serrées -- donne plutôt une impression qualitative (peu, modéré, abondant)."
 # for the same kind of holistic density impression a person forms
 # glancing at a tray, since that's the more plausible task for a general
 # vision model, not counting individual touching objects.
-BAND_PROMPT = """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
+#
+# A dict of label -> prompt text, not a single string -- lets several
+# candidate prompts be tested side by side against the exact same photo
+# in one /azure-band-test call (see `variants` param below), instead of
+# manually re-running the same capture once per candidate. Adding a new
+# candidate means adding a new key here; existing keys are never
+# rewritten in place, so old variants stay runnable for as long as
+# they're still useful for comparison. Retire a key by deleting it once
+# it's no longer worth calling -- its past results stay in
+# vision_band_estimates either way, keyed by the prompt_hash they were
+# actually produced with.
+BAND_PROMPT_VARIANTS = {
+    "1.3": """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
 (Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
 aussi appelé frass), pour estimer le niveau de contamination visible.
 
@@ -287,11 +310,17 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
-JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
+JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
+}
 
-# Manually bumped -- update this any time BAND_PROMPT changes meaningfully
-# (wording, band boundaries, new instructions). Human-readable label for
-# discussing results ("v1.2 was clearly better at the high end").
+# Which variant /health reports and which /azure-band-test runs when the
+# caller doesn't ask for a specific comparison set -- keeps single-variant
+# callers (the normal "Analyser avec Caliban" button) fully backward
+# compatible, at the same cost as before, with no behavior change unless
+# someone actively opts into comparing variants.
+#
+# History (winners get folded back in as the next default; see the
+# comment on BAND_PROMPT_VARIANTS above for how candidates are added):
 #
 # v1.2: removed the one-directional "if you see stacking, lean toward a
 # higher band" instruction from v1.1. That instruction had no
@@ -302,30 +331,37 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]"""
 # where the narrow band width means even a small nudge crosses a
 # boundary.
 #
-# v1.3 (this version): v1.2 did NOT fix the over-read -- checked against
+# v1.3: v1.2 did NOT fix the over-read -- checked against
 # vision_band_estimates for real (non-training) lots with a known lab
 # ME%: v1.1 over-estimated 12/12 real-lot samples (avg +3.6 band-midpoint
 # points over real ME%), v1.2 still over-estimated 24/32 (75%, avg +2.6),
 # frequently at "Élevée" confidence while wrong. Rather than add another
 # blind directional nudge (the exact mistake v1.2 just corrected for),
-# this version targets two specific, hypothesized causes instead:
-#   1. Prepupae darken to near-black as they mature and were plausibly
-#      being read as frass/MEO by color alone -- added a shape-over-color
-#      instruction to tell them apart.
-#   2. No prior instruction excluded fine dust/tiny fragments from the
-#      density impression -- added one, since the "impression visuelle
-#      globale" framing without a floor may have let dust inflate the
-#      apparent density.
-# Isolated together as one version bump since they're both aimed at the
-# same over-read symptom; if the next accuracy check still shows a
-# systematic over-read after this, they should be evaluated separately.
-CALIBAN_PROMPT_VERSION = "1.3"
+# this version targeted two specific, hypothesized causes instead:
+# prepupae plausibly read as frass/MEO by color alone (added a
+# shape-over-color instruction), and no prior instruction excluding fine
+# dust/tiny fragments from the density impression (added one). One day
+# of real-lot v1.3 results afterward: the over-read is gone, but it may
+# have overshot into an under-read (7/10 under, avg -1.3) -- small
+# sample, not yet acted on. This is exactly the kind of follow-up
+# BAND_PROMPT_VARIANTS exists for: add a v1.4 candidate alongside "1.3"
+# and compare them on the same photos before picking a new default,
+# rather than bumping the default again on an n=10 read.
+DEFAULT_PROMPT_VARIANT = "1.3"
 
 # Computed automatically from the actual prompt text every time this
-# module loads -- guaranteed accurate even if CALIBAN_PROMPT_VERSION
-# above is forgotten. This is the real, tamper-proof way to know
+# module loads -- guaranteed accurate even if a variant's label/text
+# ever drift out of sync. This is the real, tamper-proof way to know
 # whether two results actually came from the same prompt.
-PROMPT_HASH = hashlib.md5(BAND_PROMPT.encode("utf-8")).hexdigest()[:8]
+PROMPT_HASHES = {
+    label: hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
+    for label, text in BAND_PROMPT_VARIANTS.items()
+}
+
+# Kept as aliases (rather than rewriting /health and every caller) --
+# both point at whichever variant is current default.
+CALIBAN_PROMPT_VERSION = DEFAULT_PROMPT_VARIANT
+PROMPT_HASH = PROMPT_HASHES[DEFAULT_PROMPT_VARIANT]
 
 
 def parse_band_response(text):
@@ -588,8 +624,22 @@ async def azure_band_test(
     lot_number: str = Form(""),
     real_pct: str = Form(""),
     is_training: bool = Form(False),
+    variants: str = Form(""),
     operator: dict = Depends(require_role("qc")),
 ):
+    # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
+    # empty/omitted keeps the old single-call behavior (DEFAULT_PROMPT_VARIANT
+    # only), so existing callers see no change in behavior or cost unless
+    # they actively opt into a comparison.
+    requested_variants = [v.strip() for v in variants.split(",") if v.strip()] or [DEFAULT_PROMPT_VARIANT]
+    unknown = [v for v in requested_variants if v not in BAND_PROMPT_VARIANTS]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Variante(s) de prompt inconnue(s) : {', '.join(unknown)}. "
+                   f"Disponibles : {', '.join(BAND_PROMPT_VARIANTS)}.",
+        )
+
     client = get_azure_client()
     contents = await file.read()
     media_type = file.content_type or "image/jpeg"
@@ -599,53 +649,76 @@ async def azure_band_test(
     # alongside the new photo rather than asked to reason about density
     # in the abstract. Falls back to prompt-only (references empty) until
     # real reference photos are provided -- see reference_images/README.
-    content = [{"type": "text", "text": BAND_PROMPT}]
+    # Shared across every variant being compared: same references, same
+    # photo, only the instructions text differs between calls.
     references = get_reference_images("meo_density")
-    if references:
-        content.append({
-            "type": "text",
-            "text": "\n\nVoici des photos de référence avec leur pourcentage réel connu de "
-                    "MEO, pour calibrer ton estimation :",
-        })
-        for ref in references:
-            label = f"Référence -- {ref['real_pct']}% MEO réel"
-            if ref.get("description"):
-                label += f" ({ref['description']})"
-            content.append({"type": "text", "text": label + " :"})
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
-        content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
-    content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}})
 
-    start = time.time()
-    response = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        max_completion_tokens=200,
-        messages=[{"role": "user", "content": content}],
-    )
-    elapsed_ms = int((time.time() - start) * 1000)
-    text = response.choices[0].message.content or ""
-    parsed = parse_band_response(text)
-    parsed["inference_time_ms"] = elapsed_ms
-    parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
-    parsed["reference_count"] = len(references)
+    def call_variant(variant_label):
+        content = [{"type": "text", "text": BAND_PROMPT_VARIANTS[variant_label]}]
+        if references:
+            content.append({
+                "type": "text",
+                "text": "\n\nVoici des photos de référence avec leur pourcentage réel connu de "
+                        "MEO, pour calibrer ton estimation :",
+            })
+            for ref in references:
+                label = f"Référence -- {ref['real_pct']}% MEO réel"
+                if ref.get("description"):
+                    label += f" ({ref['description']})"
+                content.append({"type": "text", "text": label + " :"})
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
+            content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}})
 
-    # Recording is best-effort -- a write failure here should never hide
-    # the actual analysis result the operator is waiting on.
+        start = time.time()
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            max_completion_tokens=200,
+            messages=[{"role": "user", "content": content}],
+        )
+        elapsed_ms = int((time.time() - start) * 1000)
+        text = response.choices[0].message.content or ""
+        parsed = parse_band_response(text)
+        parsed["inference_time_ms"] = elapsed_ms
+        parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
+        parsed["reference_count"] = len(references)
+        parsed["prompt_version"] = variant_label
+        parsed["prompt_hash"] = PROMPT_HASHES[variant_label]
+        return parsed
+
+    # Each variant is an independent, blocking Azure call (chat.completions.create
+    # isn't awaitable, same as elsewhere in this file) -- run them concurrently
+    # on the default executor rather than one after another, so comparing N
+    # variants on one photo costs roughly one call's worth of wall-clock time,
+    # not N.
+    loop = asyncio.get_running_loop()
+    parsed_results = list(await asyncio.gather(*[
+        loop.run_in_executor(None, call_variant, v) for v in requested_variants
+    ]))
+
+    # Lot/real-value lookup happens ONCE per photo, not once per variant --
+    # every variant is being tested against the exact same physical sample,
+    # so there's exactly one lot/real-value answer to attach to all of them.
+    # Best-effort: a lookup failure here should never hide the actual
+    # analysis results the operator is waiting on.
+    lot_id = None
+    lot_text = lot_number.strip() or None
+    real_pct_value = None
+    real_pct_source = None
+    lookup_error = None
     try:
-        lot_id = None
-        lot_text = lot_number.strip() or None
-
         if is_training and not lot_text:
             # Auto-ID rather than require a human to invent and track one
-            # by hand -- self-organizing by predicted band, ready to
-            # extend with a detected material type once that exists
-            # (e.g. plastic detection), not just contamination level.
-            slug = band_slug(parsed.get("band"))
+            # by hand -- self-organizing by the FIRST requested variant's
+            # predicted band. That's now just a grouping label, not a
+            # precise description: with multiple variants, the same
+            # physical sample can land in different bands per variant --
+            # prompt_version on each row is the real way to tell them apart.
+            slug = band_slug(parsed_results[0].get("band"))
             count_resp = (
                 supabase.table("vision_band_estimates")
                 .select("id", count="exact")
                 .eq("is_training", True)
-                .eq("predicted_band", parsed.get("band"))
                 .execute()
             )
             seq = (count_resp.count or 0) + 1
@@ -654,9 +727,6 @@ async def azure_band_test(
             lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_text).limit(1).execute()
             if lot_resp.data:
                 lot_id = lot_resp.data[0]["id"]
-
-        real_pct_value = None
-        real_pct_source = None
 
         if lot_id:
             # Real lot matched -- pull the authoritative lab values
@@ -697,41 +767,56 @@ async def azure_band_test(
                 real_pct_source = "manual"
             except ValueError:
                 pass
+    except Exception as e:
+        lookup_error = f"{type(e).__name__}: {e}"
+        print(f"[vision_band_estimates lot/real-pct lookup failed] {lookup_error}")
 
-        insert_resp = supabase.table("vision_band_estimates").insert({
-            "lot_id": lot_id,
-            "lot_number_text": lot_text,
-            "predicted_band": parsed.get("band"),
-            "confidence": parsed.get("confidence"),
-            "justification": parsed.get("justification"),
-            "raw_response": parsed.get("raw"),
-            "real_me_pct": real_pct_value,
-            "model": parsed["model"],
-            "inference_time_ms": elapsed_ms,
-            "created_by": operator["id"],
-            "is_training": is_training,
-            "prompt_version": CALIBAN_PROMPT_VERSION,
-            "prompt_hash": PROMPT_HASH,
-            "reference_count": len(references),
-        }).execute()
-
-        # Defensive: some client/API combinations can return a response
-        # with no error raised but also no actual row -- treat "insert
-        # claimed success but nothing came back" as a real failure to
-        # surface, rather than silently report success when the table
-        # stayed untouched.
-        if not insert_resp.data:
-            raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
-
+    # Recording is per-variant and best-effort -- one variant's insert
+    # failing shouldn't hide the others' results.
+    for parsed in parsed_results:
         parsed["recorded_as"] = lot_text
         parsed["real_pct_used"] = real_pct_value
         parsed["real_pct_source"] = real_pct_source
-        parsed["recorded_id"] = insert_resp.data[0].get("id")
-    except Exception as e:
-        parsed["recording_error"] = f"{type(e).__name__}: {e}"
-        print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
+        if lookup_error:
+            parsed["recording_error"] = lookup_error
+            continue
+        try:
+            insert_resp = supabase.table("vision_band_estimates").insert({
+                "lot_id": lot_id,
+                "lot_number_text": lot_text,
+                "predicted_band": parsed.get("band"),
+                "confidence": parsed.get("confidence"),
+                "justification": parsed.get("justification"),
+                "raw_response": parsed.get("raw"),
+                "real_me_pct": real_pct_value,
+                "model": parsed["model"],
+                "inference_time_ms": parsed["inference_time_ms"],
+                "created_by": operator["id"],
+                "is_training": is_training,
+                "prompt_version": parsed["prompt_version"],
+                "prompt_hash": parsed["prompt_hash"],
+                "reference_count": parsed["reference_count"],
+            }).execute()
 
-    return parsed
+            # Defensive: some client/API combinations can return a response
+            # with no error raised but also no actual row -- treat "insert
+            # claimed success but nothing came back" as a real failure to
+            # surface, rather than silently report success when the table
+            # stayed untouched.
+            if not insert_resp.data:
+                raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
+
+            parsed["recorded_id"] = insert_resp.data[0].get("id")
+        except Exception as e:
+            parsed["recording_error"] = f"{type(e).__name__}: {e}"
+            print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
+
+    return {
+        "results": parsed_results,
+        "recorded_as": lot_text,
+        "real_pct_used": real_pct_value,
+        "real_pct_source": real_pct_source,
+    }
 
 
 @app.post("/reference-capture")
