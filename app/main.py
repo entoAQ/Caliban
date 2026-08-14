@@ -357,6 +357,68 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
+
+    # Candidate -- NOT the default yet. Built on "1.4" (not "1.3"), adding
+    # one more paragraph, so running "1.3"/"1.4"/"1.5" together isolates
+    # two separate questions: did the low-end anchor (1.4) help, and does
+    # the crushed-larvae color gate (this) help further on top of it.
+    #
+    # Targets a failure mode flagged directly by the operator, not mined
+    # from vision_band_estimates: crushed/broken larvae fragments --
+    # routine handling damage, not contamination -- were suspected as the
+    # single biggest driver of over-reads. BSF larvae flesh is pale/cream
+    # when exposed by breakage, distinctly different from frass/MEO's
+    # brown-to-black color, so this is phrased as a color gate rather than
+    # a blanket "ignore small pieces" rule: a pale fragment reads as
+    # broken larva (ignored), a dark one still counts. That also
+    # subsumes the "just ignore small fragments" framing the operator
+    # raised as an alternative -- most crushed-larvae debris is pale, so
+    # the color gate ignores it too, but without also blinding the model
+    # to small dark MEO fragments the way a pure size rule would.
+    "1.5": """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
+(Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
+aussi appelé frass), pour estimer le niveau de contamination visible.
+
+Important : mesure la densité par rapport à la surface couverte par l'échantillon lui-même \
+(larves + MEO), PAS par rapport à l'ensemble de la photo. Le plateau contient souvent de \
+l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
+espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
+
+Attention à la zone basse de l'échelle en particulier : à peine quelques petites taches ou \
+grains isolés et bien espacés sur l'échantillon correspond typiquement à <1% ou 1-3%, PAS à \
+3-7%. Réserve 3-7% aux cas où la matière étrangère forme un ensemble de taches ou d'amas \
+visibles sur une bonne partie de la surface de l'échantillon -- pas seulement quelques points \
+épars ici et là.
+
+Attention à ne pas confondre une prépupe avec de la MEO/frass. En approchant le stade de \
+prépupe, la larve fonce considérablement -- brun foncé à presque noir -- et peut, par sa \
+seule couleur, ressembler à un amas de frass. Une prépupe reste une larve normale du produit, \
+PAS une matière étrangère : avant de compter un élément foncé comme de la MEO, regarde sa \
+forme (silhouette allongée et segmentée d'une larve, souvent encore reconnaissable même très \
+foncée) plutôt que sa seule teinte.
+
+Attention aussi aux fragments de larves brisées ou écrasées -- fréquents lors de la \
+manipulation, et normaux, PAS de la contamination. Une larve cassée expose une chair pâle, \
+blanchâtre ou crème, nettement différente de la couleur brun-à-noir du frass et de la MEO. \
+Avant de compter un petit fragment comme de la MEO, vérifie sa couleur : un fragment pâle ou \
+de la même teinte que les larves intactes est probablement un morceau de larve brisée, pas de \
+la matière étrangère. Ne compte un petit fragment comme de la MEO que s'il est clairement plus \
+foncé (brun à noir) que la chair d'une larve.
+
+Ignore aussi les fragments minuscules -- poussière fine, résidu pulvérulent, grains isolés de \
+la taille d'un point -- qui ne forment pas un amas ou une particule clairement visible \
+individuellement. Seule une matière qui se distingue nettement à l'œil nu, comme le ferait un \
+inspecteur qui jette un coup d'œil rapide au plateau (pas un examen à la loupe), doit compter \
+dans l'estimation de densité.
+
+Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
+de densité, comme le ferait une personne qui regarde rapidement le plateau.
+
+Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
+
+BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 }
 
 # Which variant /health reports and which /azure-band-test runs when the
@@ -402,6 +464,16 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # yet the default -- run it alongside "1.3" (see `variants` param on
 # /azure-band-test) and let the comparison table actually decide before
 # promoting it.
+#
+# "1.5": added before any 1.4 comparison data came back, on a
+# failure mode the operator identified directly from handling the
+# physical product rather than from vision_band_estimates: crushed/
+# broken larvae fragments (routine handling damage) suspected as the
+# single biggest driver of over-reads. Built on "1.4" rather than "1.3"
+# so running all three together separates two questions at once -- did
+# the low-end anchor help, and does the crushed-larvae color gate help
+# further on top of it. Also not the default; same "prove it in the
+# comparison table before promoting" rule applies.
 DEFAULT_PROMPT_VARIANT = "1.3"
 
 # Computed automatically from the actual prompt text every time this
