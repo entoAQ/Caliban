@@ -311,6 +311,52 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
+
+    # Candidate -- NOT the default yet (see DEFAULT_PROMPT_VARIANT below).
+    # Identical to "1.3" except for one added paragraph anchoring the
+    # low end of the scale, targeting a specific pattern in a week of
+    # real v1.3 traffic: real values under ~2% (1.42%, 1.62%, 1.74%,
+    # 1.79%, 1.91%) repeatedly got read as "3-7%" instead of "<1%"/"1-3%"
+    # -- a jump straight past the correct band rather than a
+    # boundary-adjacent miss. Deliberately scoped to that specific
+    # <1%/1-3% vs 3-7% boundary, not a blanket "lean lower" nudge (the
+    # same one-directional mistake v1.2 already corrected for once).
+    "1.4": """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
+(Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
+aussi appelé frass), pour estimer le niveau de contamination visible.
+
+Important : mesure la densité par rapport à la surface couverte par l'échantillon lui-même \
+(larves + MEO), PAS par rapport à l'ensemble de la photo. Le plateau contient souvent de \
+l'espace vide autour de l'échantillon pour permettre un étalement en une seule couche -- cet \
+espace vide ne doit jamais être compté comme faisant partie d'un échantillon "propre".
+
+Attention à la zone basse de l'échelle en particulier : à peine quelques petites taches ou \
+grains isolés et bien espacés sur l'échantillon correspond typiquement à <1% ou 1-3%, PAS à \
+3-7%. Réserve 3-7% aux cas où la matière étrangère forme un ensemble de taches ou d'amas \
+visibles sur une bonne partie de la surface de l'échantillon -- pas seulement quelques points \
+épars ici et là.
+
+Attention à ne pas confondre une prépupe avec de la MEO/frass. En approchant le stade de \
+prépupe, la larve fonce considérablement -- brun foncé à presque noir -- et peut, par sa \
+seule couleur, ressembler à un amas de frass. Une prépupe reste une larve normale du produit, \
+PAS une matière étrangère : avant de compter un élément foncé comme de la MEO, regarde sa \
+forme (silhouette allongée et segmentée d'une larve, souvent encore reconnaissable même très \
+foncée) plutôt que sa seule teinte.
+
+Ignore aussi les fragments minuscules -- poussière fine, résidu pulvérulent, grains isolés de \
+la taille d'un point -- qui ne forment pas un amas ou une particule clairement visible \
+individuellement. Seule une matière qui se distingue nettement à l'œil nu, comme le ferait un \
+inspecteur qui jette un coup d'œil rapide au plateau (pas un examen à la loupe), doit compter \
+dans l'estimation de densité.
+
+Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
+de densité, comme le ferait une personne qui regarde rapidement le plateau.
+
+Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
+
+BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 }
 
 # Which variant /health reports and which /azure-band-test runs when the
@@ -340,13 +386,22 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # this version targeted two specific, hypothesized causes instead:
 # prepupae plausibly read as frass/MEO by color alone (added a
 # shape-over-color instruction), and no prior instruction excluding fine
-# dust/tiny fragments from the density impression (added one). One day
-# of real-lot v1.3 results afterward: the over-read is gone, but it may
-# have overshot into an under-read (7/10 under, avg -1.3) -- small
-# sample, not yet acted on. This is exactly the kind of follow-up
-# BAND_PROMPT_VARIANTS exists for: add a v1.4 candidate alongside "1.3"
-# and compare them on the same photos before picking a new default,
-# rather than bumping the default again on an n=10 read.
+# dust/tiny fragments from the density impression (added one).
+#
+# A full week of real-lot v1.3 results, split by batch, turned out to be
+# genuinely unstable rather than settled in either direction: 2026-08-10
+# (n=11) averaged -1.3 (73% under), 2026-08-13 (n=12) averaged +2.76
+# (75% over -- almost exactly the pre-v1.3 severity). Several lots were
+# also tested twice on the same day with wildly different bands on the
+# same real value (e.g. one lot read as both "1-3%" and "7-10%"),
+# pointing at real call-to-call non-determinism on top of whatever the
+# wording says -- see CALIBAN_SEED below, added alongside this candidate
+# specifically to reduce that. Within the 08-13 over-reads, a clear
+# pattern held: real values under ~2% were repeatedly read as "3-7%"
+# instead of "<1%"/"1-3%". "1.4" targets that one boundary; it is NOT
+# yet the default -- run it alongside "1.3" (see `variants` param on
+# /azure-band-test) and let the comparison table actually decide before
+# promoting it.
 DEFAULT_PROMPT_VARIANT = "1.3"
 
 # Computed automatically from the actual prompt text every time this
@@ -450,12 +505,24 @@ async def claude_detect(
 # available here), so treat the first real call as the first real test
 # of this specific piece, same caveat as the SharePoint integration.
 
-from openai import AzureOpenAI
+from openai import AzureOpenAI, BadRequestError
 
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_DEPLOYMENT = os.environ.get("AZURE_OPENAI_DEPLOYMENT")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+
+# Fixed, arbitrary seed for /azure-band-test's calls -- paired with
+# temperature=0 (see call_variant), this is meant to make repeat calls on
+# the same photo reproducible. Added after a week of real v1.3 traffic
+# showed the same lot tested twice on the same day sometimes came back
+# with wildly different bands (e.g. one lot read as both "1-3%" and
+# "7-10%") -- sampling randomness (the default temperature is 1.0) is a
+# plausible contributor to that, independent of anything the prompt text
+# says. Azure/OpenAI's seed support is "best-effort," not a hard
+# guarantee of identical output -- this reduces variance, it doesn't
+# eliminate it.
+CALIBAN_SEED = 20260101
 
 _azure_client = None
 
@@ -671,11 +738,26 @@ async def azure_band_test(
         content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}})
 
         start = time.time()
-        response = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            max_completion_tokens=200,
-            messages=[{"role": "user", "content": content}],
-        )
+        try:
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                max_completion_tokens=200,
+                temperature=0,
+                seed=CALIBAN_SEED,
+                messages=[{"role": "user", "content": content}],
+            )
+        except BadRequestError:
+            # Some deployed models (newer reasoning-tier ones especially)
+            # reject sampling params like temperature/seed outright rather
+            # than ignore them -- retry once without them instead of
+            # taking down the whole comparison over one incompatible
+            # variant. Whether this path is ever actually hit depends on
+            # whatever model AZURE_OPENAI_DEPLOYMENT currently points at.
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                max_completion_tokens=200,
+                messages=[{"role": "user", "content": content}],
+            )
         elapsed_ms = int((time.time() - start) * 1000)
         text = response.choices[0].message.content or ""
         parsed = parse_band_response(text)
