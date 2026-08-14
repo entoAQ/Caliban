@@ -310,6 +310,9 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_ecrases, poussiere, \
+densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
+photo précise, pas une liste générique]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 
     # Candidate -- NOT the default yet (see DEFAULT_PROMPT_VARIANT below).
@@ -356,6 +359,9 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_ecrases, poussiere, \
+densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
+photo précise, pas une liste générique]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 
     # Candidate -- NOT the default yet. Built on "1.4" (not "1.3"), adding
@@ -418,6 +424,9 @@ Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
 
 BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_ecrases, poussiere, \
+densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
+photo précise, pas une liste générique]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 }
 
@@ -497,14 +506,57 @@ def parse_band_response(text):
     model didn't follow the exact format, rather than silently dropping
     a real answer that just wasn't formatted as expected."""
     band = confidence = justification = None
+    factors = None
     for line in text.strip().splitlines():
         if line.upper().startswith("BANDE:"):
             band = line.split(":", 1)[1].strip()
         elif line.upper().startswith("CONFIANCE:"):
             confidence = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("FACTEURS:"):
+            raw_factors = line.split(":", 1)[1].strip()
+            factors = [f.strip() for f in raw_factors.split(",") if f.strip()] or None
         elif line.upper().startswith("JUSTIFICATION:"):
             justification = line.split(":", 1)[1].strip()
-    return {"band": band, "confidence": confidence, "justification": justification, "raw": text}
+    return {
+        "band": band,
+        "confidence": confidence,
+        "factors": factors,
+        "justification": justification,
+        "raw": text,
+    }
+
+
+# Band labels are categorical, not numeric -- outlier-flagging and any
+# future "how far off were we" math needs a number to compare against
+# real_me_pct, so this maps each band to its midpoint. ">14%" has no
+# real upper bound; 17 is an arbitrary anchor (a modest extrapolation
+# past the 10-14% midpoint of 12), not a measured value -- only used to
+# decide "is this worth a human look", never displayed as a real number.
+BAND_MIDPOINTS = {
+    "<1%": 0.5,
+    "1-3%": 2.0,
+    "3-7%": 5.0,
+    "7-10%": 8.5,
+    "10-14%": 12.0,
+    ">14%": 17.0,
+}
+
+# How far a predicted band's midpoint has to be from the known real ME%
+# before a row gets auto-flagged for human review. 3 points is about one
+# band-width -- wide enough that boundary-adjacent misses (which are
+# somewhat expected/tolerable) don't flood the review queue, narrow
+# enough to still catch the "way off" cases that are actually worth
+# looking at a photo for.
+OUTLIER_THRESHOLD_PTS = 3.0
+
+
+def is_outlier(band, real_pct_value):
+    if real_pct_value is None:
+        return False
+    midpoint = BAND_MIDPOINTS.get((band or "").strip())
+    if midpoint is None:
+        return False
+    return abs(midpoint - real_pct_value) >= OUTLIER_THRESHOLD_PTS
 
 
 @app.post("/claude-detect")
@@ -716,6 +768,14 @@ def band_slug(band):
 REFERENCE_BUCKET = "vision-reference-images"
 _reference_cache = None
 
+# Separate bucket from REFERENCE_BUCKET on purpose -- these are routine
+# production captures (high volume, no curation), not the small,
+# hand-picked few-shot set. Keeping them apart means a retention/cleanup
+# policy can be applied to this bucket later without touching reference
+# photos. Must be created once in the Supabase dashboard (Storage --
+# same private visibility as vision-reference-images) before this is used.
+BAND_TEST_CAPTURE_BUCKET = "vision-band-test-captures"
+
 
 def clear_reference_cache():
     """Called after a new reference photo is captured, so it's picked up
@@ -783,6 +843,26 @@ async def azure_band_test(
     contents = await file.read()
     media_type = file.content_type or "image/jpeg"
     b64_image = base64.b64encode(contents).decode("utf-8")
+
+    # Save the actual captured photo, once per call (same photo for every
+    # variant being compared) -- best-effort, since a storage hiccup
+    # should never block the analysis the operator is waiting on. Without
+    # this, an outlier row is just a number and a sentence forever; with
+    # it, any flagged row can actually be looked at later to see what the
+    # model saw. Root motivation: "we need a concrete reason instead of
+    # guessing" for the recurring over-read investigation.
+    capture_storage_path = None
+    try:
+        ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+        capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
+        upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+            capture_storage_path, contents, file_options={"content-type": media_type}
+        )
+        if not upload_resp:
+            capture_storage_path = None
+    except Exception as e:
+        capture_storage_path = None
+        print(f"[band-test capture upload failed] {type(e).__name__}: {e}")
 
     # Few-shot grounding: real reference photos with known values, judged
     # alongside the new photo rather than asked to reason about density
@@ -931,6 +1011,8 @@ async def azure_band_test(
         parsed["recorded_as"] = lot_text
         parsed["real_pct_used"] = real_pct_value
         parsed["real_pct_source"] = real_pct_source
+        parsed["error_flagged"] = is_outlier(parsed.get("band"), real_pct_value)
+        parsed["storage_path"] = capture_storage_path
         if lookup_error:
             parsed["recording_error"] = lookup_error
             continue
@@ -940,9 +1022,12 @@ async def azure_band_test(
                 "lot_number_text": lot_text,
                 "predicted_band": parsed.get("band"),
                 "confidence": parsed.get("confidence"),
+                "factors": parsed.get("factors"),
                 "justification": parsed.get("justification"),
                 "raw_response": parsed.get("raw"),
                 "real_me_pct": real_pct_value,
+                "storage_path": capture_storage_path,
+                "error_flagged": parsed["error_flagged"],
                 "model": parsed["model"],
                 "inference_time_ms": parsed["inference_time_ms"],
                 "created_by": operator["id"],
