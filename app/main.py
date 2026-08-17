@@ -99,6 +99,10 @@ def health():
         # ago you ran the deploy command.
         "band_test_capture_bucket": BAND_TEST_CAPTURE_BUCKET,
         "outlier_threshold_pts": OUTLIER_THRESHOLD_PTS,
+        # Confirms the per-variant reference-photo change deployed. Should
+        # list only 1.x -- 2.x runs prompt-only by design, and seeing a 2.x
+        # label here means something reintroduced references silently.
+        "variants_using_references": sorted(VARIANTS_USING_REFERENCES),
     }
 
 
@@ -646,6 +650,25 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # than sending no references at all.
 DEFAULT_PROMPT_VARIANT = "2.0"
 
+# Which variants get the few-shot reference photos attached. Deliberately
+# an explicit opt-IN list rather than an opt-out one, so any future variant
+# defaults to prompt-only unless someone consciously decides otherwise.
+#
+# 2.x runs without references on purpose, and this is not the same thing as
+# the reference table happening to be empty. Making it a property of the
+# variant means the behaviour is pinned to the prompt_version recorded on
+# every row: if reference photos are added back to vision_reference_images
+# later, 2.0 does NOT silently change what it sends, and nobody has to
+# explain a step-change in results that no prompt_hash accounts for.
+#
+# Reasons for dropping them here: there's no clean-larvae source available
+# to shoot a new set against the dish; the scatter-method set that exists
+# would be actively misleading grounding for dish photos; results were
+# reasonable without references under the scatter method anyway; and
+# reference photos are harder to control under the fill-and-level method,
+# where what's visible is a levelled surface rather than the whole sample.
+VARIANTS_USING_REFERENCES = {"1.3", "1.4", "1.5"}
+
 # Computed automatically from the actual prompt text every time this
 # module loads -- guaranteed accurate even if a variant's label/text
 # ever drift out of sync. This is the real, tamper-proof way to know
@@ -1027,21 +1050,33 @@ async def azure_band_test(
 
     # Few-shot grounding: real reference photos with known values, judged
     # alongside the new photo rather than asked to reason about density
-    # in the abstract. Falls back to prompt-only (references empty) until
-    # real reference photos are provided -- see reference_images/README.
-    # Shared across every variant being compared: same references, same
-    # photo, only the instructions text differs between calls.
-    references = get_reference_images("meo_density")
+    # in the abstract. Shared across every variant that opts into them (see
+    # VARIANTS_USING_REFERENCES): same references, same photo, only the
+    # instructions text differs between calls.
+    #
+    # Loaded lazily -- if none of the requested variants use references
+    # (the normal case now that 2.x is default), skip the Supabase Storage
+    # round-trip that get_reference_images does on a cold container rather
+    # than downloading and base64-encoding files nothing will send.
+    references = (
+        get_reference_images("meo_density")
+        if any(v in VARIANTS_USING_REFERENCES for v in requested_variants)
+        else []
+    )
 
     def call_variant(variant_label):
         content = [{"type": "text", "text": BAND_PROMPT_VARIANTS[variant_label]}]
-        if references:
+        # Per-variant, not per-request: comparing a reference-using variant
+        # against a prompt-only one on the same photo has to send different
+        # payloads, or the comparison isn't measuring what it claims to.
+        variant_refs = references if variant_label in VARIANTS_USING_REFERENCES else []
+        if variant_refs:
             content.append({
                 "type": "text",
                 "text": "\n\nVoici des photos de référence avec leur pourcentage réel connu de "
                         "MEO, pour calibrer ton estimation :",
             })
-            for ref in references:
+            for ref in variant_refs:
                 label = f"Référence -- {ref['real_pct']}% MEO réel"
                 if ref.get("description"):
                     label += f" ({ref['description']})"
@@ -1076,7 +1111,7 @@ async def azure_band_test(
         parsed = parse_band_response(text)
         parsed["inference_time_ms"] = elapsed_ms
         parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
-        parsed["reference_count"] = len(references)
+        parsed["reference_count"] = len(variant_refs)
         parsed["prompt_version"] = variant_label
         parsed["prompt_hash"] = PROMPT_HASHES[variant_label]
         return parsed
