@@ -92,6 +92,13 @@ def health():
         "prompt_version": CALIBAN_PROMPT_VERSION,
         "prompt_hash": PROMPT_HASH,
         "available_prompt_variants": list(BAND_PROMPT_VARIANTS.keys()),
+        # Presence of these two confirms the capture-storage/structured-
+        # factors/outlier-flagging deploy actually took effect, same way
+        # available_prompt_variants confirms a prompt deploy -- check
+        # this against local main.py rather than guessing from how long
+        # ago you ran the deploy command.
+        "band_test_capture_bucket": BAND_TEST_CAPTURE_BUCKET,
+        "outlier_threshold_pts": OUTLIER_THRESHOLD_PTS,
     }
 
 
@@ -428,6 +435,141 @@ FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_
 densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
 photo précise, pas une liste générique]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
+
+    # First variant written for a NEW PHYSICAL METHOD rather than as a
+    # wording refinement: the sample is now presented in a filled, levelled
+    # circular dish (~16 cm) instead of scattered in a single layer on an
+    # open tray. That makes the denominator a constant -- the dish interior
+    # -- instead of something the model had to infer for itself, so 1.3's
+    # empty-space paragraph is not merely reworded here: it described an
+    # arrangement that no longer exists, and a false premise is worse than
+    # no premise. Also adds an explicit instruction to ignore everything
+    # outside the dish (bench, rim, shadow, calibration tile), since the new
+    # framing deliberately puts a colour/scale reference in the frame.
+    #
+    # Carries forward 1.5's crushed-larvae colour gate: it came from the
+    # operator handling the physical product, not from mining
+    # vision_band_estimates, and nothing about the presentation change
+    # affects whether it's true. Deliberately does NOT carry 1.4's low-end
+    # anchor -- that one was fitted to a specific pattern in old-rig data
+    # (real values under ~2% reading as 3-7%) and may not survive the method
+    # change; "2.1" exists to test exactly that rather than assume it.
+    #
+    # Note what is deliberately ABSENT: any suggestion that material may be
+    # hidden below the visible surface. That is literally true of a levelled
+    # dish, and saying it is precisely the one-directional upward nudge that
+    # v1.1 carried and v1.2 was written to remove. The surface-vs-bulk bias
+    # is systematic and gets absorbed by calibration against lab ME%;
+    # telling the model to guess upward would stack variance on top of it.
+    #
+    # Size language ("de la taille d'un point", "à l'œil nu") is left as-is
+    # on purpose: the camera has NOT changed yet, so apparent scale is
+    # unchanged. When the rig moves to the Pi camera, these become wrong --
+    # they are implicitly tied to pixels-per-mm. Re-anchor them to physical
+    # units (the calibration tile carries a mm scale) in a 3.x variant at
+    # that point, rather than editing this one in place.
+    "2.0": """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
+(Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
+aussi appelé frass), pour estimer le niveau de contamination visible.
+
+L'échantillon est présenté dans un plat circulaire qui a été rempli puis arasé, de sorte que \
+la surface visible est plane et couvre entièrement l'intérieur du plat. Estime quelle \
+proportion de cette surface est occupée par de la MEO plutôt que par des larves.
+
+Ignore complètement tout ce qui se trouve à l'extérieur du plat -- le comptoir, le rebord du \
+plat lui-même, son ombre, ainsi que toute carte ou mire de référence pouvant apparaître dans \
+l'image. Rien de cela ne fait partie de l'échantillon. Évalue uniquement l'intérieur du plat.
+
+Attention à ne pas confondre une prépupe avec de la MEO/frass. En approchant le stade de \
+prépupe, la larve fonce considérablement -- brun foncé à presque noir -- et peut, par sa \
+seule couleur, ressembler à un amas de frass. Une prépupe reste une larve normale du produit, \
+PAS une matière étrangère : avant de compter un élément foncé comme de la MEO, regarde sa \
+forme (silhouette allongée et segmentée d'une larve, souvent encore reconnaissable même très \
+foncée) plutôt que sa seule teinte.
+
+Attention aussi aux fragments de larves brisées ou écrasées -- fréquents lors de la \
+manipulation, et normaux, PAS de la contamination. Une larve cassée expose une chair pâle, \
+blanchâtre ou crème, nettement différente de la couleur brun-à-noir du frass et de la MEO. \
+Avant de compter un petit fragment comme de la MEO, vérifie sa couleur : un fragment pâle ou \
+de la même teinte que les larves intactes est probablement un morceau de larve brisée, pas de \
+la matière étrangère. Ne compte un petit fragment comme de la MEO que s'il est clairement plus \
+foncé (brun à noir) que la chair d'une larve.
+
+Ignore aussi les fragments minuscules -- poussière fine, résidu pulvérulent, grains isolés de \
+la taille d'un point -- qui ne forment pas un amas ou une particule clairement visible \
+individuellement. Seule une matière qui se distingue nettement à l'œil nu, comme le ferait un \
+inspecteur qui jette un coup d'œil rapide au plat (pas un examen à la loupe), doit compter \
+dans l'estimation de densité.
+
+Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
+de densité, comme le ferait une personne qui regarde rapidement le plat.
+
+Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
+
+BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_ecrases, poussiere, \
+densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
+photo précise, pas une liste générique]
+JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
+
+    # Candidate -- NOT the default. Identical to "2.0" except for the
+    # low-end anchor paragraph carried over from "1.4". That instruction was
+    # fitted to old-rig, scatter-method data, so whether it still earns its
+    # place under the dish method is an open question rather than a settled
+    # one. Run "2.0" and "2.1" together on the same capture (they cost about
+    # one call's wall-clock time between them, see the asyncio.gather below)
+    # and let the comparison table decide, same rule as every candidate
+    # before it.
+    "2.1": """Tu examines une photo d'un échantillon de larves de mouche soldat noire \
+(Hermetia illucens) mélangées à de la MEO (matières étrangères organiques, résidu d'élevage \
+aussi appelé frass), pour estimer le niveau de contamination visible.
+
+L'échantillon est présenté dans un plat circulaire qui a été rempli puis arasé, de sorte que \
+la surface visible est plane et couvre entièrement l'intérieur du plat. Estime quelle \
+proportion de cette surface est occupée par de la MEO plutôt que par des larves.
+
+Ignore complètement tout ce qui se trouve à l'extérieur du plat -- le comptoir, le rebord du \
+plat lui-même, son ombre, ainsi que toute carte ou mire de référence pouvant apparaître dans \
+l'image. Rien de cela ne fait partie de l'échantillon. Évalue uniquement l'intérieur du plat.
+
+Attention à la zone basse de l'échelle en particulier : à peine quelques petites taches ou \
+grains isolés et bien espacés sur la surface correspond typiquement à <1% ou 1-3%, PAS à \
+3-7%. Réserve 3-7% aux cas où la matière étrangère forme un ensemble de taches ou d'amas \
+visibles sur une bonne partie de la surface -- pas seulement quelques points épars ici et là.
+
+Attention à ne pas confondre une prépupe avec de la MEO/frass. En approchant le stade de \
+prépupe, la larve fonce considérablement -- brun foncé à presque noir -- et peut, par sa \
+seule couleur, ressembler à un amas de frass. Une prépupe reste une larve normale du produit, \
+PAS une matière étrangère : avant de compter un élément foncé comme de la MEO, regarde sa \
+forme (silhouette allongée et segmentée d'une larve, souvent encore reconnaissable même très \
+foncée) plutôt que sa seule teinte.
+
+Attention aussi aux fragments de larves brisées ou écrasées -- fréquents lors de la \
+manipulation, et normaux, PAS de la contamination. Une larve cassée expose une chair pâle, \
+blanchâtre ou crème, nettement différente de la couleur brun-à-noir du frass et de la MEO. \
+Avant de compter un petit fragment comme de la MEO, vérifie sa couleur : un fragment pâle ou \
+de la même teinte que les larves intactes est probablement un morceau de larve brisée, pas de \
+la matière étrangère. Ne compte un petit fragment comme de la MEO que s'il est clairement plus \
+foncé (brun à noir) que la chair d'une larve.
+
+Ignore aussi les fragments minuscules -- poussière fine, résidu pulvérulent, grains isolés de \
+la taille d'un point -- qui ne forment pas un amas ou une particule clairement visible \
+individuellement. Seule une matière qui se distingue nettement à l'œil nu, comme le ferait un \
+inspecteur qui jette un coup d'œil rapide au plat (pas un examen à la loupe), doit compter \
+dans l'estimation de densité.
+
+Ne tente PAS de compter les particules individuelles -- donne une impression visuelle globale \
+de densité, comme le ferait une personne qui regarde rapidement le plat.
+
+Réponds EXACTEMENT selon ce format, rien d'autre avant ou après :
+
+BANDE: [une seule valeur parmi : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [liste séparée par virgules, uniquement parmi : prepupes, fragments_ecrases, poussiere, \
+densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix de bande sur cette \
+photo précise, pas une liste générique]
+JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 }
 
 # Which variant /health reports and which /azure-band-test runs when the
@@ -483,7 +625,26 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # the low-end anchor help, and does the crushed-larvae color gate help
 # further on top of it. Also not the default; same "prove it in the
 # comparison table before promoting" rule applies.
-DEFAULT_PROMPT_VARIANT = "1.3"
+#
+# v2.0: promoted straight to default WITHOUT a comparison against 1.3,
+# which is a deliberate exception to the rule above rather than an
+# oversight. The sample presentation changed physically -- filled and
+# levelled circular dish instead of a scattered single layer -- and 1.3
+# through 1.5 all open by describing empty tray space around the sample
+# to justify how the denominator should be chosen. That arrangement no
+# longer exists, so running 1.3 against a dish photo isn't a fair
+# comparison, it's a wrong answer produced from a false premise. There is
+# no meaningful A/B to run; the comparisons that matter from here are
+# among the 2.x variants.
+#
+# The 1.x keys stay in the dict so existing vision_band_estimates rows
+# remain interpretable against the prompt_hash that actually produced
+# them. Note also that the few-shot reference photos in
+# vision_reference_images were captured with the old scatter method --
+# they need re-shooting on the dish before they help rather than hurt,
+# since grounding a dish photo against scatter-method references is worse
+# than sending no references at all.
+DEFAULT_PROMPT_VARIANT = "2.0"
 
 # Computed automatically from the actual prompt text every time this
 # module loads -- guaranteed accurate even if a variant's label/text
