@@ -59,21 +59,30 @@ def _start(controls):
     return picam2
 
 
-def measure():
+def measure(ev=0.0):
     """Let the camera decide, then record what it decided.
 
     Run this once with the rig framed on a filled dish under the lighting you
     intend to keep. Re-run it only if the lighting or geometry changes -- and
     if you do re-run it, understand that images captured before and after are
     no longer strictly comparable.
+
+    `ev` biases the result in photographic stops: -1.0 halves the exposure,
+    +1.0 doubles it. Useful when the auto-exposure meters a scene whose
+    average is not what matters -- but reach for it sparingly. If something
+    bright in frame is clipping, it is usually better to make that thing
+    darker than to underexpose the dish, which is the subject.
     """
     picam2 = _start({"AeEnable": True, "AwbEnable": True})
     metadata = picam2.capture_metadata()
     picam2.stop()
     picam2.close()
 
+    exposure = int(metadata["ExposureTime"] * (2.0 ** ev))
+
     settings = {
-        "exposure_time": int(metadata["ExposureTime"]),
+        "exposure_time": exposure,
+        "ev_bias": ev,
         "analogue_gain": float(metadata["AnalogueGain"]),
         "colour_gains": [float(g) for g in metadata["ColourGains"]],
         "measured_at": datetime.now().isoformat(timespec="seconds"),
@@ -93,6 +102,53 @@ def measure():
             "The scene is underlit. Add light and re-measure -- you want this\n"
             "near 1.0 for the cleanest image the sensor can give."
         )
+
+
+def sample(region):
+    """Report what a region contains, without changing anything.
+
+    For finding the right --region for `whitebalance`. Guessing at regions by
+    running whitebalance itself would rewrite the settings on every attempt,
+    each guess building on the last one's correction -- so this exists purely
+    to look.
+    """
+    if not SETTINGS_FILE.exists():
+        sys.exit(f"No settings at {SETTINGS_FILE}. Run 'measure' first.")
+
+    settings = json.loads(SETTINGS_FILE.read_text())
+    picam2 = _start(
+        {
+            "AeEnable": False,
+            "ExposureTime": settings["exposure_time"],
+            "AnalogueGain": settings["analogue_gain"],
+            "AwbEnable": False,
+            "ColourGains": tuple(settings["colour_gains"]),
+        }
+    )
+    frame = picam2.capture_array()
+    picam2.stop()
+    picam2.close()
+
+    h, w = frame.shape[:2]
+    fx0, fy0, fx1, fy1 = region
+    x0, x1 = int(w * fx0), int(w * fx1)
+    y0, y1 = int(h * fy0), int(h * fy1)
+    patch = frame[y0:y1, x0:x1].astype(float)
+    r, g, b = (patch[:, :, i].mean() for i in range(3))
+
+    print(f"Region   {region}  =  pixels x {x0}-{x1}, y {y0}-{y1}")
+    print(f"Mean     R={r:.0f} G={g:.0f} B={b:.0f}   peak {patch.max():.0f}/255")
+
+    spread = max(r, g, b) - min(r, g, b)
+    if patch.max() >= 250:
+        print("\nCLIPPED -- too bright to use as a reference.")
+    elif max(r, g, b) < 60:
+        print("\nToo dark -- this is not the patch.")
+    elif spread > 60:
+        print(f"\nStrongly coloured (spread {spread:.0f}). Probably the cardboard\n"
+              "or the dish rather than a neutral patch.")
+    else:
+        print(f"\nUsable. Spread {spread:.0f} -- whitebalance will drive this toward 0.")
 
 
 def whitebalance(region):
@@ -242,6 +298,36 @@ def whitebalance(region):
     print(f"\nWritten to {SETTINGS_FILE}")
 
 
+def setcrop(region):
+    """Record the crop applied to saved captures.
+
+    A fixed crop rather than finding the dish in each frame. The box holds the
+    dish in one place, so the dish is in one place -- and a constant is
+    trustworthy in a way that a detector is not: circle-finding fails
+    occasionally and silently, and a mangled frame in the middle of a corpus
+    is worse than no crop at all.
+
+    Trimming the background is worth doing. Those pixels are irrelevant to the
+    estimate, they survive into whatever the vision model is sent, and after
+    downscaling they cost resolution that would otherwise land on the sample.
+
+    Only saved captures are cropped. `sample` and `whitebalance` still see the
+    whole sensor frame, so the reference patch can sit outside the crop and
+    keep working.
+    """
+    if not SETTINGS_FILE.exists():
+        sys.exit(f"No settings at {SETTINGS_FILE}. Run 'measure' first.")
+    settings = json.loads(SETTINGS_FILE.read_text())
+    settings["crop"] = list(region)
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+    w = int(RESOLUTION[0] * (region[2] - region[0]))
+    h = int(RESOLUTION[1] * (region[3] - region[1]))
+    print(f"Crop set to {region}  ->  {w}x{h} px")
+    print("\nLeave the dish rim visible: the prompt asks the model to judge "
+          "only\ninside the dish, which it can only do if it can see the edge.")
+
+
 def capture(lot_number, band):
     """Shoot one frame with the locked settings."""
     if not SETTINGS_FILE.exists():
@@ -261,7 +347,22 @@ def capture(lot_number, band):
     OUTPUT_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = OUTPUT_DIR / f"{lot_number}_{stamp}_{band}.jpg"
-    picam2.capture_file(str(path))
+
+    crop = settings.get("crop")
+    if crop:
+        from PIL import Image
+
+        frame = picam2.capture_array()
+        h, w = frame.shape[:2]
+        x0, x1 = int(w * crop[0]), int(w * crop[2])
+        y0, y1 = int(h * crop[1]), int(h * crop[3])
+        # Quality 95 rather than the default: this image is the measurement,
+        # and JPEG artefacts land hardest on exactly the fine dark detail
+        # being judged.
+        Image.fromarray(frame[y0:y1, x0:x1]).save(str(path), quality=95)
+    else:
+        picam2.capture_file(str(path))
+
     picam2.stop()
     picam2.close()
 
@@ -273,7 +374,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("measure", help="settle on auto and record the values")
+    mea = sub.add_parser("measure", help="settle on auto and record the values")
+    mea.add_argument(
+        "--ev",
+        type=float,
+        default=0.0,
+        help="exposure bias in stops; -1 halves, +1 doubles (default: 0)",
+    )
+    smp = sub.add_parser("sample", help="report what a region contains (changes nothing)")
+    smp.add_argument("--region", required=True, help="x0,y0,x1,y1 as fractions of the frame")
+
+    crp = sub.add_parser("setcrop", help="set the crop applied to saved captures")
+    crp.add_argument("--region", required=True, help="x0,y0,x1,y1 as fractions of the frame")
+
     wb = sub.add_parser(
         "whitebalance", help="cancel the IR cast against the paper in frame"
     )
@@ -299,13 +412,21 @@ def main():
     )
 
     args = parser.parse_args()
-    if args.command == "measure":
-        measure()
-    elif args.command == "whitebalance":
+
+    def parsed_region():
         region = tuple(float(v) for v in args.region.split(","))
         if len(region) != 4:
             sys.exit("--region needs four comma-separated fractions: x0,y0,x1,y1")
-        whitebalance(region)
+        return region
+
+    if args.command == "measure":
+        measure(args.ev)
+    elif args.command == "sample":
+        sample(parsed_region())
+    elif args.command == "setcrop":
+        setcrop(parsed_region())
+    elif args.command == "whitebalance":
+        whitebalance(parsed_region())
     else:
         capture(args.lot_number, args.band)
 
