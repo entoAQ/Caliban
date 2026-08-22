@@ -42,6 +42,14 @@ TRAINING_FOLDER = os.environ.get("SHAREPOINT_TRAINING_FOLDER", "TrainingPhotos")
 SCREENING_FOLDER = os.environ.get("SHAREPOINT_SCREENING_FOLDER", "ScreeningPhotos")
 POWER_AUTOMATE_API_KEY = os.environ.get("POWER_AUTOMATE_API_KEY")
 
+# Deliberately a separate secret from POWER_AUTOMATE_API_KEY rather than
+# reusing it. The rig is physically accessible hardware sitting on a plant
+# floor; Power Automate is a cloud tenant. Sharing one key would mean that
+# rotating it after someone walks off with a Raspberry Pi also breaks the
+# Power Automate integration, which is exactly the coupling you do not want
+# during an incident.
+RIG_API_KEY = os.environ.get("RIG_API_KEY")
+
 app = FastAPI(title="Contamination Screening Inference API")
 
 # Restrict to your actual frontend origin in production
@@ -78,6 +86,20 @@ def verify_power_automate_key(x_api_key: str = Header(None)):
     Supabase session token. A shared secret, checked via a header, is
     the simplest correct mechanism for a single trusted automated caller."""
     if not POWER_AUTOMATE_API_KEY or x_api_key != POWER_AUTOMATE_API_KEY:
+        raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
+    return True
+
+
+def verify_rig_key(x_api_key: str = Header(None)):
+    """Auth for the bench rig, which is a device rather than an operator.
+
+    Same shared-secret shape as verify_power_automate_key and for the same
+    reason -- the Pi has no Supabase session to present and never will. Note
+    what this deliberately does not grant: the rig can claim and complete
+    capture commands, and nothing else. It cannot run an analysis, read a
+    lot, or reach any of the operator-facing endpoints. A camera should be
+    able to act as a camera."""
+    if not RIG_API_KEY or x_api_key != RIG_API_KEY:
         raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
     return True
 
@@ -1304,3 +1326,116 @@ async def reference_capture(
     except Exception as e:
         print(f"[reference_capture failed] {type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail=f"Échec de l'enregistrement : {type(e).__name__}: {e}")
+
+
+# --- Bench rig capture queue -------------------------------------------------
+#
+# Three endpoints, all device-authenticated, that let the Pi ask for work and
+# report back. The browser never talks to the Pi and the Pi never talks to
+# Supabase; each side reaches the one place both can reach.
+#
+# Rig images go in the band-test bucket under a rig/ prefix rather than a
+# bucket of their own, purely so there is nothing extra to create by hand
+# before this works. It does mean an analysed rig photo is stored twice --
+# once here as the untouched original, once by azure_band_test when the
+# browser submits it. That is a few hundred kilobytes and the original being
+# preserved separately is arguably worth having.
+
+
+@app.get("/capture-commands/next")
+def capture_commands_next(_: bool = Depends(verify_rig_key)):
+    """Claim the oldest pending capture command, or report there is none.
+
+    Returns {"command": null} rather than 404 when the queue is empty: the
+    poller hits this every few seconds forever, and an empty queue is the
+    normal case, not an error. Logging it as one would bury any real failure
+    in noise."""
+    try:
+        resp = supabase.rpc("claim_capture_command", {}).execute()
+    except Exception as e:
+        print(f"[capture_commands_next failed] {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Échec de la file : {type(e).__name__}")
+
+    data = resp.data
+    if isinstance(data, list):
+        data = data[0] if data else None
+    if not data or not data.get("id"):
+        return {"command": None}
+
+    return {
+        "command": {
+            "id": data["id"],
+            "lot_id": data.get("lot_id"),
+            "lot_number": data.get("lot_number"),
+        }
+    }
+
+
+@app.post("/capture-commands/{command_id}/complete")
+async def capture_commands_complete(
+    command_id: str,
+    file: UploadFile = File(...),
+    ir_file: UploadFile = File(None),
+    _: bool = Depends(verify_rig_key),
+):
+    """Store the captured frames and mark the command done.
+
+    The IR frame is optional -- the rig runs perfectly well with the IR
+    boards unattached, and a visible-only capture is a complete result rather
+    than a degraded one.
+
+    Storage first, row second, and the row only if storage succeeded. The
+    reverse order would leave commands marked done that point at images which
+    do not exist, and the operator would be told their photo was ready."""
+
+    async def _store(upload, band):
+        contents = await upload.read()
+        ext = os.path.splitext(upload.filename or "")[1] or ".jpg"
+        path = f"rig/{command_id}_{band}{ext}"
+        resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+            path,
+            contents,
+            file_options={"content-type": upload.content_type or "image/jpeg"},
+        )
+        if not resp:
+            raise RuntimeError(f"Storage upload returned no response: {resp!r}")
+        return path
+
+    try:
+        image_path = await _store(file, "visible")
+        ir_path = await _store(ir_file, "ir") if ir_file is not None else None
+
+        update_resp = supabase.table("capture_commands").update({
+            "status": "done",
+            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "image_path": image_path,
+            "ir_image_path": ir_path,
+        }).eq("id", command_id).execute()
+
+        if not update_resp.data:
+            raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
+
+        return {"status": "ok", "image_path": image_path, "ir_image_path": ir_path}
+
+    except Exception as e:
+        print(f"[capture_commands_complete failed] {command_id}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Échec de l'envoi : {type(e).__name__}: {e}")
+
+
+@app.post("/capture-commands/{command_id}/fail")
+def capture_commands_fail(
+    command_id: str,
+    error: str = Form(""),
+    _: bool = Depends(verify_rig_key),
+):
+    """Record that a capture failed, so the operator is told rather than left
+    watching a spinner until the stale-claim timeout eventually fires."""
+    try:
+        supabase.table("capture_commands").update({
+            "status": "failed",
+            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "error": error[:1000] or "Erreur inconnue",
+        }).eq("id", command_id).execute()
+    except Exception as e:
+        print(f"[capture_commands_fail failed] {command_id}: {type(e).__name__}: {e}")
+    return {"status": "ok"}

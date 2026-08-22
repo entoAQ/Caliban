@@ -1,0 +1,35 @@
+[Unit]
+Description=Caliban bench rig capture poller
+# Wants= rather than Requires=: if the network is not up yet the poller
+# handles it -- it retries forever by design. Refusing to start would turn a
+# transient Wi-Fi delay at boot into a rig that stays down until someone
+# notices.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ttownshend
+WorkingDirectory=/home/ttownshend
+
+# Kept out of this file so the unit can live in git without the key in it.
+# Create /etc/caliban-rig.env containing:
+#     CALIBAN_URL=https://your-caliban-host
+#     RIG_API_KEY=...
+#     RIG_CAPTURE_IR=0
+# then: sudo chmod 600 /etc/caliban-rig.env
+EnvironmentFile=/etc/caliban-rig.env
+
+ExecStart=/usr/bin/python3 /home/ttownshend/poller.py
+
+# The poller is meant to run forever. If it dies for any reason -- a camera
+# that wedged, an unhandled error, an OOM -- bring it back rather than
+# leaving the rig silently unresponsive to button presses.
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
