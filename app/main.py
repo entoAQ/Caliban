@@ -1342,6 +1342,78 @@ async def reference_capture(
 # preserved separately is arguably worth having.
 
 
+@app.post("/band-estimates/backfill")
+def band_estimates_backfill(
+    lot_number: str = Form(...),
+    operator: dict = Depends(require_role("qc")),
+):
+    """Attach the lab ME% to estimates recorded before it existed.
+
+    The bench workflow runs photo-first: separating and weighing the MEO
+    destroys the levelled dish, so the picture has to be taken before the
+    number can be known. Every rig estimate is therefore recorded with a null
+    real_pct and stays that way until the operator saves their results.
+
+    Call this after saving. It recomputes ME% the same way azure_band_test
+    does -- from the two stored components, since ME% is never a row of its
+    own -- and fills in any estimate for this lot still missing it.
+
+    Deliberately server-side rather than letting the browser write the number
+    it happens to have on screen: the value that gets recorded should be the
+    one actually saved to test_results, not a parallel copy that could differ
+    from it. Same reasoning as the lookup in azure_band_test.
+    """
+    lot_text = lot_number.strip()
+    if not lot_text:
+        raise HTTPException(status_code=400, detail="Numéro de lot requis.")
+
+    try:
+        lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_text).limit(1).execute()
+        if not lot_resp.data:
+            return {"status": "ok", "updated": 0, "reason": "lot_not_found"}
+        lot_id = lot_resp.data[0]["id"]
+
+        component_ids = get_me_pct_component_ids()
+        if not component_ids or not component_ids[0] or not component_ids[1]:
+            return {"status": "ok", "updated": 0, "reason": "component_ids_unavailable"}
+
+        wt_id, density_id = component_ids
+        comp_resp = (
+            supabase.table("test_results")
+            .select("result_value, test_id")
+            .eq("lot_id", lot_id)
+            .in_("test_id", [wt_id, density_id])
+            .eq("is_superseded", False)
+            .execute()
+        )
+        values = {row["test_id"]: row["result_value"] for row in (comp_resp.data or [])}
+        wt, density = values.get(wt_id), values.get(density_id)
+        if wt is None or density is None or not density > 0:
+            return {"status": "ok", "updated": 0, "reason": "no_result_yet"}
+
+        real_pct_value = round((wt / density) * 100, 2)
+
+        # Only rows still missing the value. An estimate that already has one
+        # is never rewritten -- if the lab result is later corrected, that is
+        # a decision for a human, not a silent side effect of pressing save.
+        update_resp = (
+            supabase.table("vision_band_estimates")
+            .update({"real_pct": real_pct_value, "real_pct_source": "lot_lookup"})
+            .eq("lot_id", lot_id)
+            .is_("real_pct", "null")
+            .execute()
+        )
+        return {
+            "status": "ok",
+            "updated": len(update_resp.data or []),
+            "real_pct": real_pct_value,
+        }
+
+    except Exception as e:
+        print(f"[band_estimates_backfill failed] {lot_text}: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Échec du rattrapage : {type(e).__name__}")
+
+
 @app.get("/capture-commands/next")
 def capture_commands_next(_: bool = Depends(verify_rig_key)):
     """Claim the oldest pending capture command, or report there is none.
