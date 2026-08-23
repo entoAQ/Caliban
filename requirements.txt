@@ -25,3 +25,9 @@ msal>=1.31.0
 
 # --- Azure AI Foundry (GPT-4o) vision test endpoint ---
 openai>=1.54.0
+
+# --- Image rotation for repeat-and-average estimates ---
+# Only used to rotate the capture before re-asking. Manylinux wheels, so
+# unlike the cryptography case above there is no compiled-binary/glibc
+# mismatch to worry about on App Service's runtime.
+pillow>=10.0.0

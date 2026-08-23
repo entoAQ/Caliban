@@ -17,8 +17,10 @@ Run locally:
 import asyncio
 import datetime
 import hashlib
+import io
 import os
 import re
+import statistics
 import time
 import uuid
 
@@ -788,6 +790,29 @@ BAND_MIDPOINTS = {
 OUTLIER_THRESHOLD_PTS = 3.0
 
 
+def band_for_pct(pct):
+    """The band a percentage falls in -- the inverse of BAND_MIDPOINTS.
+
+    Used to report a band alongside an averaged estimate. Derived from the
+    boundaries rather than by picking the nearest midpoint, because the
+    midpoints are not evenly spaced and nearest-midpoint would put 7.4% in
+    "7-10%" while 6.9% landed in "3-7%" correctly but 7.6% did not.
+    """
+    if pct is None:
+        return None
+    if pct < 1:
+        return "<1%"
+    if pct < 3:
+        return "1-3%"
+    if pct < 7:
+        return "3-7%"
+    if pct < 10:
+        return "7-10%"
+    if pct < 14:
+        return "10-14%"
+    return ">14%"
+
+
 def is_outlier(band, real_pct_value):
     if real_pct_value is None:
         return False
@@ -1062,6 +1087,7 @@ async def azure_band_test(
     real_pct: str = Form(""),
     is_training: bool = Form(False),
     variants: str = Form(""),
+    repeats: int = Form(1),
     operator: dict = Depends(require_role("qc")),
 ):
     # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
@@ -1081,6 +1107,36 @@ async def azure_band_test(
     contents = await file.read()
     media_type = file.content_type or "image/jpeg"
     b64_image = base64.b64encode(contents).decode("utf-8")
+
+    # Repeats are ROTATIONS, not re-samples.
+    #
+    # The calls below run at temperature 0 with a fixed seed, deliberately, so
+    # asking the same question twice returns the same answer -- re-sampling
+    # would measure nothing. Rotating the photo genuinely changes the input
+    # while leaving the correct answer untouched, because a scattered tray has
+    # no orientation. The estimates are therefore independent, and their spread
+    # measures sensitivity to how the material happened to lie rather than
+    # sampling noise.
+    #
+    # Averaging them also breaks the band quantisation. One call can only
+    # answer to the nearest band; four answering 3-7, 3-7, 7-10, 3-7 average to
+    # 5.9%, a finer distinction than any single call can express. That matters
+    # most exactly where the prompt is weakest -- the 3-7 / 7-10 boundary.
+    repeats = max(1, min(4, repeats))
+    rotations = {1: [0], 2: [0, 180], 3: [0, 90, 180], 4: [0, 90, 180, 270]}[repeats]
+
+    rotated_b64 = {0: b64_image}
+    if repeats > 1:
+        from PIL import Image
+
+        original = Image.open(io.BytesIO(contents)).convert("RGB")
+        for angle in rotations[1:]:
+            buf = io.BytesIO()
+            # expand=True keeps the whole frame at 90/270 on a non-square
+            # image; cropping instead would hand each rotation a different
+            # sample, which is precisely what must not vary.
+            original.rotate(angle, expand=True).save(buf, format="JPEG", quality=95)
+            rotated_b64[angle] = base64.b64encode(buf.getvalue()).decode("utf-8")
 
     # Save the actual captured photo, once per call (same photo for every
     # variant being compared) -- best-effort, since a storage hiccup
@@ -1118,7 +1174,7 @@ async def azure_band_test(
         else []
     )
 
-    def call_variant(variant_label):
+    def call_variant(variant_label, angle=0):
         content = [{"type": "text", "text": BAND_PROMPT_VARIANTS[variant_label]}]
         # Per-variant, not per-request: comparing a reference-using variant
         # against a prompt-only one on the same photo has to send different
@@ -1137,7 +1193,7 @@ async def azure_band_test(
                 content.append({"type": "text", "text": label + " :"})
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
             content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}})
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{rotated_b64[angle]}"}})
 
         start = time.time()
         try:
@@ -1168,7 +1224,50 @@ async def azure_band_test(
         parsed["reference_count"] = len(variant_refs)
         parsed["prompt_version"] = variant_label
         parsed["prompt_hash"] = PROMPT_HASHES[variant_label]
+        parsed["rotation"] = angle
         return parsed
+
+
+    def aggregate(variant_label, runs):
+        """Collapse a variant's rotations into one result.
+
+        Reports a continuous estimate alongside the band, because the mean of
+        several band midpoints carries information no single band can. The
+        reported band is then whichever one that mean falls in -- so band and
+        estimate never contradict each other, which picking the modal band
+        separately could allow.
+
+        Spread is the honest uncertainty here: it is how much the answer moved
+        when nothing about the sample changed. A tight spread earns confidence
+        in a way the model's own self-reported confidence does not.
+        """
+        primary = next((r for r in runs if r.get("rotation") == 0), runs[0])
+        midpoints = [BAND_MIDPOINTS[r["band"]] for r in runs
+                     if r.get("band") in BAND_MIDPOINTS]
+
+        if len(runs) == 1 or not midpoints:
+            primary["repeat_count"] = len(runs)
+            primary["estimate_pct"] = midpoints[0] if midpoints else None
+            primary["estimate_spread"] = 0.0 if midpoints else None
+            primary["repeat_bands"] = [r.get("band") for r in runs]
+            return primary
+
+        mean = sum(midpoints) / len(midpoints)
+        spread = statistics.pstdev(midpoints) if len(midpoints) > 1 else 0.0
+
+        result = dict(primary)
+        result["band"] = band_for_pct(mean)
+        result["estimate_pct"] = round(mean, 2)
+        result["estimate_spread"] = round(spread, 2)
+        result["repeat_count"] = len(runs)
+        result["repeat_bands"] = [r.get("band") for r in runs]
+        # Wall clock, not the sum: the rotations run concurrently.
+        result["inference_time_ms"] = max(r.get("inference_time_ms", 0) for r in runs)
+        result["justification"] = (
+            f"[{len(runs)} rotations : {', '.join(str(r.get('band')) for r in runs)}"
+            f" -> {mean:.1f}%] " + (primary.get("justification") or "")
+        )
+        return result
 
     # Each variant is an independent, blocking Azure call (chat.completions.create
     # isn't awaitable, same as elsewhere in this file) -- run them concurrently
@@ -1176,9 +1275,17 @@ async def azure_band_test(
     # variants on one photo costs roughly one call's worth of wall-clock time,
     # not N.
     loop = asyncio.get_running_loop()
-    parsed_results = list(await asyncio.gather(*[
-        loop.run_in_executor(None, call_variant, v) for v in requested_variants
+    jobs = [(v, a) for v in requested_variants for a in rotations]
+    all_runs = list(await asyncio.gather(*[
+        loop.run_in_executor(None, call_variant, v, a) for v, a in jobs
     ]))
+
+    # Back to one result per variant: the rotations are the same question
+    # asked several ways, not separate findings.
+    by_variant = {v: [] for v in requested_variants}
+    for (variant_label, _), run in zip(jobs, all_runs):
+        by_variant[variant_label].append(run)
+    parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
 
     # Lot/real-value lookup happens ONCE per photo, not once per variant --
     # every variant is being tested against the exact same physical sample,
@@ -1285,6 +1392,9 @@ async def azure_band_test(
                 "prompt_version": parsed["prompt_version"],
                 "prompt_hash": parsed["prompt_hash"],
                 "reference_count": parsed["reference_count"],
+                "repeat_count": parsed.get("repeat_count", 1),
+                "estimate_pct": parsed.get("estimate_pct"),
+                "estimate_spread": parsed.get("estimate_spread"),
             }).execute()
 
             # Defensive: some client/API combinations can return a response
