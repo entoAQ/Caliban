@@ -125,6 +125,9 @@ def health():
         # list only 1.x -- 2.x runs prompt-only by design, and seeing a 2.x
         # label here means something reintroduced references silently.
         "variants_using_references": sorted(VARIANTS_USING_REFERENCES),
+        # Present in BAND_PROMPT_VARIANTS and still runnable when named
+        # explicitly, but hidden from the variant picker.
+        "archived_prompt_variants": sorted(ARCHIVED_PROMPT_VARIANTS),
     }
 
 
@@ -134,7 +137,14 @@ def health():
 # to make a new candidate selectable, no frontend deploy needed.
 @app.get("/prompt-variants")
 async def prompt_variants(operator: dict = Depends(get_current_operator)):
-    return {"variants": list(BAND_PROMPT_VARIANTS.keys()), "default": DEFAULT_PROMPT_VARIANT}
+    # Archived variants are omitted here but still accepted by
+    # /azure-band-test, so re-scoring an old image against the prompt that
+    # produced it stays possible without putting retired candidates in front
+    # of an operator choosing what to run today.
+    return {
+        "variants": [v for v in BAND_PROMPT_VARIANTS if v not in ARCHIVED_PROMPT_VARIANTS],
+        "default": DEFAULT_PROMPT_VARIANT,
+    }
 
 
 # ── Browser-facing: capture a photo ──────────────────────────────────
@@ -670,7 +680,29 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # they need re-shooting on the dish before they help rather than hurt,
 # since grounding a dish photo against scatter-method references is worse
 # than sending no references at all.
-DEFAULT_PROMPT_VARIANT = "2.0"
+# REVERTED to 1.5 on 2026-08-23. The dish method was abandoned: it proved less
+# accurate than scattering onto a tray, which is what the rig now photographs.
+# So 2.0's premise -- a circular dish filled and levelled to a flat surface --
+# describes an arrangement that no longer exists, and running it against a tray
+# photo is the same false-premise mistake, just pointed the other way.
+#
+# 1.5 was the best performer on scatter and is performing well again. Its known
+# weakness is the 3-7% / 7-10% boundary, which may be the reference photos
+# rather than the prompt -- they are due to be re-shot on the new rig.
+#
+# A 3.0 written for the blue tray under even LED lighting is the intended
+# successor, once there are frames from that setup to write it against.
+DEFAULT_PROMPT_VARIANT = "1.5"
+
+# Hidden from the variant picker without being deleted. Archived variants stay
+# runnable when named explicitly, so a past image can still be re-scored
+# against the prompt that produced it -- but they no longer clutter a UI whose
+# job is now comparing candidates for the current method.
+#
+# 1.3 and 1.4 are superseded by 1.5 on the same method. 2.0 and 2.1 describe
+# the filled dish and are archived with it; if that method is ever revived they
+# are ready and unmodified.
+ARCHIVED_PROMPT_VARIANTS = {"1.3", "1.4", "2.0", "2.1"}
 
 # Which variants get the few-shot reference photos attached. Deliberately
 # an explicit opt-IN list rather than an opt-out one, so any future variant
