@@ -1342,6 +1342,61 @@ async def reference_capture(
 # preserved separately is arguably worth having.
 
 
+@app.post("/band-estimates/real-pct")
+def band_estimates_set_real_pct(
+    ids: str = Form(...),
+    real_pct: str = Form(...),
+    operator: dict = Depends(require_role("qc")),
+):
+    """Record the measured ME% against estimates already taken.
+
+    Deliberately after the fact. Entering the known value before the photo
+    lets it colour everything downstream -- how the sample gets spread, which
+    frame looks representative enough to keep, whether a surprising band gets
+    re-shot "because something went wrong". None of that is dishonesty; it is
+    ordinary anchoring, and it quietly turns a calibration set into a record
+    of what the operator expected. Photograph, estimate, then measure.
+
+    Takes several ids because one capture produces one row per prompt variant
+    compared. They are the same physical sample, so they share the same
+    measured value.
+
+    error_flagged is recomputed per row rather than copied: each variant
+    predicted its own band, so each has its own disagreement with the truth.
+    """
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
+    if not id_list:
+        raise HTTPException(status_code=400, detail="Aucun identifiant fourni.")
+    try:
+        value = float(real_pct.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Valeur invalide : {real_pct!r}")
+
+    updated = 0
+    try:
+        for estimate_id in id_list:
+            row_resp = (
+                supabase.table("vision_band_estimates")
+                .select("predicted_band")
+                .eq("id", estimate_id)
+                .limit(1)
+                .execute()
+            )
+            if not row_resp.data:
+                continue
+            band = row_resp.data[0].get("predicted_band")
+            upd = supabase.table("vision_band_estimates").update({
+                "real_me_pct": value,
+                "error_flagged": is_outlier(band, value),
+            }).eq("id", estimate_id).execute()
+            updated += len(upd.data or [])
+
+        return {"status": "ok", "updated": updated, "real_pct": value}
+    except Exception as e:
+        print(f"[band_estimates_set_real_pct failed] {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Échec : {type(e).__name__}: {e}")
+
+
 @app.post("/band-estimates/backfill")
 def band_estimates_backfill(
     lot_number: str = Form(...),

@@ -80,13 +80,21 @@ def measure(ev=0.0):
 
     exposure = int(metadata["ExposureTime"] * (2.0 ** ev))
 
-    settings = {
+    # Update rather than replace. The crop is a property of the rig's geometry,
+    # not of its exposure, and silently discarding it here meant re-measuring
+    # after a lighting change also un-cropped every capture -- a change nobody
+    # asked for, in a different subsystem, with no message to say so.
+    settings = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    settings.update({
         "exposure_time": exposure,
         "ev_bias": ev,
         "analogue_gain": float(metadata["AnalogueGain"]),
         "colour_gains": [float(g) for g in metadata["ColourGains"]],
         "measured_at": datetime.now().isoformat(timespec="seconds"),
-    }
+    })
+    # The colour gains just came from AWB, so any previous correction is gone.
+    # Drop the timestamp with it rather than leave one that claims otherwise.
+    settings.pop("white_balanced_at", None)
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
     print(json.dumps(settings, indent=2))
