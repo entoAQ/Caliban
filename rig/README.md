@@ -59,7 +59,7 @@ top-left.
 |---|---|
 | `sudo systemctl stop caliban-rig` | **Before any manual camera work.** Only one process can hold the camera. |
 | `sudo systemctl start caliban-rig` | Restart so the SGSC button works again. |
-| `sudo systemctl restart caliban-rig` | After copying a new `capture.py` or `poller.py`. |
+| `~/caliban/rig/update.sh` | Pull the latest code and restart the poller. This is how code reaches the Pi. |
 | `systemctl status caliban-rig` | Is it running. |
 | `journalctl -u caliban-rig -f` | Watch it live. Ctrl+C stops following, not the service. |
 | `cat ~/rig_settings.json` | Current calibration. |
@@ -69,8 +69,62 @@ top-left.
 | Command | What it does |
 |---|---|
 | `ssh ttownshend@172.20.202.99` | Connect. |
-| `scp rig\capture.py ttownshend@172.20.202.99:~/` | Push an updated script. |
+| `git push` | How code reaches the Pi — push here, then run `update.sh` there. |
 | `scp ttownshend@172.20.202.99:~/captures/*.jpg <local dir>` | Pull the photos down. |
+
+---
+
+## Getting code onto the Pi
+
+The Pi holds a read-only checkout of this repo at `~/caliban`. Code moves
+laptop → GitHub → Pi, never laptop → Pi directly.
+
+That is not ceremony. Copying files one at a time has already cost an evening:
+a `capture.py` that predated `poller.py`'s expectations sat on the Pi looking
+entirely normal, and the failure surfaced as a `TypeError` inside the poller
+rather than as "your two files disagree". Files copied individually can
+disagree with each other. A commit cannot.
+
+Routine update — push from the laptop, then on the Pi:
+
+```bash
+~/caliban/rig/update.sh
+```
+
+That pulls fast-forward-only and restarts the service. The Pi is a consumer of
+this repo and never an author, so if it ever refuses because it has local
+commits, that is something to look at rather than merge away.
+
+### One-time setup
+
+On the Pi, make a key for it and print the public half:
+
+```bash
+ssh-keygen -t ed25519 -C "caliban-rig" -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub
+```
+
+On GitHub: **Caliban → Settings → Deploy keys → Add deploy key**. Paste it,
+title it `caliban-rig`, and **leave "Allow write access" unticked**. A deploy
+key is scoped to this one repository, unlike a personal token, and read-only
+means a compromised bench Pi cannot rewrite the repo it deploys from.
+
+Then clone and clear out the old loose copies, so there is exactly one
+`capture.py` on the machine and no chance of running yesterday's:
+
+```bash
+git clone git@github.com:entoAQ/Caliban.git ~/caliban
+chmod +x ~/caliban/rig/update.sh
+rm -f ~/capture.py ~/poller.py ~/preview.py
+
+sudo cp ~/caliban/rig/caliban-rig.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart caliban-rig
+```
+
+`~/rig_settings.json` and `~/captures/` deliberately stay outside the checkout.
+The calibration is this rig's measurement of this bench — it belongs to the
+machine, not to the branch, and it must survive every pull untouched.
 
 ---
 
