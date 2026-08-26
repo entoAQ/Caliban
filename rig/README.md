@@ -1,7 +1,7 @@
 # Bench rig
 
 Overhead camera rig for the filled-dish MEO method. A Raspberry Pi 5 with a
-Waveshare OV5647 NoIR board on a fixed boom, photographing a levelled dish of
+Camera Module 3 on a fixed boom, photographing a levelled dish of
 larvae. Photos go to Caliban for a band estimate, triggered from the
 **Estimation banc** button on the SGSC results entry panel.
 
@@ -25,7 +25,7 @@ nothing to rescue them. Recalibrate.
 | Pi | `Prosperos-island`, user `ttownshend`, wifi `172.20.202.99` (DHCP) |
 | SSH | `ssh ttownshend@172.20.202.99` |
 | **Live preview** | **http://172.20.202.99:8000/** — only while `python3 preview.py` is running |
-| Camera | Waveshare RPi Camera (F) NoIR, OV5647, 5MP, on the **second** CSI port |
+| Camera | Raspberry Pi Camera Module 3, imx708, 12MP autofocus, 4608×2592 |
 | Network | Wi-Fi carries the Pi; `eth0` is reserved for the NIR instrument |
 
 The address comes from DHCP and can change. If it stops answering, try
@@ -45,6 +45,7 @@ top-left.
 | Command | What it does |
 |---|---|
 | `python3 preview.py` | Live view at `http://172.20.202.99:8000/` for framing and focus. Ctrl+C to stop. Runs **auto** exposure and white balance — it is a viewfinder, so never judge colour or brightness from it. |
+| `python3 capture.py focus` | Runs autofocus once and records the lens position, in dioptres, into `~/rig_settings.json`. Every capture afterwards holds that position. **Run it before `measure`**, and again only if the boom height changes. Needs contrasty detail to lock onto, so put a printed target on the surface at tray height and take it away afterwards. |
 | `python3 capture.py measure` | Meters the scene, locks exposure and gain into `~/rig_settings.json`. **Run with a filled dish** — metering an empty one drives the exposure far too high and blows out the sample. Warns above gain 2.0, which means underlit. Resets the colour gains, so always follow with `whitebalance`. |
 | `python3 capture.py measure --ev -1` | Same, biased darker by a stop. `-0.5` subtler, `+1` doubles. Sparingly: if something bright is clipping it is usually better to make that thing darker than to underexpose the dish. |
 | `python3 capture.py sample --region ...` | Reports mean R/G/B of a region and whether it works as a reference. Changes nothing, so guess freely. Also the ambient-drift check. |
@@ -79,7 +80,8 @@ After any change to lighting, geometry, or the enclosure:
 
 ```bash
 sudo systemctl stop caliban-rig
-python3 preview.py                                  # frame and focus, Ctrl+C
+python3 preview.py                                  # frame, Ctrl+C
+python3 capture.py focus                            # target on the surface
 python3 capture.py measure                          # filled dish
 python3 capture.py sample --region <patch>          # confirm "usable"
 python3 capture.py whitebalance --region <patch>
@@ -88,8 +90,10 @@ python3 capture.py capture LOT12345
 sudo systemctl start caliban-rig
 ```
 
-Order matters: `measure` overwrites the colour gains, so `whitebalance` always
-comes after it. Check `white_balanced_at` appears in the settings file — that
+Order matters twice over. `focus` comes first because the exposure, the white
+balance patch and the crop are all measured through whatever focus is set, so
+refocusing afterwards invalidates them the same way moving the camera does. And
+`measure` overwrites the colour gains, so `whitebalance` always comes after it. Check `white_balanced_at` appears in the settings file — that
 is how you know the correction applied.
 
 ## Current values

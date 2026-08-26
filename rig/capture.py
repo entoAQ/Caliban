@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Bench rig capture for the circular-dish method.
 
-Runs on the Pi 5 with the Waveshare OV5647 NoIR board on a fixed overhead
-boom. Two jobs, and the split matters:
+Runs on the Pi 5 with a Camera Module 3 (imx708) on a fixed overhead boom.
+Jobs, and the split matters:
 
+  focus         -- run autofocus once, then record and hold the lens position.
   measure       -- let auto-exposure settle on a representative scene, then
                    write what it chose to a settings file.
-  whitebalance  -- cancel the NoIR colour cast against the paper in frame.
+  whitebalance  -- cancel the colour cast against the paper in frame.
   capture       -- shoot using exactly those values, every time, forever.
 
 The whole point of the rig over the old webcam is that the webcam ran
@@ -37,11 +38,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from libcamera import controls as libcontrols
 from picamera2 import Picamera2
 
 SETTINGS_FILE = Path.home() / "rig_settings.json"
 OUTPUT_DIR = Path.home() / "captures"
-RESOLUTION = (2592, 1944)
+# The imx708's native array is 16:9, not the 4:3 the OV5647 gave. There is no
+# full-sensor 4:3 mode to fall back to, so the framing genuinely changes with
+# the camera -- every stored crop, region and exposure predates this and must
+# be recalibrated rather than carried over.
+RESOLUTION = (4608, 2592)
 
 # The sensor needs a few frames before its output is stable, and the AE/AWB
 # algorithms need considerably more than that to converge. Two seconds is
@@ -49,14 +55,111 @@ RESOLUTION = (2592, 1944)
 SETTLE_SECONDS = 2.0
 
 
+def _focus_controls(picam2):
+    """Hold the lens where `focus` left it, if this camera has a lens to hold.
+
+    Module 3 autofocuses; the OV5647 it replaced could not. An autofocus camera
+    left to itself refocuses between shots, which is a drift the old camera was
+    incapable of: two captures of the same tray minutes apart can differ in
+    precisely the thing being judged -- how sharply fine dark material resolves
+    against the substrate. Sharpness is not a nuisance variable here, it is the
+    signal.
+
+    So focus gets the same treatment as exposure and white balance: decide
+    once, record it, never let the camera think again.
+
+    Returns nothing if the sensor is fixed-focus (setting AfMode on one is an
+    error, not a no-op), or if `focus` has not been run -- in which case the
+    camera is left on its default rather than pinned to a guess.
+    """
+    if "LensPosition" not in picam2.camera_controls:
+        return {}
+
+    settings = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    position = settings.get("lens_position")
+    if position is None:
+        return {}
+
+    return {
+        "AfMode": libcontrols.AfModeEnum.Manual,
+        "LensPosition": float(position),
+    }
+
+
 def _start(controls):
     picam2 = Picamera2()
     config = picam2.create_still_configuration(main={"size": RESOLUTION})
     picam2.configure(config)
-    picam2.set_controls(controls)
+    merged = dict(controls)
+    merged.update(_focus_controls(picam2))
+    picam2.set_controls(merged)
     picam2.start()
     time.sleep(SETTLE_SECONDS)
     return picam2
+
+
+def focus():
+    """Run one autofocus cycle and record where the lens landed.
+
+    Run this before `measure`, and re-run it only if the boom height changes.
+    Everything downstream -- the exposure, the white balance region, the crop --
+    is measured through this focus, so changing it invalidates them in the same
+    way moving the camera does.
+
+    LensPosition is in dioptres: reciprocal metres, so 0 is infinity and 4.0 is
+    250mm. That reciprocal is worth keeping in mind, because it means precision
+    is not uniform. Near the close end a small dioptre error is a small distance
+    error; near infinity the same error is metres. At boom distance we are at
+    the forgiving end of that curve.
+    """
+    picam2 = Picamera2()
+    config = picam2.create_still_configuration(main={"size": RESOLUTION})
+    picam2.configure(config)
+    picam2.start()
+    time.sleep(SETTLE_SECONDS)
+
+    if "LensPosition" not in picam2.camera_controls:
+        picam2.stop()
+        picam2.close()
+        sys.exit(
+            "This camera is fixed-focus -- there is no lens position to set.\n"
+            "Nothing to do, and nothing wrong: focus is already constant."
+        )
+
+    picam2.set_controls({"AfMode": libcontrols.AfModeEnum.Auto})
+    converged = picam2.autofocus_cycle()
+    position = float(picam2.capture_metadata()["LensPosition"])
+    picam2.stop()
+    picam2.close()
+
+    if not converged:
+        sys.exit(
+            "Autofocus did not converge. It needs contrasty detail to work on,\n"
+            "so an evenly-filled tray of one material can defeat it. Put a\n"
+            "printed target or a ruler on the surface at tray height, run this\n"
+            "again, then remove it before capturing."
+        )
+
+    settings = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    settings.update({
+        "lens_position": position,
+        "focused_at": datetime.now().isoformat(timespec="seconds"),
+    })
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+    distance = f"{1.0 / position:.3f}m" if position > 0 else "infinity"
+    print(f"Lens position {position:.3f} dioptres (~{distance})")
+    print(f"Written to {SETTINGS_FILE}")
+
+    # The lens has physical stops. Landing on one usually means the subject is
+    # outside the focus range rather than that the range happens to end exactly
+    # at the right place -- worth saying, because the image can still look
+    # plausible on a small preview while never actually being in focus.
+    if position <= 0.05:
+        print(
+            "\nWARNING: focused at infinity. At boom distance that is almost\n"
+            "certainly the lens giving up rather than the right answer."
+        )
 
 
 def measure(ev=0.0):
@@ -382,6 +485,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("focus", help="autofocus once, then record and hold the lens position")
+
     mea = sub.add_parser("measure", help="settle on auto and record the values")
     mea.add_argument(
         "--ev",
@@ -427,7 +532,9 @@ def main():
             sys.exit("--region needs four comma-separated fractions: x0,y0,x1,y1")
         return region
 
-    if args.command == "measure":
+    if args.command == "focus":
+        focus()
+    elif args.command == "measure":
         measure(args.ev)
     elif args.command == "sample":
         sample(parsed_region())
