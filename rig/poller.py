@@ -16,6 +16,7 @@ Setup:
     python3 poller.py
 """
 
+import json
 import os
 import sys
 import time
@@ -83,6 +84,37 @@ def shoot(lot_number):
     return visible, ir
 
 
+def run_stage(kind):
+    """Run one calibration stage and return what it measured.
+
+    Calibration is interactive at the bench -- three stages with a tray swap
+    between each -- and a queue cannot block waiting for someone to change a
+    tray. So each stage arrives as its own command and the browser does the
+    waiting between them, which is the one thing a browser is good at.
+
+    The stage functions live in capture.py rather than here so that the bench
+    script and the button run identical code. Two implementations of a
+    calibration drift, and the drift shows up as the button quietly
+    disagreeing with the bench.
+    """
+    return {
+        "calib_empty": capture.calib_empty,
+        "calib_focus": capture.calib_focus,
+        "calib_filled": capture.calib_filled,
+    }[kind]()
+
+
+def complete(command_id, result):
+    """Finish a command that produced measurements rather than an image."""
+    resp = requests.post(
+        f"{CALIBAN_URL}/capture-commands/{command_id}/complete",
+        headers=headers(),
+        data={"result": json.dumps(result)},
+        timeout=REQUEST_TIMEOUT,
+    )
+    resp.raise_for_status()
+
+
 def upload(command_id, visible_path, ir_path):
     files = {"file": (os.path.basename(visible_path), open(visible_path, "rb"), "image/jpeg")}
     if ir_path:
@@ -137,11 +169,22 @@ def main():
                 continue
 
             idle_since_log = 0
-            log(f"claimed {command['id']} for lot {command['lot_number']}")
+            kind = command.get("kind") or "capture"
+            log(f"claimed {command['id']} ({kind}) "
+                f"for lot {command.get('lot_number') or '-'}")
 
             try:
-                visible, ir = shoot(command["lot_number"])
-                upload(command["id"], visible, ir)
+                if kind.startswith("calib_"):
+                    complete(command["id"], run_stage(kind))
+                else:
+                    # A preview is a capture whose result nobody analyses. It
+                    # goes through the same path deliberately: a preview that
+                    # differs from a real capture is not a preview of
+                    # anything.
+                    label = command.get("lot_number") or kind.upper()
+                    visible, ir = shoot(label) if kind == "capture" else (
+                        capture.capture(label, "visible"), None)
+                    upload(command["id"], visible, ir)
                 log(f"completed {command['id']}")
             except Exception as e:
                 log(f"capture failed for {command['id']}: {type(e).__name__}: {e}")

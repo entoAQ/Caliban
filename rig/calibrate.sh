@@ -52,17 +52,10 @@ trap restore EXIT
 
 step "1 of 3   EMPTY tray, in its working position"
 
-# Metered on the empty tray purely so the flat field and the white balance
-# have a sane exposure to work at. Biased down a little because a bare pale
-# tray under an exposure meant for anything else tends to clip, and a clipped
-# pixel has lost the very brightness difference the flat field is measuring.
-python3 capture.py measure --ev -0.5 --reset-white-balance
-python3 capture.py flatfield
-
-# The centre of the frame, which on an empty tray is guaranteed to be tray.
-# No region to choose and nothing to place, which is the point -- a daily
-# procedure that needs a judgement call is a daily procedure that drifts.
-python3 capture.py whitebalance --region 0.35,0.35,0.65,0.65
+# One subcommand rather than three calls, so this script and the SGSC button
+# run the same code. Two implementations of a calibration drift apart, and the
+# drift shows up as the button quietly disagreeing with the bench.
+python3 capture.py calib-empty
 
 echo
 echo "--- geometry check against the stored reference ---"
@@ -70,14 +63,11 @@ python3 tof.py read || echo "(ToF check skipped or failed -- not fatal)"
 
 step "2 of 3   FOCUS SHEET laid flat in the tray"
 
-python3 capture.py focus
+python3 capture.py calib-focus
 
 step "3 of 3   FILLED tray, scattered as you would for a real sample"
 
-# Keeps the white balance measured in stage 1: it describes the light, not the
-# exposure, and a bare tray is a far better neutral reference than AWB's guess
-# from a frame full of tan larvae.
-python3 capture.py measure
+python3 capture.py calib-filled
 
 echo
 echo "--- test frame ---"

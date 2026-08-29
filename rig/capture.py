@@ -426,6 +426,12 @@ def whitebalance(region):
 
     settings["colour_gains"] = gains
     settings["white_balanced_at"] = datetime.now().isoformat(timespec="seconds")
+    # How neutral it actually got, not merely that it ran. The loop gives up
+    # after twelve passes whether or not it converged, so without this a
+    # stubbornly coloured reference and a perfect one leave identical settings
+    # files -- and the calibration stage has no way to tell the operator which
+    # one they have.
+    settings["white_balance_spread"] = round(float(max(rgb) - min(rgb)), 2)
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
     print(f"\nColour gains     {current[0]:.2f}, {current[1]:.2f}"
@@ -591,6 +597,65 @@ def _apply_flatfield(frame):
     return out
 
 
+# The centre of the frame, which on an empty tray is guaranteed to be tray.
+# Fixed rather than chosen, because a daily procedure that needs a judgement
+# call is a daily procedure that drifts.
+WB_REGION = (0.35, 0.35, 0.65, 0.65)
+
+
+def _state():
+    """What the rig currently believes, in a form a browser can render.
+
+    Calibration used to be judged by reading the console. Behind a button
+    nobody is reading a console, so every stage has to hand back enough for
+    the page to say whether it passed and, when it did not, what to change on
+    the bench.
+    """
+    settings = json.loads(SETTINGS_FILE.read_text()) if SETTINGS_FILE.exists() else {}
+    return {
+        "exposure_time": settings.get("exposure_time"),
+        "analogue_gain": settings.get("analogue_gain"),
+        "colour_gains": settings.get("colour_gains"),
+        "white_balance_spread": settings.get("white_balance_spread"),
+        "white_balanced_at": settings.get("white_balanced_at"),
+        "lens_position": settings.get("lens_position"),
+        "focused_at": settings.get("focused_at"),
+        "flat_fielded_at": settings.get("flat_fielded_at"),
+        "flat_field_present": FLATFIELD_FILE.exists(),
+        "crop": settings.get("crop"),
+    }
+
+
+def calib_empty():
+    """Stage one: everything the empty tray defines.
+
+    Metered down half a stop first. A bare pale tray under any other exposure
+    tends to clip, and a clipped pixel has lost the very brightness difference
+    the flat field exists to measure.
+    """
+    measure(ev=-0.5, reset_white_balance=True)
+    flatfield()
+    whitebalance(WB_REGION)
+    return _state()
+
+
+def calib_focus():
+    """Stage two: lock focus on the printed sheet."""
+    focus()
+    return _state()
+
+
+def calib_filled():
+    """Stage three: expose for the real subject.
+
+    Keeps stage one's white balance, which describes the light rather than the
+    exposure -- and a correction measured against a bare tray beats anything
+    AWB guesses from a frame full of tan larvae.
+    """
+    measure()
+    return _state()
+
+
 def capture(lot_number, band):
     """Shoot one frame with the locked settings."""
     if not SETTINGS_FILE.exists():
@@ -644,6 +709,19 @@ def main():
         help="measure the ring's illumination pattern from a uniform surface",
     )
 
+    # The three daily calibration stages. Exposed as subcommands rather than
+    # left inside calibrate.sh so the bench script and the SGSC button run the
+    # same code -- two implementations of a calibration would drift, and the
+    # drift would show up as the button quietly disagreeing with the bench.
+    for name, helptext in (
+        ("calib-empty", "stage 1: flat field and white balance from an empty tray"),
+        ("calib-focus", "stage 2: lock focus on the calibration sheet"),
+        ("calib-filled", "stage 3: expose for the filled tray"),
+    ):
+        p_ = sub.add_parser(name, help=helptext)
+        p_.add_argument("--json", action="store_true",
+                        help="print the resulting state as JSON")
+
     mea = sub.add_parser("measure", help="settle on auto and record the values")
     mea.add_argument(
         "--ev",
@@ -694,7 +772,15 @@ def main():
             sys.exit("--region needs four comma-separated fractions: x0,y0,x1,y1")
         return region
 
-    if args.command == "focus":
+    if args.command in ("calib-empty", "calib-focus", "calib-filled"):
+        state = {
+            "calib-empty": calib_empty,
+            "calib-focus": calib_focus,
+            "calib-filled": calib_filled,
+        }[args.command]()
+        if args.json:
+            print(json.dumps(state, indent=2))
+    elif args.command == "focus":
         focus()
     elif args.command == "flatfield":
         flatfield()
