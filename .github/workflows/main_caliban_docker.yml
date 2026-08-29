@@ -1,8 +1,29 @@
 name: Build and push container image for Caliban
+
+# Two costs sit between a commit and a working service, and they have separate
+# fixes.
+#
+# Building the image. Almost all of it is `pip install`, which redoes work that
+# has not changed -- requirements.txt moves once a month, app/ moves several
+# times an hour. The registry cache below makes an app-only change reuse the
+# dependency layer, taking the build from minutes to seconds.
+#
+# Getting App Service to run the new image. That was a manual az command
+# followed by waiting for a restart, which is why a run of small fixes hurt so
+# much: every one cost a full pull and cold start. The webhook step below hands
+# that to App Service as soon as the push finishes, so the wait starts without
+# anyone watching for it.
+
 on:
   push:
     branches:
       - main
+    # Documentation and rig code do not go into the image, and rebuilding for
+    # them wastes minutes and warms nothing.
+    paths-ignore:
+      - 'rig/**'
+      - '**/*.md'
+      - '**/*.sql'
   workflow_dispatch:
 
 jobs:
@@ -11,8 +32,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      # Lifted to job level because the secrets context is not reliably
+      # available in a step's `if`, while the env context is. Testing the
+      # secret directly in the condition silently never matches.
+      AZURE_WEBAPP_WEBHOOK: ${{ secrets.AZURE_WEBAPP_WEBHOOK }}
     steps:
       - uses: actions/checkout@v4
+
+      # Needed for the registry cache; the default docker driver cannot export
+      # cache manifests.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -29,8 +60,24 @@ jobs:
           tags: |
             ghcr.io/entoaq/caliban:latest
             ghcr.io/entoaq/caliban:${{ github.sha }}
+          # Cached in the registry rather than in GitHub's action cache, which
+          # is capped at 10GB per repository and evicts on its own schedule.
+          cache-from: type=registry,ref=ghcr.io/entoaq/caliban:buildcache
+          cache-to: type=registry,ref=ghcr.io/entoaq/caliban:buildcache,mode=max
 
-      - name: Print the exact deploy command to run
+      # Tell App Service to pull. The webhook is under Deployment Center ->
+      # Webhook URL on the web app, stored as the AZURE_WEBAPP_WEBHOOK secret.
+      #
+      # Skipped rather than failed when the secret is absent, so a fork or a
+      # fresh clone still builds. Without it the deploy is the manual command
+      # printed below, exactly as before.
+      - name: Trigger the App Service pull
+        if: env.AZURE_WEBAPP_WEBHOOK != ''
+        run: curl -fsS -X POST -d '' "$AZURE_WEBAPP_WEBHOOK"
+
+      - name: How to deploy this exact build
         run: |
-          echo "::notice::Run this in Cloud Shell to deploy this exact build:"
+          echo "::notice::Image pushed: ghcr.io/entoaq/caliban:${{ github.sha }}"
+          echo "::notice::If auto-deploy is not configured, run in Cloud Shell:"
           echo "::notice::az webapp config container set --name Caliban --resource-group Caliban_group --container-image-name ghcr.io/entoaq/caliban:${{ github.sha }}"
+          echo "::notice::To roll back, run the same command with an older SHA."

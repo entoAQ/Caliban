@@ -18,8 +18,12 @@ COPY app/ ./app/
 
 EXPOSE 8000
 
-# Same exact command already confirmed working on App Service -- moving
-# environments, not reinventing how the app starts.
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "app.main:app"]
-
+# One CMD. There were two, and only the last counted -- so the first was dead
+# text that read like the live configuration, which is worse than no comment.
+#
+# --timeout 120: a worker is killed if a single request takes longer. Eight
+# rotations run concurrently so wall clock is roughly one call, but four
+# variants at eight rotations is thirty-two calls in flight and Azure will
+# queue some of them. Anything past 120s is a request the platform's own
+# 230-second limit would kill shortly afterwards anyway.
 CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "--timeout", "120", "-b", "0.0.0.0:8000", "app.main:app"]
