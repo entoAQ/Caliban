@@ -40,6 +40,37 @@ REQUEST_TIMEOUT = 30
 IR_SETTLE_SECONDS = 3.0
 
 
+# Touched while a command is being handled, so the auto-updater can tell the
+# difference between an idle rig and one mid-capture. It defers rather than
+# restarting through a capture, which would otherwise fail a command an
+# operator is standing there waiting for.
+BUSY_FILE = os.path.join(os.path.expanduser("~"), ".caliban-rig-busy")
+
+
+class busy:
+    """Mark the rig as working, and unmark it however the block exits.
+
+    A context manager rather than two calls, because the one path that must
+    not be missed is the failure path: a crash that left the marker behind
+    would block every future update until someone noticed. The updater treats
+    an old marker as stale for the same reason, belt and braces.
+    """
+
+    def __enter__(self):
+        try:
+            with open(BUSY_FILE, "w") as f:
+                f.write(str(os.getpid()))
+        except OSError as e:
+            log(f"could not write busy marker: {e}")
+
+    def __exit__(self, *exc):
+        try:
+            os.remove(BUSY_FILE)
+        except OSError:
+            pass
+        return False
+
+
 def log(message):
     print(f"{datetime.now().isoformat(timespec='seconds')}  {message}", flush=True)
 
@@ -174,17 +205,18 @@ def main():
                 f"for lot {command.get('lot_number') or '-'}")
 
             try:
-                if kind.startswith("calib_"):
-                    complete(command["id"], run_stage(kind))
-                else:
-                    # A preview is a capture whose result nobody analyses. It
-                    # goes through the same path deliberately: a preview that
-                    # differs from a real capture is not a preview of
-                    # anything.
-                    label = command.get("lot_number") or kind.upper()
-                    visible, ir = shoot(label) if kind == "capture" else (
-                        capture.capture(label, "visible"), None)
-                    upload(command["id"], visible, ir)
+                with busy():
+                    if kind.startswith("calib_"):
+                        complete(command["id"], run_stage(kind))
+                    else:
+                        # A preview is a capture whose result nobody analyses.
+                        # It goes through the same path deliberately: a preview
+                        # that differs from a real capture is not a preview of
+                        # anything.
+                        label = command.get("lot_number") or kind.upper()
+                        visible, ir = shoot(label) if kind == "capture" else (
+                            capture.capture(label, "visible"), None)
+                        upload(command["id"], visible, ir)
                 log(f"completed {command['id']}")
             except Exception as e:
                 log(f"capture failed for {command['id']}: {type(e).__name__}: {e}")

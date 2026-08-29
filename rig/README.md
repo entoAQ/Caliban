@@ -90,13 +90,20 @@ entirely normal, and the failure surfaced as a `TypeError` inside the poller
 rather than as "your two files disagree". Files copied individually can
 disagree with each other. A commit cannot.
 
-Routine update — push from the laptop, then on the Pi:
+**Normally you push and that is all.** A systemd timer runs `update.sh` every
+five minutes, and three minutes after boot so a Pi that was off during a deploy
+catches up on its own. To force it immediately, on the Pi:
 
 ```bash
 ~/caliban/rig/update.sh
 ```
 
-That pulls fast-forward-only and restarts the service. The Pi is a consumer of
+It pulls fast-forward-only and restarts the service **only when the pull
+actually changed something**, so a hand-run in the middle of bench work will
+not take the camera away from you. It also defers entirely while a capture is
+in flight: pulling without restarting would leave files on disk that disagree
+with the running process, which is the exact hazard git deployment was adopted
+to remove, so the whole update waits for the next cycle. The Pi is a consumer of
 this repo and never an author, so if it ever refuses because it has local
 commits, that is something to look at rather than merge away.
 
@@ -126,6 +133,23 @@ sudo cp ~/caliban/rig/caliban-rig.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl restart caliban-rig
 ```
+
+Then the auto-updater, so pushing is all that is ever needed afterwards:
+
+```bash
+sudo install -m 440 -o root -g root     ~/caliban/rig/caliban-rig.sudoers /etc/sudoers.d/caliban-rig
+sudo cp ~/caliban/rig/caliban-rig-update.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now caliban-rig-update.timer
+systemctl list-timers caliban-rig-update.timer
+```
+
+The sudoers rule is what lets the timer restart the service without a password.
+It runs as `ttownshend` because the checkout and the deploy key both belong to
+that user, and it is scoped to three verbs on one unit — it grants nothing the
+person at the bench could not already do by typing their password, it just
+removes a prompt from a timer that has nobody to answer it. It also stops
+`calibrate.sh` asking for a password halfway through.
 
 `~/rig_settings.json` and `~/captures/` deliberately stay outside the checkout.
 The calibration is this rig's measurement of this bench — it belongs to the

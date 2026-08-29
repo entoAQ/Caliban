@@ -1,0 +1,18 @@
+[Unit]
+Description=Pull the latest bench rig code from GitHub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+
+# As the operator, not root. The checkout belongs to this user and so does the
+# deploy key that authenticates the pull -- running as root would find neither.
+User=ttownshend
+ExecStart=/home/ttownshend/caliban/rig/update.sh
+
+# The script restarts caliban-rig itself when the pull changed something, which
+# needs one passwordless sudo rule. See caliban-rig.sudoers.
+
+StandardOutput=journal
+StandardError=journal

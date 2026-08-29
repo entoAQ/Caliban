@@ -1,0 +1,20 @@
+[Unit]
+Description=Check GitHub for new bench rig code
+
+[Timer]
+# A few minutes after boot, so a Pi that was off during a deploy catches up
+# without anyone thinking about it.
+OnBootSec=3min
+
+# Every five minutes. The check is a git fetch against an unchanged repo when
+# there is nothing to do, which is trivial, and the script exits without
+# restarting anything unless the pull actually moved HEAD.
+OnUnitActiveSec=5min
+
+# Spread the wake-ups a little. Nothing here is time-critical, and a timer that
+# fires on the exact minute is a timer that fires at the same moment as every
+# other one on the machine.
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

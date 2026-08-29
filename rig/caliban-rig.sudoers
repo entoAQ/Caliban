@@ -1,0 +1,15 @@
+# Let the rig user control its own service without a password.
+#
+# Install with:
+#     sudo install -m 440 -o root -g root \
+#         ~/caliban/rig/caliban-rig.sudoers /etc/sudoers.d/caliban-rig
+#
+# Needed because the auto-updater runs as ttownshend -- the checkout and the
+# deploy key both belong to that user -- but restarting the service after a
+# pull requires root. Scoped to exactly these three verbs on exactly this one
+# unit: it grants nothing that the person sitting at the bench could not
+# already do by typing their password, it just removes the prompt from a timer
+# that has no one to answer it.
+#
+# It also stops calibrate.sh asking for a password halfway through.
+ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl start caliban-rig, /usr/bin/systemctl stop caliban-rig, /usr/bin/systemctl restart caliban-rig
