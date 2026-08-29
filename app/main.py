@@ -731,6 +731,51 @@ JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 # they need re-shooting on the dish before they help rather than hurt,
 # since grounding a dish photo against scatter-method references is worse
 # than sending no references at all.
+# 3.1 is 3.0 with two changes, derived rather than retyped.
+#
+# Deriving is safe here precisely because of the rule these variants already
+# follow: a prompt is never rewritten in place, a new label is added instead.
+# So 3.0's text cannot change under 3.1's feet. The asserts below are the
+# guard that matters -- a substitution that silently stopped matching would
+# otherwise leave 3.1 identical to 3.0 while still claiming to be different,
+# and PROMPT_HASHES would faithfully record two labels for one prompt.
+#
+# Change one: four wider bands instead of six. Fewer, wider buckets are a
+# question the model can actually answer, and the 3-7 / 7-10 confusion has
+# been the standing complaint for months. The resolution given up is recovered
+# by averaging rotations into estimate_pct, which is continuous and finer than
+# any band -- before that machinery existed this would have been a pure loss.
+#
+# Change two: a bulk density estimate. Worth being clear about what this can
+# and cannot be. A top-down photo of a thin single layer carries very little
+# direct information about bulk density, which is a property of packing and
+# moisture, and a scattered monolayer shows neither. What the photo does carry
+# is correlates -- larva size, how plump or shrivelled they look, the fraction
+# of fines. So this is not asking the model to measure density. It is asking
+# it to be a consistent instrument whose readings can be regressed against
+# measured values later. Consistency is the property to test first: if the
+# spread across rotations is wide, there is nothing to calibrate and the idea
+# should be dropped rather than tuned.
+_P30 = BAND_PROMPT_VARIANTS["3.0"]
+
+_P31 = _P30.replace(
+    "BANDE: [a single value among : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]",
+    "BANDE: [a single value among : <3%, 3-8%, 8-13%, >13%]",
+).replace(
+    """Be careful at the low end of the scale. A few small isolated specks, well separated across the sample, is typically <1% or 1-3% -- not 3-7%. Reserve 3-7% for when foreign matter forms visible specks or clumps across a good part of the sample area, while the larvae still plainly dominate. Above that, at 7-10%, dark material is a continuous presence rather than scattered incidents: there is some in every part of the sample, and it begins to read as a component of the mixture rather than as debris within it.""",
+    """Be careful at the low end of the scale. A few small isolated specks, well separated across the sample, is <3%. Reserve 3-8% for when foreign matter forms visible specks or clumps across a good part of the sample area, while the larvae still plainly dominate. At 8-13% dark material is a continuous presence rather than scattered incidents: there is some in every part of the sample, and it reads as a component of the mixture rather than as debris within it.""",
+).replace(
+    "JUSTIFICATION: [one sentence, in French, what drove this choice]",
+    """DENSITE: [your best estimate of the sample's bulk density in grams per litre, as a single number or a range like 480-560. Judge it from what the photograph shows: the size of the larvae, how plump or shrivelled they look, and how much fine material is present. Give a number even when uncertain -- consistency between photographs matters more here than absolute accuracy.]
+JUSTIFICATION: [one sentence, in French, what drove this choice]""",
+)
+
+assert _P31.count("<3%, 3-8%, 8-13%, >13%") == 1, "band substitution did not apply"
+assert "3-7%" not in _P31, "old band boundaries survived into 3.1"
+assert "DENSITE:" in _P31, "density substitution did not apply"
+BAND_PROMPT_VARIANTS["3.1"] = _P31
+
+
 # REVERTED to 1.5 on 2026-08-23. The dish method was abandoned: it proved less
 # accurate than scattering onto a tray, which is what the rig now photographs.
 # So 2.0's premise -- a circular dish filled and levelled to a flat surface --
@@ -789,6 +834,38 @@ CALIBAN_PROMPT_VERSION = DEFAULT_PROMPT_VARIANT
 PROMPT_HASH = PROMPT_HASHES[DEFAULT_PROMPT_VARIANT]
 
 
+def parse_density(raw):
+    """A bulk density in g/L from whatever the model wrote.
+
+    Accepts a single number or a range, because the prompt permits both and
+    insisting on one shape would throw away answers over formatting. A range
+    collapses to its midpoint: the width is the model's hedging rather than a
+    measurement, and the spread that matters is the one across rotations,
+    which is measured rather than declared.
+
+    Anything outside 100-1500 g/L is discarded. Whole BSF larvae sit around
+    400-700; a number far outside that is a unit slip or a hallucination, and
+    letting it through would poison the mean that the whole calibration idea
+    depends on.
+    """
+    numbers = re.findall(r"\d+(?:[.,]\d+)?", raw or "")
+    if not numbers:
+        return None
+    values = [float(n.replace(",", ".")) for n in numbers[:2]]
+    value = sum(values) / len(values)
+
+    # The prompt asks for g/L, but kg/L is the more natural unit for anyone
+    # who thinks in specific gravity, and a model that answers "0.52 kg/L" has
+    # given a perfectly good answer in the wrong unit. Rescuing it beats
+    # dropping it silently and finding a hole in the data later.
+    if "kg" in (raw or "").lower() and value < 10.0:
+        value *= 1000.0
+
+    if not 100.0 <= value <= 1500.0:
+        return None
+    return round(value, 1)
+
+
 def parse_band_response(text):
     """Extracts the structured band/confidence fields from BAND_PROMPT's
     response -- falls back to returning the raw text untouched if the
@@ -796,6 +873,7 @@ def parse_band_response(text):
     a real answer that just wasn't formatted as expected."""
     band = confidence = justification = None
     factors = None
+    density = None
     for line in text.strip().splitlines():
         if line.upper().startswith("BANDE:"):
             band = line.split(":", 1)[1].strip()
@@ -804,6 +882,8 @@ def parse_band_response(text):
         elif line.upper().startswith("FACTEURS:"):
             raw_factors = line.split(":", 1)[1].strip()
             factors = [f.strip() for f in raw_factors.split(",") if f.strip()] or None
+        elif line.upper().startswith("DENSITE:"):
+            density = parse_density(line.split(":", 1)[1])
         elif line.upper().startswith("JUSTIFICATION:"):
             justification = line.split(":", 1)[1].strip()
     return {
@@ -811,6 +891,7 @@ def parse_band_response(text):
         "confidence": confidence,
         "factors": factors,
         "justification": justification,
+        "density_est": density,
         "raw": text,
     }
 
@@ -821,14 +902,50 @@ def parse_band_response(text):
 # real upper bound; 17 is an arbitrary anchor (a modest extrapolation
 # past the 10-14% midpoint of 12), not a measured value -- only used to
 # decide "is this worth a human look", never displayed as a real number.
-BAND_MIDPOINTS = {
-    "<1%": 0.5,
-    "1-3%": 2.0,
-    "3-7%": 5.0,
-    "7-10%": 8.5,
-    "10-14%": 12.0,
-    ">14%": 17.0,
+# A band scale is a property of the prompt that produced it, not of the
+# service. The prompt lists the permitted labels, so changing the scale means
+# changing the prompt -- and rows recorded under one scale can never be
+# compared with rows recorded under another as bands. They can still be
+# compared as estimate_pct, which is the reason that column exists.
+#
+# Each entry is (label, lower_bound, midpoint). Bounds are lower-inclusive and
+# read in order; the last entry is open-ended.
+BAND_SCALES = {
+    # The original six. Fine-grained, and finer than the model can reliably
+    # resolve -- the 3-7 / 7-10 confusion has been the standing complaint.
+    "standard": [
+        ("<1%", 0.0, 0.5),
+        ("1-3%", 1.0, 2.0),
+        ("3-7%", 3.0, 5.0),
+        ("7-10%", 7.0, 8.5),
+        ("10-14%", 10.0, 12.0),
+        (">14%", 14.0, 17.0),
+    ],
+    # Four wider bands for internal use. The trade is deliberate: fewer, wider
+    # buckets are a question the model can actually answer, and the resolution
+    # given up is recovered by averaging rotations into estimate_pct, which is
+    # continuous and finer than any band. Before that existed, coarsening would
+    # have been a pure loss.
+    "coarse": [
+        ("<3%", 0.0, 1.5),
+        ("3-8%", 3.0, 5.5),
+        ("8-13%", 8.0, 10.5),
+        (">13%", 13.0, 16.0),
+    ],
 }
+
+# Which scale each variant speaks. Absent means "standard", so every existing
+# variant keeps its meaning without being listed.
+VARIANT_BAND_SCALE = {"3.1": "coarse"}
+
+# Flattened for lookup by label. Labels are unique across scales, which is not
+# an accident worth relying on silently -- assert it, because a collision would
+# make a band from one scale silently resolve to the other's midpoint.
+BAND_MIDPOINTS = {}
+for _scale in BAND_SCALES.values():
+    for _label, _lower, _mid in _scale:
+        assert _label not in BAND_MIDPOINTS, f"duplicate band label {_label}"
+        BAND_MIDPOINTS[_label] = _mid
 
 # How far a predicted band's midpoint has to be from the known real ME%
 # before a row gets auto-flagged for human review. 3 points is about one
@@ -839,27 +956,25 @@ BAND_MIDPOINTS = {
 OUTLIER_THRESHOLD_PTS = 3.0
 
 
-def band_for_pct(pct):
-    """The band a percentage falls in -- the inverse of BAND_MIDPOINTS.
+def band_for_pct(pct, scale="standard"):
+    """The band a percentage falls in, on a given scale.
 
-    Used to report a band alongside an averaged estimate. Derived from the
-    boundaries rather than by picking the nearest midpoint, because the
-    midpoints are not evenly spaced and nearest-midpoint would put 7.4% in
-    "7-10%" while 6.9% landed in "3-7%" correctly but 7.6% did not.
+    Derived from the boundaries rather than by picking the nearest midpoint,
+    because the midpoints are not evenly spaced and nearest-midpoint would put
+    7.4% in "7-10%" while 6.9% landed in "3-7%" correctly but 7.6% did not.
+
+    The scale has to be passed in: a mean of 5.0 is "3-7%" on the standard
+    scale and "3-8%" on the coarse one, and guessing would silently mislabel
+    every averaged estimate from whichever variant was not the default.
     """
     if pct is None:
         return None
-    if pct < 1:
-        return "<1%"
-    if pct < 3:
-        return "1-3%"
-    if pct < 7:
-        return "3-7%"
-    if pct < 10:
-        return "7-10%"
-    if pct < 14:
-        return "10-14%"
-    return ">14%"
+    bands = BAND_SCALES[scale]
+    label = bands[0][0]
+    for candidate, lower, _mid in bands:
+        if pct >= lower:
+            label = candidate
+    return label
 
 
 def is_outlier(band, real_pct_value):
@@ -1294,22 +1409,38 @@ async def azure_band_test(
         midpoints = [BAND_MIDPOINTS[r["band"]] for r in runs
                      if r.get("band") in BAND_MIDPOINTS]
 
+        # Density gets the same treatment as the band, and for the same
+        # reason: nothing about the sample changed between rotations, so the
+        # spread is how much the answer moved for no reason. That spread is
+        # the first thing to look at -- if it is wide there is nothing to
+        # calibrate against measured density, and the idea should be dropped
+        # rather than tuned.
+        densities = [r["density_est"] for r in runs if r.get("density_est") is not None]
+        density_mean = round(sum(densities) / len(densities), 1) if densities else None
+        density_spread = (round(statistics.pstdev(densities), 1)
+                          if len(densities) > 1 else (0.0 if densities else None))
+
         if len(runs) == 1 or not midpoints:
             primary["repeat_count"] = len(runs)
             primary["estimate_pct"] = midpoints[0] if midpoints else None
             primary["estimate_spread"] = 0.0 if midpoints else None
             primary["repeat_bands"] = [r.get("band") for r in runs]
+            primary["density_est"] = density_mean
+            primary["density_spread"] = density_spread
             return primary
 
         mean = sum(midpoints) / len(midpoints)
         spread = statistics.pstdev(midpoints) if len(midpoints) > 1 else 0.0
 
         result = dict(primary)
-        result["band"] = band_for_pct(mean)
+        result["band"] = band_for_pct(
+            mean, VARIANT_BAND_SCALE.get(variant_label, "standard"))
         result["estimate_pct"] = round(mean, 2)
         result["estimate_spread"] = round(spread, 2)
         result["repeat_count"] = len(runs)
         result["repeat_bands"] = [r.get("band") for r in runs]
+        result["density_est"] = density_mean
+        result["density_spread"] = density_spread
         # Wall clock, not the sum: the rotations run concurrently.
         result["inference_time_ms"] = max(r.get("inference_time_ms", 0) for r in runs)
         result["justification"] = (
@@ -1444,6 +1575,8 @@ async def azure_band_test(
                 "repeat_count": parsed.get("repeat_count", 1),
                 "estimate_pct": parsed.get("estimate_pct"),
                 "estimate_spread": parsed.get("estimate_spread"),
+                "density_est": parsed.get("density_est"),
+                "density_spread": parsed.get("density_spread"),
             }).execute()
 
             # Defensive: some client/API combinations can return a response
