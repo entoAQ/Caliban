@@ -131,6 +131,37 @@ machine, not to the branch, and it must survive every pull untouched.
 
 ---
 
+## Everyday calibration
+
+```bash
+~/caliban/rig/calibrate.sh
+```
+
+Three tray swaps, nothing to remember. It stops the poller, prompts you through
+**empty tray → focus sheet → filled tray**, and restarts the poller at the end
+even if you Ctrl+C out of it.
+
+Each stage uses the surface that is right for it. The empty tray is the only
+uniform, matte, correctly-positioned thing on the bench and the one physically
+present in every real capture, so it defines both the illumination pattern and
+what counts as white. The focus sheet exists because autofocus needs contrasty
+detail and fails on a clean tray. The filled tray is there because exposure has
+to be metered on the actual subject.
+
+Two things are deliberately left out of the daily run:
+
+**`setcrop`.** Framing is geometry. It changes when the boom moves, which is not
+daily, and re-cropping every morning would make yesterday's captures
+incomparable with today's.
+
+**`tof.py reference`.** Re-recording the drift baseline daily would destroy the
+only thing it is for — a reference re-taken every morning can never reveal that
+the boom moved overnight, because it would simply adopt the new position as
+correct. The script checks against the stored reference and never replaces it.
+
+Re-record the reference, and re-run `setcrop`, only when you have deliberately
+moved something.
+
 ## Recalibration sequence
 
 After any change to lighting, geometry, or the enclosure:

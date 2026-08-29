@@ -174,7 +174,7 @@ def focus():
         )
 
 
-def measure(ev=0.0):
+def measure(ev=0.0, reset_white_balance=False):
     """Let the camera decide, then record what it decided.
 
     Run this once with the rig framed on a filled dish under the lighting you
@@ -204,12 +204,23 @@ def measure(ev=0.0):
         "exposure_time": exposure,
         "ev_bias": ev,
         "analogue_gain": float(metadata["AnalogueGain"]),
-        "colour_gains": [float(g) for g in metadata["ColourGains"]],
         "measured_at": datetime.now().isoformat(timespec="seconds"),
     })
-    # The colour gains just came from AWB, so any previous correction is gone.
-    # Drop the timestamp with it rather than leave one that claims otherwise.
-    settings.pop("white_balanced_at", None)
+
+    # A white balance already made against a known neutral surface outranks
+    # anything AWB guesses from a tray of larvae. White balance describes the
+    # light, not the exposure, so re-metering is no reason to throw it away --
+    # and discarding it forced the daily calibration into an awkward order,
+    # because the bare tray needed for a correction is gone by the time there
+    # is a filled tray to meter.
+    if reset_white_balance or "white_balanced_at" not in settings:
+        settings["colour_gains"] = [float(g) for g in metadata["ColourGains"]]
+        settings.pop("white_balanced_at", None)
+    else:
+        print(f"Keeping the white balance from "
+              f"{settings['white_balanced_at']}. Pass --reset-white-balance "
+              f"to let AWB decide instead.")
+
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
     print(json.dumps(settings, indent=2))
@@ -640,6 +651,11 @@ def main():
         default=0.0,
         help="exposure bias in stops; -1 halves, +1 doubles (default: 0)",
     )
+    mea.add_argument(
+        "--reset-white-balance",
+        action="store_true",
+        help="discard an existing white balance and take AWB's guess instead",
+    )
     smp = sub.add_parser("sample", help="report what a region contains (changes nothing)")
     smp.add_argument("--region", required=True, help="x0,y0,x1,y1 as fractions of the frame")
 
@@ -683,7 +699,7 @@ def main():
     elif args.command == "flatfield":
         flatfield()
     elif args.command == "measure":
-        measure(args.ev)
+        measure(args.ev, args.reset_white_balance)
     elif args.command == "sample":
         sample(parsed_region())
     elif args.command == "setcrop":
