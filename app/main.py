@@ -23,6 +23,7 @@ import os
 import re
 import statistics
 import time
+import traceback
 import uuid
 
 # Set once, the moment this process actually starts (module import time --
@@ -32,9 +33,9 @@ import uuid
 # this timestamp against when you committed/pushed a change.
 STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from app.supabase_client import supabase, get_current_operator
 from app import sharepoint_client
@@ -63,6 +64,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Turn an unhandled error into a readable 500 rather than a CORS mystery.
+
+    Starlette's own 500 is produced outside the CORS middleware, so it carries
+    no Access-Control-Allow-Origin header. The browser then reports a plain
+    server error as "blocked by CORS policy", which sends everyone looking at
+    origins and headers instead of at the traceback. This cost an afternoon
+    once; registering a handler here puts the response back inside the
+    middleware stack so it gets the header and says what actually happened.
+
+    The message is deliberately the exception type and text, not a generic
+    string: this API is behind an authenticated frontend on a known origin,
+    and a developer reading the network tab is far more likely than an
+    attacker reading it.
+    """
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Erreur serveur : {type(exc).__name__}: {exc}"},
+    )
 
 _model = None
 _model_load_failed = False
