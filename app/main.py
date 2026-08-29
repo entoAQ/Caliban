@@ -475,6 +475,54 @@ densite_reelle, autre -- les éléments qui ont RÉELLEMENT influencé ce choix 
 photo précise, pas une liste générique]
 JUSTIFICATION: [une phrase, ce qui a motivé ce choix]""",
 
+    # Written in English, against the calibrated rig, and the first variant
+    # that can state physical facts rather than describe an appearance.
+    #
+    # Everything in the image is now measured. The frame is 402mm across at
+    # 11.54 px/mm, illumination is flat to 1.5% after the flat-field
+    # correction, white balance is locked against the tray itself, and focus
+    # resolves about 0.35mm. That turns vague instructions into concrete
+    # ones: "ignore fine dust" becomes a stated size in millimetres, and a
+    # larva becomes a ruler the model can see in the same photo.
+    #
+    # English because the earlier French prompts were written for a French
+    # UI, not because the model reads French worse -- but every one of these
+    # has been edited by hand a dozen times, and the accumulated phrasing is
+    # harder to reason about in a second language than it is worth. The
+    # response keys stay French: parse_band_response looks for BANDE etc, and
+    # changing both at once would confound a prompt comparison with a parser
+    # change.
+    #
+    # No reference photos: not opted into VARIANTS_USING_REFERENCES. The
+    # existing set was shot on the old camera, old dish and old lighting, and
+    # grounding a calibrated tray photo against them is worse than sending
+    # none -- which the bench already showed once, when turning references
+    # off moved a known-0% sample from "3-7%" to "<1%, high confidence".
+    "3.0": """You are looking at a photograph of black soldier fly larvae (Hermetia illucens) scattered on a white tray, taken by a fixed calibration rig. Estimate how much MEO is visible -- organic foreign matter, the rearing residue also called frass.
+
+The photograph is taken under controlled conditions you can rely on. The camera is directly overhead and square to the tray, the lighting is even across the whole frame, and the colours are fixed. The frame is 400 mm wide and the whole of it is tray. A larva is 15 to 20 mm long, so it spans roughly one twenty-fifth of the image width -- use that as your ruler.
+
+Judge density against the area the sample itself covers -- larvae plus MEO -- and NOT against the whole photograph. The larvae are spread thinly so that they lie in a single layer, so a large part of the frame is bare white tray. Bare tray is empty space. It is neither contamination nor evidence of a clean sample, and it must not enter the estimate either way.
+
+Count material you could see at a glance. Using the larva as a ruler, that means particles down to about 1 mm -- roughly one fifteenth of a larva's length. Anything finer than that is dust and powder residue: ignore it. Judge as an inspector glancing at the tray would, not as someone with a magnifying glass.
+
+Two things look like MEO and are not.
+
+A prepupa is a normal larva, not foreign matter. Approaching pupation a larva darkens considerably, to dark brown or nearly black, and by colour alone can resemble a clump of frass. Before counting anything dark as MEO, look at its shape: a larva keeps its elongated, clearly segmented outline even when very dark.
+
+A crushed or broken larva is also product, not contamination. Larval flesh is pale and cream-coloured where breakage exposes it, plainly different from the brown-to-black of frass. Judge these by colour: a pale fragment is a broken larva and does not count, a dark one still does.
+
+Be careful at the low end of the scale. A few small isolated specks, well separated across the sample, is typically <1% or 1-3% -- not 3-7%. Reserve 3-7% for when foreign matter forms visible specks or clumps across a good part of the sample area, while the larvae still plainly dominate. Above that, at 7-10%, dark material is a continuous presence rather than scattered incidents: there is some in every part of the sample, and it begins to read as a component of the mixture rather than as debris within it.
+
+Do NOT try to count individual particles. Give an overall visual impression of density, as a person glancing at the tray would.
+
+Answer EXACTLY in this format, with nothing before or after:
+
+BANDE: [a single value among : <1%, 1-3%, 3-7%, 7-10%, 10-14%, >14%]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+FACTEURS: [comma-separated list, only from : prepupes, fragments_ecrases, poussiere, densite_reelle, autre -- the factors that ACTUALLY influenced this band choice on this specific photo, not a generic list]
+JUSTIFICATION: [one sentence, in French, what drove this choice]""",
+
     # First variant written for a NEW PHYSICAL METHOD rather than as a
     # wording refinement: the sample is now presented in a filled, levelled
     # circular dish (~16 cm) instead of scattered in a single layer on an
