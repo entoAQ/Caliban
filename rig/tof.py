@@ -59,6 +59,17 @@ SENTINEL = 4000
 # occasional dropout without smearing a real change, which a mean would not.
 FRAMES = 16
 
+# The sensor drifts as it warms, and not evenly across its zones -- measured
+# here as a whole-field shift of ~2.7mm plus a band of ~4mm along one edge,
+# between a reading taken seconds after power-up and one a minute later. That
+# is larger than the tilt this tool exists to detect.
+#
+# It only matters for the reference, which is taken once and then compared
+# against for months. A cold reference bakes the warm-up into every later
+# reading as a permanent false tilt. `read` does not wait, because by the time
+# anyone is reading the sensor has been up for a while.
+WARMUP_SECONDS = 90
+
 
 def _sensor():
     """Open the lidar.
@@ -168,6 +179,13 @@ def _plane(grid):
 def reference():
     """Record the flat baseline. Empty, flat, level tray, boom where it lives."""
     lidar = _sensor()
+
+    print(f"Warming up for {WARMUP_SECONDS}s before measuring.")
+    deadline = time.time() + WARMUP_SECONDS
+    while time.time() < deadline:
+        _frame(lidar)  # keep it ranging, which is what actually warms it
+        time.sleep(0.2)
+
     grid, valid = _measure(lidar)
 
     weak = valid < 0.5
