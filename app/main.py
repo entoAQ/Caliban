@@ -990,6 +990,12 @@ for _scale in BAND_SCALES.values():
 # looking at a photo for.
 OUTLIER_THRESHOLD_PTS = 3.0
 
+# Longest edge sent to the vision model. GPT-4o scales anything larger to fit
+# 2048x2048 before tiling, so this is the point past which extra pixels are
+# discarded rather than used -- resizing here is free in accuracy and saves the
+# memory, bandwidth and latency of carrying them to Azure to be thrown away.
+MODEL_MAX_EDGE = 2048
+
 
 def band_for_pct(pct, scale="standard"):
     """The band a percentage falls in, on a given scale.
@@ -1346,11 +1352,34 @@ async def azure_band_test(
     def _key(angle, mirror):
         return f"{angle}m" if mirror else str(angle)
 
-    rotated_b64 = {"0": b64_image}
-    if repeats > 1:
-        from PIL import Image
+    # Downscale once, before anything is encoded.
+    #
+    # GPT-4o's vision path scales any image to fit 2048x2048 before tiling it,
+    # so every pixel above that edge is discarded before the model sees it.
+    # Sending a 4608x2592 frame therefore buys nothing and costs a great deal:
+    # eight base64 copies of a 12MP JPEG is tens of megabytes held in memory at
+    # once, on top of PIL's decoded buffers, which is enough to get a worker
+    # killed on a small App Service plan -- and a killed worker returns no
+    # response at all, which the browser reports as a CORS failure because
+    # there are no headers on a connection that simply died.
+    #
+    # Applied to every transform including the untouched one, so all repeats
+    # are the same size and quality. Previously rotation 0 was the original
+    # JPEG while the rest were re-encoded, which meant the spread across
+    # rotations carried a little encoding difference along with it.
+    from PIL import Image
 
-        original = Image.open(io.BytesIO(contents)).convert("RGB")
+    original = Image.open(io.BytesIO(contents)).convert("RGB")
+    if max(original.size) > MODEL_MAX_EDGE:
+        original.thumbnail((MODEL_MAX_EDGE, MODEL_MAX_EDGE), Image.LANCZOS)
+
+    def _encode(img):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+    rotated_b64 = {"0": _encode(original)}
+    if repeats > 1:
         for angle, mirror in transforms[1:]:
             # expand=True keeps the whole frame at 90/270 on a non-square
             # image; cropping instead would hand each rotation a different
@@ -1358,9 +1387,7 @@ async def azure_band_test(
             img = original.rotate(angle, expand=True)
             if mirror:
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=95)
-            rotated_b64[_key(angle, mirror)] = base64.b64encode(buf.getvalue()).decode("utf-8")
+            rotated_b64[_key(angle, mirror)] = _encode(img)
 
     # Save the actual captured photo, once per call (same photo for every
     # variant being compared) -- best-effort, since a storage hiccup
