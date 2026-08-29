@@ -16,6 +16,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
 
+# Which commit this image was built from, reported by /health.
+#
+# Without it there is no way to tell a running new build from a cached old
+# one except by looking for a behaviour you expect -- which is guesswork, and
+# guessing wrong sent us chasing a CORS error that was never there. Last in
+# the file so changing it cannot invalidate the dependency layer.
+ARG GIT_SHA=unknown
+ENV CALIBAN_BUILD_SHA=$GIT_SHA
+
 EXPOSE 8000
 
 # One CMD. There were two, and only the last counted -- so the first was dead

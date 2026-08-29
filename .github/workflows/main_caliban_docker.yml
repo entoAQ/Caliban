@@ -58,6 +58,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: |
             ghcr.io/entoaq/caliban:latest
             ghcr.io/entoaq/caliban:${{ github.sha }}
@@ -88,6 +90,34 @@ jobs:
           app-name: Caliban
           publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
           images: ghcr.io/entoaq/caliban:${{ github.sha }}
+
+      # Wait until the live service reports the commit we just built.
+      #
+      # App Service keeps serving the old container while the new one starts,
+      # so a green deploy step means "accepted", not "running". Every time we
+      # have been unsure whether a fix was actually live, this is the question
+      # we were really asking, and answering it by looking for expected
+      # behaviour is guesswork.
+      #
+      # Never fails the build. The image is pushed and the deploy is accepted
+      # either way; a slow cold start is not a broken build, and a red X here
+      # would say the wrong thing.
+      - name: Wait for the new build to go live
+        if: env.AZURE_PUBLISH_PROFILE != ''
+        continue-on-error: true
+        run: |
+          url="https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net/health"
+          want="${{ github.sha }}"
+          for i in $(seq 1 60); do
+            live=$(curl -fsS --max-time 10 "$url" | jq -r '.build_sha // empty') || live=""
+            if [ "$live" = "$want" ]; then
+              echo "::notice::Live after $((i * 10))s: $want"
+              exit 0
+            fi
+            echo "waiting $((i * 10))s -- live=${live:-unreachable}"
+            sleep 10
+          done
+          echo "::warning::Still not reporting $want after 10 minutes (last seen: ${live:-unreachable})."
 
       - name: How to deploy this exact build
         run: |

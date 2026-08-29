@@ -179,6 +179,10 @@ def health():
         # available_prompt_variants confirms a prompt deploy -- check
         # this against local main.py rather than guessing from how long
         # ago you ran the deploy command.
+        # The commit this container was built from. The one reliable answer to
+        # "is the running service actually the code I just pushed", which
+        # otherwise has to be inferred from behaviour.
+        "build_sha": os.environ.get("CALIBAN_BUILD_SHA", "unknown"),
         "band_test_capture_bucket": BAND_TEST_CAPTURE_BUCKET,
         # Surfaced so a browser refusal can be diagnosed without portal access:
         # compare this against the page's own origin.
