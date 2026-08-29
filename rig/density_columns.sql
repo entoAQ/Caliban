@@ -33,3 +33,19 @@ alter table vision_band_estimates
 create index if not exists vision_band_estimates_density_idx
     on vision_band_estimates (prompt_version, density_est)
     where density_est is not null;
+
+-- The lab's measured bulk density, attached to the estimate for comparison.
+--
+-- Already fetched when computing ME% (me_organic_wt / bulk_density * 100) and
+-- then discarded. Keeping it costs nothing and it is the ground truth the
+-- model's estimate is judged against -- in the same g/L, on the same physical
+-- sample, on the same row. Without it every density_est is a number with
+-- nothing to compare against, and the comparison would have to be assembled by
+-- hand from two tables afterwards.
+alter table vision_band_estimates
+    add column if not exists real_density numeric;
+
+-- The pairs worth regressing.
+create index if not exists vision_band_estimates_density_pair_idx
+    on vision_band_estimates (prompt_version)
+    where density_est is not null and real_density is not null;

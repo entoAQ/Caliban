@@ -1738,6 +1738,7 @@ async def azure_band_test(
     lot_id = None
     lot_text = lot_number.strip() or None
     real_pct_value = None
+    real_density_value = None
     real_pct_source = None
     lookup_error = None
     try:
@@ -1789,6 +1790,13 @@ async def azure_band_test(
                 if wt is not None and density is not None and density > 0:
                     real_pct_value = round((wt / density) * 100, 2)
                     real_pct_source = "lot_lookup"
+                    # The measured bulk density, kept rather than discarded
+                    # after computing the percentage. It is the ground truth
+                    # for the model's own density estimate, in the same g/L,
+                    # and it was already being fetched -- there is no cheaper
+                    # place to capture it than here, and without it every
+                    # density_est is a number with nothing to compare against.
+                    real_density_value = float(density)
                 else:
                     real_pct_source = "lot_matched_no_result_yet"
         elif real_pct.strip():
@@ -1840,6 +1848,7 @@ async def azure_band_test(
                 "estimate_spread": parsed.get("estimate_spread"),
                 "density_est": parsed.get("density_est"),
                 "density_spread": parsed.get("density_spread"),
+                "real_density": real_density_value,
             }).execute()
 
             # Defensive: some client/API combinations can return a response
@@ -1860,6 +1869,7 @@ async def azure_band_test(
         "recorded_as": lot_text,
         "real_pct_used": real_pct_value,
         "real_pct_source": real_pct_source,
+        "real_density_used": real_density_value,
     }
 
 
@@ -2040,7 +2050,16 @@ def band_estimates_backfill(
         # a decision for a human, not a silent side effect of pressing save.
         update_resp = (
             supabase.table("vision_band_estimates")
-            .update({"real_pct": real_pct_value, "real_pct_source": "lot_lookup"})
+            # real_density goes with real_pct because they come from the same
+            # lookup and both describe the same physical sample. Filling one
+            # and not the other would leave every estimate captured before the
+            # results were entered permanently unable to be compared on
+            # density, which is the whole point of recording it.
+            .update({
+                "real_pct": real_pct_value,
+                "real_pct_source": "lot_lookup",
+                "real_density": float(density),
+            })
             .eq("lot_id", lot_id)
             .is_("real_pct", "null")
             .execute()
@@ -2049,6 +2068,7 @@ def band_estimates_backfill(
             "status": "ok",
             "updated": len(update_resp.data or []),
             "real_pct": real_pct_value,
+            "real_density": float(density),
         }
 
     except Exception as e:
