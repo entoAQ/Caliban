@@ -56,11 +56,27 @@ RIG_API_KEY = os.environ.get("RIG_API_KEY")
 
 app = FastAPI(title="Contamination Screening Inference API")
 
-# Restrict to your actual frontend origin in production
+# Allowed browser origins, comma-separated. A single fixed origin was fragile
+# by design: Vercel issues a fresh URL for every preview deployment, and a
+# renamed project changes the production one too -- so the app setting silently
+# stops matching and every browser request is refused, while curl and the Pi
+# keep working because neither sends an Origin. That failure reports itself as
+# "blocked by CORS policy", which reads like a header problem rather than a
+# stale environment variable.
+#
+# Trailing slashes are stripped because an origin never has one, and
+# "https://example.com/" in an app setting matches nothing at all while looking
+# entirely correct.
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "*")
+ALLOWED_ORIGINS = [o.strip().rstrip("/") for o in FRONTEND_ORIGIN.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=ALLOWED_ORIGINS,
+    # Vercel preview deployments get a generated subdomain that cannot be
+    # listed in advance. Matching them by pattern keeps previews working
+    # without widening production to every origin on the internet.
+    allow_origin_regex=os.environ.get("FRONTEND_ORIGIN_REGEX") or None,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -147,6 +163,9 @@ def health():
         # this against local main.py rather than guessing from how long
         # ago you ran the deploy command.
         "band_test_capture_bucket": BAND_TEST_CAPTURE_BUCKET,
+        # Surfaced so a browser refusal can be diagnosed without portal access:
+        # compare this against the page's own origin.
+        "allowed_origins": ALLOWED_ORIGINS,
         "outlier_threshold_pts": OUTLIER_THRESHOLD_PTS,
         # Confirms the per-variant reference-photo change deployed. Should
         # list only 1.x -- 2.x runs prompt-only by design, and seeing a 2.x
