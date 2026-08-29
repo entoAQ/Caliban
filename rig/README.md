@@ -126,7 +126,6 @@ Then clone and clear out the old loose copies, so there is exactly one
 
 ```bash
 git clone git@github.com:entoAQ/Caliban.git ~/caliban
-chmod +x ~/caliban/rig/update.sh
 rm -f ~/capture.py ~/poller.py ~/preview.py
 
 sudo cp ~/caliban/rig/caliban-rig.service /etc/systemd/system/
