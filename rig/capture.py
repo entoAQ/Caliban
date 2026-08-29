@@ -38,11 +38,23 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 from libcamera import controls as libcontrols
 from picamera2 import Picamera2
 
 SETTINGS_FILE = Path.home() / "rig_settings.json"
 OUTPUT_DIR = Path.home() / "captures"
+
+# The measured illumination pattern. Kept beside the settings rather than in
+# them: it is thousands of numbers, and rig_settings.json is meant to stay
+# something you can read and sanity-check with cat.
+FLATFIELD_FILE = Path.home() / "rig_flatfield.npy"
+
+# The flat field is stored as a GRID x GRID map. Coarse on purpose -- what is
+# being measured varies smoothly across the whole frame, so anything finer than
+# this is the reference surface's own texture and the sensor's noise, and
+# storing it would print this particular plate into every future capture.
+GRID = 24
 # The imx708's native array is 16:9, not the 4:3 the OV5647 gave. There is no
 # full-sensor 4:3 mode to fall back to, so the framing genuinely changes with
 # the camera -- every stored crop, region and exposure predates this and must
@@ -236,7 +248,10 @@ def sample(region):
             "ColourGains": tuple(settings["colour_gains"]),
         }
     )
-    frame = picam2.capture_array()
+    # Corrected rather than raw, so this reports what a capture would actually
+    # contain. Reading raw would make it impossible to check the flat field
+    # with the same tool that found the problem.
+    frame = _apply_flatfield(picam2.capture_array())
     picam2.stop()
     picam2.close()
 
@@ -287,8 +302,6 @@ def whitebalance(region):
     Order matters in that direction only -- `measure` undoes this correction,
     but this does not disturb the exposure `measure` set.
     """
-    import numpy as np
-
     if not SETTINGS_FILE.exists():
         sys.exit(f"No settings at {SETTINGS_FILE}. Run 'measure' first.")
 
@@ -326,7 +339,7 @@ def whitebalance(region):
         """
         time.sleep(0.4)
         picam2.capture_array()  # discard -- controls take a frame to land
-        frame = picam2.capture_array()
+        frame = _apply_flatfield(picam2.capture_array())
         h, w = frame.shape[:2]
         x0, x1 = int(w * fx0), int(w * fx1)
         y0, y1 = int(h * fy0), int(h * fy1)
@@ -439,6 +452,134 @@ def setcrop(region):
           "only\ninside the dish, which it can only do if it can see the edge.")
 
 
+def flatfield():
+    """Measure the ring's illumination pattern and store a correction for it.
+
+    A ring light lights an annulus. Directly beneath its centre the only light
+    arriving comes in at a shallow angle from the rim, so the middle of the
+    field sits measurably darker than the edges -- on this rig, 22% down on the
+    corners, and colour-shifted with it, because proportionally more of what
+    reaches the centre is bounce rather than direct.
+
+    That is not a defect to be fixed by moving something. It is what a ring at
+    working distance does, and the only physical cure is raising it far enough
+    that the tray is effectively lit from a point, which costs the working
+    distance and the light that made a ring attractive in the first place.
+
+    So it gets measured instead. Fill the frame with one uniform matte surface,
+    run this, and whatever variation comes back can only be the illumination --
+    which makes it correctable. This is the same discipline as a flat frame in
+    astronomy, and it is sound for the same reason: the correction is measured
+    rather than guessed, and it is re-measured whenever the geometry changes.
+
+    Why it matters here specifically: an illumination gradient is one of the
+    very few errors that rotation-averaging cannot touch. Rotating the image
+    leaves the lamp where it is, so the dim centre stays over the same part of
+    the sample in all four rotations and every one of them is wrong in the same
+    direction. Averaging four identical biases just gives the bias back.
+    """
+    if not SETTINGS_FILE.exists():
+        sys.exit(f"No settings at {SETTINGS_FILE}. Run 'measure' first.")
+
+    settings = json.loads(SETTINGS_FILE.read_text())
+    picam2 = _start(
+        {
+            "AeEnable": False,
+            "ExposureTime": settings["exposure_time"],
+            "AnalogueGain": settings["analogue_gain"],
+            "AwbEnable": False,
+            "ColourGains": tuple(settings["colour_gains"]),
+        }
+    )
+    frame = picam2.capture_array().astype(np.float32)
+    picam2.stop()
+    picam2.close()
+
+    h, w = frame.shape[:2]
+    if frame.max() >= 250:
+        sys.exit(
+            "The reference surface is clipping. A clipped pixel has lost the\n"
+            "very brightness difference this is trying to measure, so the map\n"
+            "would read flat exactly where the field is brightest.\n"
+            "Re-run 'measure --ev -0.5' and try again."
+        )
+    if frame.mean() < 40:
+        sys.exit(
+            "The reference surface is very dark. Sensor noise would dominate\n"
+            "the pattern being measured. Use a pale matte surface and enough\n"
+            "light that 'measure' settles near gain 1.0."
+        )
+
+    # Block-average down to a coarse grid before doing anything else. The thing
+    # being measured is illumination, which varies smoothly across the frame;
+    # everything sharper than this grid is the surface's own texture, its
+    # scratches and marks, and sensor noise. Keeping any of that would bake a
+    # negative print of this particular plate into every future capture.
+    gh, gw = h // GRID, w // GRID
+    coarse = frame[: gh * GRID, : gw * GRID]
+    coarse = coarse.reshape(GRID, gh, GRID, gw, 3).mean(axis=(1, 3))
+
+    # Normalise per channel. Correcting each channel separately also cancels
+    # the centre's colour shift, which a single luminance map would leave
+    # behind -- and that shift is real: the centre is not merely dimmer, it is
+    # lit by different light.
+    gains = coarse.mean(axis=(0, 1)) / coarse
+
+    # A flat field corrects a gentle bowl, not a hole. Anything asking for more
+    # than this is not illumination -- it is a shadow, an obstruction, or a
+    # surface that was not uniform after all, and scaling it up would amplify
+    # noise into a region that has no signal to recover.
+    extreme = float(gains.max())
+    gains = np.clip(gains, 0.5, 2.0)
+
+    np.save(FLATFIELD_FILE, gains.astype(np.float32))
+    settings["flat_fielded_at"] = datetime.now().isoformat(timespec="seconds")
+    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+
+    print(f"Illumination range across the frame: {coarse.mean(axis=2).min():.0f}"
+          f" to {coarse.mean(axis=2).max():.0f} of 255")
+    print(f"Largest correction: x{extreme:.2f}")
+    print(f"Written to {FLATFIELD_FILE}")
+
+    if extreme > 2.0:
+        print(
+            "\nWARNING: something needed more than a doubling, which was\n"
+            "clipped. That is past what illumination alone explains -- look\n"
+            "for an obstruction, or a reference surface that is not uniform."
+        )
+
+
+def _apply_flatfield(frame):
+    """Divide out the measured illumination pattern, if one has been measured.
+
+    The map is stored coarse and stretched back up here. Bilinear is right for
+    that: illumination genuinely is smooth, so interpolating between measured
+    points is a fair reconstruction rather than an invention.
+
+    Silently does nothing when no map exists. That is deliberate -- the rig has
+    to keep working before this has been run, and a missing flat field degrades
+    the result rather than invalidating it.
+    """
+    if not FLATFIELD_FILE.exists():
+        return frame
+
+    from PIL import Image
+
+    gains = np.load(FLATFIELD_FILE)
+    h, w = frame.shape[:2]
+    out = np.empty_like(frame)
+
+    # A channel at a time. The full-size float map is 46MB per channel on this
+    # sensor, and holding three of them alongside the frame is enough to matter
+    # on a Pi that is also running the poller.
+    for c in range(3):
+        full = Image.fromarray(gains[:, :, c], mode="F").resize((w, h), Image.BILINEAR)
+        corrected = frame[:, :, c].astype(np.float32) * np.asarray(full)
+        out[:, :, c] = np.clip(corrected, 0, 255).astype(np.uint8)
+
+    return out
+
+
 def capture(lot_number, band):
     """Shoot one frame with the locked settings."""
     if not SETTINGS_FILE.exists():
@@ -459,20 +600,20 @@ def capture(lot_number, band):
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = OUTPUT_DIR / f"{lot_number}_{stamp}_{band}.jpg"
 
+    from PIL import Image
+
+    frame = _apply_flatfield(picam2.capture_array())
+
     crop = settings.get("crop")
     if crop:
-        from PIL import Image
-
-        frame = picam2.capture_array()
         h, w = frame.shape[:2]
         x0, x1 = int(w * crop[0]), int(w * crop[2])
         y0, y1 = int(h * crop[1]), int(h * crop[3])
-        # Quality 95 rather than the default: this image is the measurement,
-        # and JPEG artefacts land hardest on exactly the fine dark detail
-        # being judged.
-        Image.fromarray(frame[y0:y1, x0:x1]).save(str(path), quality=95)
-    else:
-        picam2.capture_file(str(path))
+        frame = frame[y0:y1, x0:x1]
+
+    # Quality 95 rather than the default: this image is the measurement, and
+    # JPEG artefacts land hardest on exactly the fine dark detail being judged.
+    Image.fromarray(frame).save(str(path), quality=95)
 
     picam2.stop()
     picam2.close()
@@ -486,6 +627,11 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("focus", help="autofocus once, then record and hold the lens position")
+
+    sub.add_parser(
+        "flatfield",
+        help="measure the ring's illumination pattern from a uniform surface",
+    )
 
     mea = sub.add_parser("measure", help="settle on auto and record the values")
     mea.add_argument(
@@ -534,6 +680,8 @@ def main():
 
     if args.command == "focus":
         focus()
+    elif args.command == "flatfield":
+        flatfield()
     elif args.command == "measure":
         measure(args.ev)
     elif args.command == "sample":

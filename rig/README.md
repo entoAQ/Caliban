@@ -48,6 +48,7 @@ top-left.
 | `python3 capture.py focus` | Runs autofocus once and records the lens position, in dioptres, into `~/rig_settings.json`. Every capture afterwards holds that position. **Run it before `measure`**, and again only if the boom height changes. Needs contrasty detail to lock onto, so put a printed target on the surface at tray height and take it away afterwards. |
 | `python3 capture.py measure` | Meters the scene, locks exposure and gain into `~/rig_settings.json`. **Run with a filled dish** — metering an empty one drives the exposure far too high and blows out the sample. Warns above gain 2.0, which means underlit. Resets the colour gains, so always follow with `whitebalance`. |
 | `python3 capture.py measure --ev -1` | Same, biased darker by a stop. `-0.5` subtler, `+1` doubles. Sparingly: if something bright is clipping it is usually better to make that thing darker than to underexpose the dish. |
+| `python3 capture.py flatfield` | Measures the ring's illumination pattern from a uniform matte surface filling the frame, and corrects every capture for it afterwards. **The surface must sit at sample height** — the pattern is only valid for the plane it was measured on. |
 | `python3 capture.py sample --region ...` | Reports mean R/G/B of a region and whether it works as a reference. Changes nothing, so guess freely. Also the ambient-drift check. |
 | `python3 capture.py whitebalance --region ...` | Cancels the NoIR colour cast against a neutral patch. Iterates to convergence. Shortens the exposure internally if the patch clips — expected, and reported. |
 | `python3 capture.py setcrop --region ...` | Sets the crop on saved captures. **Keep the dish rim visible** — the prompt asks the model to judge only inside the dish, which it can only do if it can see the edge. Does not affect `sample` or `whitebalance`, which always read the full sensor frame. |
@@ -136,13 +137,21 @@ After any change to lighting, geometry, or the enclosure:
 sudo systemctl stop caliban-rig
 python3 preview.py                                  # frame, Ctrl+C
 python3 capture.py focus                            # target on the surface
-python3 capture.py measure                          # filled dish
-python3 capture.py sample --region <patch>          # confirm "usable"
-python3 capture.py whitebalance --region <patch>
+python3 capture.py measure                          # uniform plate, filling frame
+python3 capture.py flatfield                        # same plate, at sample height
+python3 capture.py sample --region <centre>         # confirm the hole is gone
+python3 capture.py measure                          # now the filled dish
+python3 capture.py whitebalance --region <patch>    # white paper, not the plate
 python3 capture.py setcrop --region <dish + margin>
 python3 capture.py capture LOT12345
 sudo systemctl start caliban-rig
 ```
+
+`measure` appears twice on purpose. The first one exposes for the flat-field
+plate so the pattern is measured without clipping; the second re-meters on the
+actual sample, which is what the captures need. The flat field survives that
+second `measure` — it is stored as per-channel ratios normalised to the frame's
+own mean, so a global exposure or colour-gain change cancels out of it.
 
 Order matters twice over. `focus` comes first because the exposure, the white
 balance patch and the crop are all measured through whatever focus is set, so
