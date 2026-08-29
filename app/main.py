@@ -99,9 +99,26 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     attacker reading it.
     """
     traceback.print_exc()
+
+    # The header has to be set here by hand. Starlette routes a generic
+    # Exception handler through ServerErrorMiddleware, which sits OUTSIDE the
+    # middleware stack, so this response never passes back through
+    # CORSMiddleware however the middleware is configured. Registering the
+    # handler alone changes nothing the browser can see -- which is why the
+    # first attempt at this fix looked identical to no fix at all.
+    #
+    # Echoes the caller's origin rather than "*", so it stays correct if
+    # credentials are ever enabled, where "*" is rejected outright.
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin and ("*" in ALLOWED_ORIGINS or origin.rstrip("/") in ALLOWED_ORIGINS):
+        headers["Access-Control-Allow-Origin"] = origin
+        headers["Vary"] = "Origin"
+
     return JSONResponse(
         status_code=500,
         content={"detail": f"Erreur serveur : {type(exc).__name__}: {exc}"},
+        headers=headers,
     )
 
 _model = None
