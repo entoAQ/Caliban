@@ -1610,8 +1610,13 @@ async def azure_band_test(
     # Back to one result per variant: the rotations are the same question
     # asked several ways, not separate findings.
     by_variant = {v: [] for v in requested_variants}
-    for (variant_label, _), run in zip(jobs, all_runs):
-        by_variant[variant_label].append(run)
+    # Indexed rather than unpacked. A job gained a third element when mirrors
+    # were added, and this loop still destructured two -- which raised only at
+    # request time, in a path the browser reported as a CORS failure. Taking
+    # the field by position keeps this from breaking again the next time the
+    # tuple grows.
+    for job, run in zip(jobs, all_runs):
+        by_variant[job[0]].append(run)
     parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
 
     # Lot/real-value lookup happens ONCE per photo, not once per variant --
