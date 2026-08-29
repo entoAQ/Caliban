@@ -156,6 +156,29 @@ machine, not to the branch, and it must survive every pull untouched.
 
 ---
 
+## Editing prompts
+
+Prompts live in the `vision_prompts` table and no longer need a deploy. A row
+replaces the version compiled into the image for the same label, and the
+service picks it up within a minute.
+
+```sql
+insert into vision_prompts (label, prompt_text, band_scale, notes)
+values ('3.3', 'You are looking at ...', 'coarse', 'tighter low end')
+on conflict (label) do update
+  set prompt_text = excluded.prompt_text,
+      band_scale  = excluded.band_scale,
+      updated_at  = now();
+```
+
+`/health` reports `prompt_sources`, so you can see which labels the database is
+overriding and which are still coming from the image — otherwise an edited
+prompt and a compiled one look identical from outside.
+
+Editing in place is fine. `prompt_hash` is computed from the text actually
+sent, so estimates recorded before an edit stay interpretable against the text
+that produced them, and the previous wording is kept in `vision_prompt_history`.
+
 ## Everyday calibration
 
 ```bash

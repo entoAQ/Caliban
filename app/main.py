@@ -172,8 +172,13 @@ def health():
         "model_loaded": get_model() is not None,
         "started_at": STARTUP_TIME,
         "prompt_version": CALIBAN_PROMPT_VERSION,
-        "prompt_hash": PROMPT_HASH,
-        "available_prompt_variants": list(BAND_PROMPT_VARIANTS.keys()),
+        "prompt_hash": prompt_hash(DEFAULT_PROMPT_VARIANT),
+        "available_prompt_variants": sorted(prompt_registry()),
+        # Which variants the database is overriding. Without this, a prompt
+        # edited in the table and one compiled into the image look identical
+        # from outside, and "why is it not using my new wording" has no
+        # answer short of reading the container.
+        "prompt_sources": {l: v["source"] for l, v in sorted(prompt_registry().items())},
         # Presence of these two confirms the capture-storage/structured-
         # factors/outlier-flagging deploy actually took effect, same way
         # available_prompt_variants confirms a prompt deploy -- check
@@ -191,10 +196,12 @@ def health():
         # Confirms the per-variant reference-photo change deployed. Should
         # list only 1.x -- 2.x runs prompt-only by design, and seeing a 2.x
         # label here means something reintroduced references silently.
-        "variants_using_references": sorted(VARIANTS_USING_REFERENCES),
+        "variants_using_references": sorted(
+            l for l, v in prompt_registry().items() if v["uses_references"]),
         # Present in BAND_PROMPT_VARIANTS and still runnable when named
         # explicitly, but hidden from the variant picker.
-        "archived_prompt_variants": sorted(ARCHIVED_PROMPT_VARIANTS),
+        "archived_prompt_variants": sorted(
+            l for l, v in prompt_registry().items() if v["archived"]),
     }
 
 
@@ -209,7 +216,8 @@ async def prompt_variants(operator: dict = Depends(get_current_operator)):
     # produced it stays possible without putting retired candidates in front
     # of an operator choosing what to run today.
     return {
-        "variants": [v for v in BAND_PROMPT_VARIANTS if v not in ARCHIVED_PROMPT_VARIANTS],
+        "variants": sorted(
+            l for l, v in prompt_registry().items() if not v["archived"]),
         "default": DEFAULT_PROMPT_VARIANT,
     }
 
@@ -916,19 +924,117 @@ ARCHIVED_PROMPT_VARIANTS = {"1.3", "1.4", "2.0", "2.1"}
 # where what's visible is a levelled surface rather than the whole sample.
 VARIANTS_USING_REFERENCES = {"1.3", "1.4", "1.5"}
 
-# Computed automatically from the actual prompt text every time this
-# module loads -- guaranteed accurate even if a variant's label/text
-# ever drift out of sync. This is the real, tamper-proof way to know
-# whether two results actually came from the same prompt.
-PROMPT_HASHES = {
-    label: hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
-    for label, text in BAND_PROMPT_VARIANTS.items()
-}
+# ---------------------------------------------------------------------------
+# The prompt registry
+#
+# Prompts live in two places and the database wins. The dict above is the
+# fallback and the history; vision_prompts is where edits happen.
+#
+# The reason is simply cost. A prompt is a paragraph of text, and changing one
+# used to mean a container build, an image push, a pull and a cold start --
+# minutes, for an edit that changes no code. During a week of prompt work that
+# is most of the deploys.
+#
+# What does not change is provenance. The hash is computed from the text
+# actually sent, so an edited prompt changes the hash of everything recorded
+# afterwards while leaving earlier rows interpretable against the text that
+# produced them. Two estimates sharing a label but not a hash remain correctly
+# distinguishable, which is the property that matters.
+#
+# Falling back rather than failing is deliberate at every step below: an empty
+# table, an unreachable database or a malformed row all leave the service
+# running exactly what it ran before the table existed. A prompt registry that
+# can take the service down is worse than one that cannot be edited.
+# ---------------------------------------------------------------------------
+
+# Long enough that a burst of calls costs one query, short enough that an edit
+# is live before anyone goes looking for why it is not. The registry is read on
+# every band-test call and a per-call round trip would add latency to the one
+# path an operator waits on.
+PROMPT_CACHE_SECONDS = 60
+
+_prompt_cache = {"at": 0.0, "value": None}
+
+
+def _code_registry():
+    """The prompts compiled into this build."""
+    return {
+        label: {
+            "text": text,
+            "band_scale": VARIANT_BAND_SCALE.get(label, "standard"),
+            "uses_references": label in VARIANTS_USING_REFERENCES,
+            "archived": label in ARCHIVED_PROMPT_VARIANTS,
+            "source": "code",
+        }
+        for label, text in BAND_PROMPT_VARIANTS.items()
+    }
+
+
+def prompt_registry():
+    """Every known variant, database over code, cached briefly.
+
+    A database row replaces the code entry for the same label outright rather
+    than merging field by field. Merging would let a row inherit a band scale
+    or a reference setting from a prompt it no longer resembles, which is a
+    silent way to read a model's answers against the wrong boundaries.
+    """
+    now = time.time()
+    if _prompt_cache["value"] is not None and now - _prompt_cache["at"] < PROMPT_CACHE_SECONDS:
+        return _prompt_cache["value"]
+
+    registry = _code_registry()
+    try:
+        rows = supabase.table("vision_prompts").select("*").execute().data or []
+        for row in rows:
+            label, text = row.get("label"), row.get("prompt_text")
+            if not label or not text:
+                continue
+            scale = row.get("band_scale") or "standard"
+            registry[label] = {
+                "text": text,
+                # An unknown scale would send every band through the wrong
+                # boundaries, so fall back rather than trust it.
+                "band_scale": scale if scale in BAND_SCALES else "standard",
+                "uses_references": bool(row.get("uses_references")),
+                "archived": bool(row.get("archived")),
+                "source": "db",
+            }
+    except Exception as e:
+        # Keep serving the compiled prompts. This runs on the operator's
+        # critical path, and a database hiccup should cost a stale prompt at
+        # worst, never a failed capture.
+        print(f"[prompt_registry falling back to code] {type(e).__name__}: {e}")
+
+    _prompt_cache["at"] = now
+    _prompt_cache["value"] = registry
+    return registry
+
+
+def prompt_text(label):
+    return prompt_registry()[label]["text"]
+
+
+def prompt_hash(label):
+    """Identifies the exact text, wherever it came from.
+
+    Computed on demand rather than cached at import, because the text can now
+    change without the process restarting -- a hash frozen at startup would
+    quietly label new text with the old prompt's identity.
+    """
+    return hashlib.md5(prompt_text(label).encode("utf-8")).hexdigest()[:8]
+
+
+def prompt_scale(label):
+    return prompt_registry().get(label, {}).get("band_scale", "standard")
+
+
+def prompt_uses_references(label):
+    return prompt_registry().get(label, {}).get("uses_references", False)
+
 
 # Kept as aliases (rather than rewriting /health and every caller) --
 # both point at whichever variant is current default.
 CALIBAN_PROMPT_VERSION = DEFAULT_PROMPT_VARIANT
-PROMPT_HASH = PROMPT_HASHES[DEFAULT_PROMPT_VARIANT]
 
 
 def parse_density(raw):
@@ -1364,12 +1470,13 @@ async def azure_band_test(
     # only), so existing callers see no change in behavior or cost unless
     # they actively opt into a comparison.
     requested_variants = [v.strip() for v in variants.split(",") if v.strip()] or [DEFAULT_PROMPT_VARIANT]
-    unknown = [v for v in requested_variants if v not in BAND_PROMPT_VARIANTS]
+    registry = prompt_registry()
+    unknown = [v for v in requested_variants if v not in registry]
     if unknown:
         raise HTTPException(
             status_code=400,
             detail=f"Variante(s) de prompt inconnue(s) : {', '.join(unknown)}. "
-                   f"Disponibles : {', '.join(BAND_PROMPT_VARIANTS)}.",
+                   f"Disponibles : {', '.join(sorted(registry))}.",
         )
 
     client = get_azure_client()
@@ -1485,16 +1592,16 @@ async def azure_band_test(
     # than downloading and base64-encoding files nothing will send.
     references = (
         get_reference_images("meo_density")
-        if any(v in VARIANTS_USING_REFERENCES for v in requested_variants)
+        if any(prompt_uses_references(v) for v in requested_variants)
         else []
     )
 
     def call_variant(variant_label, angle=0, mirror=False):
-        content = [{"type": "text", "text": BAND_PROMPT_VARIANTS[variant_label]}]
+        content = [{"type": "text", "text": prompt_text(variant_label)}]
         # Per-variant, not per-request: comparing a reference-using variant
         # against a prompt-only one on the same photo has to send different
         # payloads, or the comparison isn't measuring what it claims to.
-        variant_refs = references if variant_label in VARIANTS_USING_REFERENCES else []
+        variant_refs = references if prompt_uses_references(variant_label) else []
         if variant_refs:
             content.append({
                 "type": "text",
@@ -1538,7 +1645,7 @@ async def azure_band_test(
         parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
         parsed["reference_count"] = len(variant_refs)
         parsed["prompt_version"] = variant_label
-        parsed["prompt_hash"] = PROMPT_HASHES[variant_label]
+        parsed["prompt_hash"] = prompt_hash(variant_label)
         parsed["rotation"] = _key(angle, mirror)
         return parsed
 
@@ -1585,7 +1692,7 @@ async def azure_band_test(
 
         result = dict(primary)
         result["band"] = band_for_pct(
-            mean, VARIANT_BAND_SCALE.get(variant_label, "standard"))
+            mean, prompt_scale(variant_label))
         result["estimate_pct"] = round(mean, 2)
         result["estimate_spread"] = round(spread, 2)
         result["repeat_count"] = len(runs)
