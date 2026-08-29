@@ -18,6 +18,7 @@ import asyncio
 import datetime
 import hashlib
 import io
+import json
 import os
 import re
 import statistics
@@ -1636,6 +1637,9 @@ def capture_commands_next(_: bool = Depends(verify_rig_key)):
             "id": data["id"],
             "lot_id": data.get("lot_id"),
             "lot_number": data.get("lot_number"),
+            # Older rows predate the column and are all plain captures, so an
+            # absent kind means capture rather than an error.
+            "kind": data.get("kind") or "capture",
         }
     }
 
@@ -1643,11 +1647,18 @@ def capture_commands_next(_: bool = Depends(verify_rig_key)):
 @app.post("/capture-commands/{command_id}/complete")
 async def capture_commands_complete(
     command_id: str,
-    file: UploadFile = File(...),
+    file: UploadFile = File(None),
     ir_file: UploadFile = File(None),
+    result: str = Form(None),
     _: bool = Depends(verify_rig_key),
 ):
-    """Store the captured frames and mark the command done.
+    """Store whatever the command produced and mark it done.
+
+    Two shapes of result arrive here. A capture or a preview sends images. A
+    calibration stage sends measurements and no image at all -- it changed the
+    rig's settings rather than photographing anything. Both are complete
+    results, so both finish through the same endpoint rather than through a
+    second one that would duplicate the storage-then-row ordering below.
 
     The IR frame is optional -- the rig runs perfectly well with the IR
     boards unattached, and a visible-only capture is a complete result rather
@@ -1671,6 +1682,27 @@ async def capture_commands_complete(
         return path
 
     try:
+        if file is None:
+            if result is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Une commande terminée doit fournir une image ou un résultat.",
+                )
+            try:
+                parsed = json.loads(result)
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=400, detail=f"Résultat JSON invalide : {e}"
+                )
+            update_resp = supabase.table("capture_commands").update({
+                "status": "done",
+                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "result": parsed,
+            }).eq("id", command_id).execute()
+            if not update_resp.data:
+                raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
+            return {"status": "ok", "result": parsed}
+
         image_path = await _store(file, "visible")
         ir_path = await _store(ir_file, "ir") if ir_file is not None else None
 
