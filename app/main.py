@@ -775,6 +775,39 @@ assert "3-7%" not in _P31, "old band boundaries survived into 3.1"
 assert "DENSITE:" in _P31, "density substitution did not apply"
 BAND_PROMPT_VARIANTS["3.1"] = _P31
 
+# 3.2 is 3.1 with the density question anchored to real numbers.
+#
+# 3.1 asked for a bulk density and got 550 g/L against a true range of roughly
+# 140-250. That is not the model reading the photograph badly -- it is the
+# model having no idea what this product weighs and reaching for a generic
+# biomass prior. Dried BSF larvae are unusually light: they are hollow, dry and
+# irregular, so they pack with a great deal of air between them, and a number
+# an order of magnitude closer to wet grain is what any general prior would
+# produce.
+#
+# So the fix is to say what the product weighs, in the only terms a photograph
+# can support -- what the larvae look like. The two anchors are measured
+# values, and they run in the direction that surprises people: larger, puffier
+# larvae give a LOWER bulk density, because rounded bodies nest badly and trap
+# air; small flat ones pack closer and read higher. Stating the direction
+# matters as much as the numbers, since a model told only "140 to 250" has no
+# way to know which end a puffy tray belongs at.
+#
+# The hard bound at the end is doing real work. Without it, an anchored range
+# is a suggestion the model is free to leave, which is exactly what it did.
+_P32 = _P31.replace(
+    """DENSITE: [your best estimate of the sample's bulk density in grams per litre, as a single number or a range like 480-560. Judge it from what the photograph shows: the size of the larvae, how plump or shrivelled they look, and how much fine material is present. Give a number even when uncertain -- consistency between photographs matters more here than absolute accuracy.]""",
+    """DENSITE: [the sample's bulk density in grams per litre. Anchor it on these two measured references from this same rig:
+  - a tray of mostly large, puffy, well-rounded larvae is about 140 g/L
+  - a tray of mostly small, flat, shrivelled larvae is about 250 g/L
+Note the direction: bigger and puffier means LOWER density, because rounded larvae nest badly and trap air between them, while small flat ones pack closer together. Fine material fills the gaps and raises it further. Almost every sample falls between these two references. Do not answer outside 120-280 g/L unless the tray looks clearly more extreme than either description, and say so in the justification if you do. Give a single number or a narrow range.]""",
+)
+
+assert _P32 != _P31, "density anchoring did not apply"
+assert "140 g/L" in _P32 and "250 g/L" in _P32, "anchors missing from 3.2"
+assert "480-560" not in _P32, "the old unanchored example survived"
+BAND_PROMPT_VARIANTS["3.2"] = _P32
+
 
 # REVERTED to 1.5 on 2026-08-23. The dish method was abandoned: it proved less
 # accurate than scattering onto a tray, which is what the rig now photographs.
@@ -843,10 +876,12 @@ def parse_density(raw):
     measurement, and the spread that matters is the one across rotations,
     which is measured rather than declared.
 
-    Anything outside 100-1500 g/L is discarded. Whole BSF larvae sit around
-    400-700; a number far outside that is a unit slip or a hallucination, and
-    letting it through would poison the mean that the whole calibration idea
-    depends on.
+    Bounds are deliberately far wider than the real range, which measures
+    about 140-250 g/L for this product -- dried larvae are hollow and irregular
+    and pack with a lot of air. The filter is here to catch unit slips and
+    nonsense, not to enforce the answer: a model reading 550 when the truth is
+    200 is the single most useful thing this data can tell us, and quietly
+    dropping it would hide the error the calibration exists to find.
     """
     numbers = re.findall(r"\d+(?:[.,]\d+)?", raw or "")
     if not numbers:
@@ -861,7 +896,7 @@ def parse_density(raw):
     if "kg" in (raw or "").lower() and value < 10.0:
         value *= 1000.0
 
-    if not 100.0 <= value <= 1500.0:
+    if not 20.0 <= value <= 2000.0:
         return None
     return round(value, 1)
 
@@ -936,7 +971,7 @@ BAND_SCALES = {
 
 # Which scale each variant speaks. Absent means "standard", so every existing
 # variant keeps its meaning without being listed.
-VARIANT_BAND_SCALE = {"3.1": "coarse"}
+VARIANT_BAND_SCALE = {"3.1": "coarse", "3.2": "coarse"}
 
 # Flattened for lookup by label. Labels are unique across scales, which is not
 # an accident worth relying on silently -- assert it, because a collision would
