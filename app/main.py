@@ -1321,21 +1321,46 @@ async def azure_band_test(
     # answer to the nearest band; four answering 3-7, 3-7, 7-10, 3-7 average to
     # 5.9%, a finer distinction than any single call can express. That matters
     # most exactly where the prompt is weakest -- the 3-7 / 7-10 boundary.
-    repeats = max(1, min(4, repeats))
-    rotations = {1: [0], 2: [0, 180], 3: [0, 90, 180], 4: [0, 90, 180, 270]}[repeats]
+    # Eight transforms, not ten, and every one of them lossless. Right angles
+    # and mirrors move pixels without resampling them; any other angle
+    # interpolates, softens exactly the fine dark detail being judged, and
+    # leaves blank corners the model has to be told to ignore. A ninth
+    # presentation would therefore differ from the first eight in image quality
+    # as well as orientation, which confounds the very thing this measures.
+    #
+    # Ordered so that a small number of repeats spends them well: 0 and 180
+    # are the most different pair, then the other two right angles, then the
+    # mirrors. Asking for 2 should not get you two nearly identical views.
+    #
+    # Mirrors count as genuine repeats here. A mirrored tray is the same
+    # sample presented differently, and the answer has no business changing --
+    # so disagreement across mirrors is the same signal as disagreement across
+    # rotations.
+    TRANSFORMS = [
+        (0, False), (180, False), (90, False), (270, False),
+        (0, True), (180, True), (90, True), (270, True),
+    ]
+    repeats = max(1, min(len(TRANSFORMS), repeats))
+    transforms = TRANSFORMS[:repeats]
 
-    rotated_b64 = {0: b64_image}
+    def _key(angle, mirror):
+        return f"{angle}m" if mirror else str(angle)
+
+    rotated_b64 = {"0": b64_image}
     if repeats > 1:
         from PIL import Image
 
         original = Image.open(io.BytesIO(contents)).convert("RGB")
-        for angle in rotations[1:]:
-            buf = io.BytesIO()
+        for angle, mirror in transforms[1:]:
             # expand=True keeps the whole frame at 90/270 on a non-square
             # image; cropping instead would hand each rotation a different
             # sample, which is precisely what must not vary.
-            original.rotate(angle, expand=True).save(buf, format="JPEG", quality=95)
-            rotated_b64[angle] = base64.b64encode(buf.getvalue()).decode("utf-8")
+            img = original.rotate(angle, expand=True)
+            if mirror:
+                img = img.transpose(Image.FLIP_LEFT_RIGHT)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=95)
+            rotated_b64[_key(angle, mirror)] = base64.b64encode(buf.getvalue()).decode("utf-8")
 
     # Save the actual captured photo, once per call (same photo for every
     # variant being compared) -- best-effort, since a storage hiccup
@@ -1373,7 +1398,7 @@ async def azure_band_test(
         else []
     )
 
-    def call_variant(variant_label, angle=0):
+    def call_variant(variant_label, angle=0, mirror=False):
         content = [{"type": "text", "text": BAND_PROMPT_VARIANTS[variant_label]}]
         # Per-variant, not per-request: comparing a reference-using variant
         # against a prompt-only one on the same photo has to send different
@@ -1392,7 +1417,7 @@ async def azure_band_test(
                 content.append({"type": "text", "text": label + " :"})
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
             content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{rotated_b64[angle]}"}})
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{rotated_b64[_key(angle, mirror)]}"}})
 
         start = time.time()
         try:
@@ -1423,7 +1448,7 @@ async def azure_band_test(
         parsed["reference_count"] = len(variant_refs)
         parsed["prompt_version"] = variant_label
         parsed["prompt_hash"] = PROMPT_HASHES[variant_label]
-        parsed["rotation"] = angle
+        parsed["rotation"] = _key(angle, mirror)
         return parsed
 
 
@@ -1440,7 +1465,7 @@ async def azure_band_test(
         when nothing about the sample changed. A tight spread earns confidence
         in a way the model's own self-reported confidence does not.
         """
-        primary = next((r for r in runs if r.get("rotation") == 0), runs[0])
+        primary = next((r for r in runs if r.get("rotation") == "0"), runs[0])
         midpoints = [BAND_MIDPOINTS[r["band"]] for r in runs
                      if r.get("band") in BAND_MIDPOINTS]
 
@@ -1490,9 +1515,9 @@ async def azure_band_test(
     # variants on one photo costs roughly one call's worth of wall-clock time,
     # not N.
     loop = asyncio.get_running_loop()
-    jobs = [(v, a) for v in requested_variants for a in rotations]
+    jobs = [(v, a, m) for v in requested_variants for a, m in transforms]
     all_runs = list(await asyncio.gather(*[
-        loop.run_in_executor(None, call_variant, v, a) for v, a in jobs
+        loop.run_in_executor(None, call_variant, v, a, m) for v, a, m in jobs
     ]))
 
     # Back to one result per variant: the rotations are the same question
