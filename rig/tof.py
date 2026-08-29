@@ -29,10 +29,24 @@ Subtracting a reference absorbs the slant geometry, the per-zone bias and the
 mounting angle together, in one measurement, without needing to know any of
 them separately.
 
+It also measures bulk density, which is the one thing here that is a real
+measurement rather than a check: mass over a physically sensed volume. What it
+is a measurement *of* depends on how the sample is presented, and that matters
+more than the arithmetic. Poured and settled, the envelope volume is what bulk
+density conventionally means and the number is comparable with the lab's.
+Scattered thinly for photography, the envelope is mostly air and the number
+comes out far lower -- still consistent, still regressable, but a different
+quantity wearing the same name. Do not mix the two in one dataset.
+
+Depth decides whether it is worth doing at all. Height precision is about
+2.5mm, so a 6mm scattered layer carries 40 percent error and a 40mm poured bed
+carries 6.
+
 Usage:
-    python3 tof.py reference        # empty, flat, level tray -- once
-    python3 tof.py read             # anything: tray, sample, nothing
-    python3 tof.py read --tolerance 3
+    python3 tof.py reference          # empty, flat, level tray -- once
+    python3 tof.py area --volume-ml 500   # known volume in the tray -- once
+    python3 tof.py read               # anything: tray, sample, nothing
+    python3 tof.py density --mass-g 250
 """
 
 import argparse
@@ -69,6 +83,12 @@ FRAMES = 16
 # reading as a permanent false tilt. `read` does not wait, because by the time
 # anyone is reading the sensor has been up for a while.
 WARMUP_SECONDS = 90
+
+# Measured on this rig: four repeat reads of an untouched tray agreed on mean
+# height to about 0.4mm, but a reading taken against a reference from a
+# separate run sat 2.5mm off. The between-run figure is the honest one, since
+# that is how a density measurement is actually taken.
+HEIGHT_PRECISION_MM = 2.5
 
 
 def _sensor():
@@ -217,6 +237,126 @@ def reference():
           "position it\nwas taken in.")
 
 
+def _load_reference():
+    if not REFERENCE_FILE.exists():
+        sys.exit(f"No reference at {REFERENCE_FILE}. Run 'reference' first, "
+                 "on an empty flat tray.")
+    stored = json.loads(REFERENCE_FILE.read_text())
+    grid = np.array([[np.nan if v is None else v for v in row]
+                     for row in stored["grid_mm"]])
+    return stored, grid
+
+
+def _height(lidar, ref):
+    """Mean height of whatever is on the tray, above the reference plane.
+
+    Mean over the whole sensed field, not over the covered part of it. That is
+    deliberate and it is what makes partial coverage harmless: mean height
+    times sensed area is the true volume of material above the plane whether
+    it is spread thinly or heaped in one corner, because the bare zones
+    contribute a genuine zero rather than a missing value.
+    """
+    grid, _ = _measure(lidar)
+    delta = ref - grid
+    finite = delta[np.isfinite(delta)]
+    if finite.size < GRID * GRID / 2:
+        sys.exit("Too few zones returned to say anything. Check nothing is "
+                 "blocking the sensor.")
+    return float(finite.mean()), delta
+
+
+def area(volume_ml):
+    """Calibrate how much tray the sensor actually sees, from a known volume.
+
+    The alternative was computing it from the sensor's field of view and the
+    mounting height, which needs the exact per-zone angles and the exact
+    mounting angle -- the same two things the flat reference exists to avoid
+    needing. So it is measured the same way: pour in a known volume, read the
+    height it produces, and the area follows. That single number absorbs the
+    field of view, the working distance and any mounting tilt at once.
+
+    Use something that lies flat and fills the field -- water in a shallow
+    tray, or rice levelled off. A heap in the middle gives the same volume and
+    the same answer in principle, but leaves the outer zones reading zero,
+    where the noise is proportionally largest.
+    """
+    stored, ref = _load_reference()
+    lidar = _sensor()
+    height, _ = _height(lidar, ref)
+
+    if height < 5.0:
+        sys.exit(
+            f"Only {height:.1f} mm of material. Height precision is around\n"
+            "2.5 mm, so this would put a large error straight into the area\n"
+            "constant and from there into every density afterwards. Use a\n"
+            "deeper layer -- 20 mm or more."
+        )
+
+    area_mm2 = (volume_ml * 1000.0) / height
+    stored["sensed_area_mm2"] = round(area_mm2, 0)
+    stored["area_calibrated_at"] = datetime.now().isoformat(timespec="seconds")
+    REFERENCE_FILE.write_text(json.dumps(stored, indent=2))
+
+    print(f"Mean height   : {height:.1f} mm")
+    print(f"Sensed area   : {area_mm2 / 100:.0f} cm2 "
+          f"({area_mm2 ** 0.5:.0f} mm square equivalent)")
+    print(f"Written to {REFERENCE_FILE}")
+
+
+def density(mass_g):
+    """Bulk density from mass and the volume the sensor measures.
+
+    This is a real measurement, unlike the vision estimate: mass over volume,
+    with the volume physically sensed. What it is a measurement *of* depends
+    entirely on how the sample is presented, and that distinction matters more
+    than the arithmetic.
+
+    Poured and left to settle, the envelope volume is what bulk density
+    conventionally means, and this number is comparable with the lab's.
+    Scattered thinly for photography, the envelope is mostly air, so the
+    number comes out far lower -- still consistent, still regressable against
+    lab values, but a different quantity wearing the same name. Do not mix the
+    two in one dataset.
+
+    Depth is what decides whether it works at all. Height precision is about
+    2.5 mm, so a 6 mm scattered layer carries 40% error and a 40 mm poured bed
+    carries 6%.
+    """
+    stored, ref = _load_reference()
+    area_mm2 = stored.get("sensed_area_mm2")
+    if not area_mm2:
+        sys.exit("No area calibration. Run 'area --volume-ml N' once, with a "
+                 "known volume in the tray.")
+
+    lidar = _sensor()
+    height, delta = _height(lidar, ref)
+
+    volume_ml = height * area_mm2 / 1000.0
+    if volume_ml <= 0:
+        sys.exit("Measured volume is zero or negative. Is there anything in "
+                 "the tray, and is the reference still valid?")
+
+    density_g_l = mass_g / (volume_ml / 1000.0)
+
+    print(f"Mean depth    : {height:6.1f} mm")
+    print(f"Volume        : {volume_ml:6.1f} mL")
+    print(f"Mass          : {mass_g:6.1f} g")
+    print(f"Bulk density  : {density_g_l:6.0f} g/L")
+
+    # Precision is dominated by the height term; mass and area are far better
+    # known. Stating it as a percentage is what stops the number being read as
+    # more exact than it is.
+    error_pct = 100.0 * HEIGHT_PRECISION_MM / height
+    print(f"\nUncertainty   : about {error_pct:.0f}% "
+          f"(±{HEIGHT_PRECISION_MM} mm on {height:.1f} mm of depth)")
+    if error_pct > 15:
+        print(
+            "\nThat is too coarse to be worth much. The sample is too shallow:\n"
+            "depth is the whole game here, and the fix is pouring it into a\n"
+            "heap or a smaller container rather than reading a thin scatter."
+        )
+
+
 def read(tolerance):
     """Compare the current scene against the reference."""
     if not REFERENCE_FILE.exists():
@@ -272,6 +412,14 @@ def main():
 
     sub.add_parser("reference", help="record the flat baseline (empty tray)")
 
+    ar = sub.add_parser("area", help="calibrate the sensed area from a known volume")
+    ar.add_argument("--volume-ml", type=float, required=True,
+                    help="volume currently in the tray, in millilitres")
+
+    dn = sub.add_parser("density", help="bulk density from mass and sensed volume")
+    dn.add_argument("--mass-g", type=float, required=True,
+                    help="mass of the material in the tray, in grams")
+
     rd = sub.add_parser("read", help="compare the current scene to the reference")
     rd.add_argument(
         "--tolerance", type=float, default=3.0,
@@ -282,6 +430,10 @@ def main():
     args = parser.parse_args()
     if args.command == "reference":
         reference()
+    elif args.command == "area":
+        area(args.volume_ml)
+    elif args.command == "density":
+        density(args.mass_g)
     else:
         read(args.tolerance)
 
