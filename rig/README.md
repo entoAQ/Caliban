@@ -53,6 +53,8 @@ top-left.
 | `python3 capture.py whitebalance --region ...` | Cancels the NoIR colour cast against a neutral patch. Iterates to convergence. Shortens the exposure internally if the patch clips — expected, and reported. |
 | `python3 capture.py setcrop --region ...` | Sets the crop on saved captures. **Keep the dish rim visible** — the prompt asks the model to judge only inside the dish, which it can only do if it can see the edge. Does not affect `sample` or `whitebalance`, which always read the full sensor frame. |
 | `python3 capture.py capture LOT12345` | One photo into `~/captures/`. `--band ir` for an infrared frame. |
+| `python3 tof.py reference` | Records the flat baseline from an empty level tray. Run once, and again whenever the boom moves. |
+| `python3 tof.py read` | Mean bed height, tilt across the tray, worst cell off plane. Complains past 3mm of tilt — meaning either the tray is not flat or the boom moved, and if the boom moved the camera calibration went with it. |
 
 ## Service control
 
