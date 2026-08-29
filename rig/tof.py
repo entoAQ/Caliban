@@ -69,18 +69,27 @@ def _sensor():
     rig directory, from cron, and from systemd, and only one of those has a
     predictable cwd.
     """
-    vendor = Path.home() / "DFRobot_MatrixLidar" / "python" / "raspberry"
-    if not vendor.exists():
+    root = Path.home() / "DFRobot_MatrixLidar"
+    if not root.exists():
         sys.exit(
-            f"Driver not found at {vendor}.\n"
+            f"Driver not found at {root}.\n"
             "Clone it with:\n"
             "    git clone https://github.com/DFRobot/DFRobot_MatrixLidar ~/DFRobot_MatrixLidar"
         )
-    sys.path.insert(0, str(vendor))
 
-    from DFRobot_MatrixLidar import DFRobot_MatrixLidar_I2C
+    # Both the repository root and the module's own directory. The shipped
+    # examples import as `python.raspberry.DFRobot_matrixLidar`, which only
+    # resolves from the repository root, but that form leaves the package
+    # prefix dependent on where the clone happens to sit. Try the plain module
+    # first and fall back, so either layout works.
+    sys.path.insert(0, str(root / "python" / "raspberry"))
+    sys.path.insert(0, str(root))
+    try:
+        from DFRobot_matrixLidar import DFRobot_matrixLidar_i2c
+    except ImportError:
+        from python.raspberry.DFRobot_matrixLidar import DFRobot_matrixLidar_i2c
 
-    lidar = DFRobot_MatrixLidar_I2C(I2C_BUS, I2C_ADDR)
+    lidar = DFRobot_matrixLidar_i2c(I2C_ADDR)
     for _ in range(10):
         if lidar.begin() == 0:
             break
@@ -92,15 +101,36 @@ def _sensor():
             "Remember the working wiring is the opposite of the label names --\n"
             "C/R goes to SDA (pin 3), D/T goes to SCL (pin 5)."
         )
-    lidar.set_matrix(GRID, GRID)
+
+    # 8 means the 8x8 grid. At 4x4 the zones are wider and the reference would
+    # not transfer, so this is not a setting to vary casually.
+    for _ in range(10):
+        if lidar.set_Ranging_Mode(GRID) == 0:
+            break
+        time.sleep(0.5)
+    else:
+        sys.exit(f"Lidar answered but would not enter {GRID}x{GRID} mode.")
+
     return lidar
 
 
 def _frame(lidar):
-    """One 8x8 frame in millimetres, with no-returns as NaN."""
-    raw = np.asarray(lidar.get_all_data(), dtype=float).reshape(GRID, GRID)
-    raw[raw >= SENTINEL] = np.nan
-    return raw
+    """One 8x8 frame in millimetres, with no-returns as NaN.
+
+    get_all_data returns bytes, not distances: each zone is a little-endian
+    16-bit pair, so 64 zones arrive as 128 bytes. Reassembling them is the
+    caller's job, which is easy to miss -- the raw list looks like plausible
+    readings if you do not notice it is twice as long as it should be.
+    """
+    raw = np.asarray(lidar.get_all_data(), dtype=np.uint8)
+    if raw.size != GRID * GRID * 2:
+        raise RuntimeError(
+            f"Expected {GRID * GRID * 2} bytes from the lidar, got {raw.size}."
+        )
+    mm = (raw[1::2].astype(np.uint16) << 8) | raw[0::2]
+    out = mm.astype(float).reshape(GRID, GRID)
+    out[out >= SENTINEL] = np.nan
+    return out
 
 
 def _measure(lidar):
