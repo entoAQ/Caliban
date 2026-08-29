@@ -10,7 +10,7 @@ running it through screen sharing works but adds enough lag that hunting for
 peak focus becomes guesswork. A raw MJPEG stream straight to the browser is
 about as direct as it gets.
 
-Deliberately runs at preview resolution rather than the full 2592x1944 the
+Deliberately runs at preview resolution rather than the full 4608x2592 the
 captures use. Framing and focus don't need the pixels, and the lower rate
 keeps latency low enough that turning the lens feels connected to what you
 see on screen -- which is the whole point.
@@ -30,7 +30,12 @@ from picamera2.encoders import MJPEGEncoder
 from picamera2.outputs import FileOutput
 
 PORT = 8000
-PREVIEW_SIZE = (1296, 972)
+# Exactly a quarter of the capture resolution, and critically the same aspect
+# ratio. Ask an imx708 for 4:3 and it crops the 16:9 array to get there, so the
+# preview would show a narrower scene than the captures do -- and every region
+# fraction read off the preview would land somewhere else in the real frame.
+# The preview only earns its place if what it shows is what gets shot.
+PREVIEW_SIZE = (1152, 648)
 
 PAGE = """<!doctype html>
 <html>
