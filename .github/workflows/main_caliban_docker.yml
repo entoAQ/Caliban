@@ -10,9 +10,9 @@ name: Build and push container image for Caliban
 #
 # Getting App Service to run the new image. That was a manual az command
 # followed by waiting for a restart, which is why a run of small fixes hurt so
-# much: every one cost a full pull and cold start. The webhook step below hands
-# that to App Service as soon as the push finishes, so the wait starts without
-# anyone watching for it.
+# much: every one cost a full pull and cold start with someone watching for the
+# build to finish first. The deploy step below does it as soon as the image is
+# pushed, so the wait starts immediately and unattended.
 
 on:
   push:
@@ -35,8 +35,9 @@ jobs:
     env:
       # Lifted to job level because the secrets context is not reliably
       # available in a step's `if`, while the env context is. Testing the
-      # secret directly in the condition silently never matches.
-      AZURE_WEBAPP_WEBHOOK: ${{ secrets.AZURE_WEBAPP_WEBHOOK }}
+      # secret directly in the condition silently never matches -- the step is
+      # skipped forever and nothing says why.
+      AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -65,15 +66,28 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/entoaq/caliban:buildcache
           cache-to: type=registry,ref=ghcr.io/entoaq/caliban:buildcache,mode=max
 
-      # Tell App Service to pull. The webhook is under Deployment Center ->
-      # Webhook URL on the web app, stored as the AZURE_WEBAPP_WEBHOOK secret.
+      # Point App Service at the image just built and restart it.
+      #
+      # Done here rather than by a registry webhook because this app's
+      # Deployment Center source is GitHub Actions, not Container Registry --
+      # there is no webhook URL to call in that mode, and Azure cannot read a
+      # private GHCR image to poll it either.
+      #
+      # Deployed by SHA rather than :latest. It costs nothing here, since the
+      # workflow knows exactly which build it just produced, and it means the
+      # running image is always identifiable and a rollback is the same command
+      # with an older SHA.
       #
       # Skipped rather than failed when the secret is absent, so a fork or a
       # fresh clone still builds. Without it the deploy is the manual command
       # printed below, exactly as before.
-      - name: Trigger the App Service pull
-        if: env.AZURE_WEBAPP_WEBHOOK != ''
-        run: curl -fsS -X POST -d '' "$AZURE_WEBAPP_WEBHOOK"
+      - name: Deploy to App Service
+        if: env.AZURE_PUBLISH_PROFILE != ''
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: Caliban
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ghcr.io/entoaq/caliban:${{ github.sha }}
 
       - name: How to deploy this exact build
         run: |
