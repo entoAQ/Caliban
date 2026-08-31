@@ -1647,6 +1647,20 @@ async def azure_band_test(
         parsed["prompt_version"] = variant_label
         parsed["prompt_hash"] = prompt_hash(variant_label)
         parsed["rotation"] = _key(angle, mirror)
+
+        # Token counts, so the cost of a rotation is a measured number rather
+        # than an argument. Image tokens dominate here and they are fixed per
+        # call -- GPT-4o scales any image to fit 2048 and tiles it, so a
+        # rotation costs the same as the original regardless of orientation.
+        # Rotations therefore multiply cost exactly, which is precisely the
+        # trade being evaluated: is four rotations' worth of resolution worth
+        # four calls.
+        #
+        # Defensive because usage is not guaranteed on every response shape,
+        # and a missing count is not worth failing an analysis over.
+        usage = getattr(response, "usage", None)
+        parsed["prompt_tokens"] = getattr(usage, "prompt_tokens", None)
+        parsed["completion_tokens"] = getattr(usage, "completion_tokens", None)
         return parsed
 
 
@@ -1673,6 +1687,13 @@ async def azure_band_test(
         # the first thing to look at -- if it is wide there is nothing to
         # calibrate against measured density, and the idea should be dropped
         # rather than tuned.
+        def total(field):
+            values = [r.get(field) for r in runs if r.get(field) is not None]
+            return sum(values) if values else None
+
+        prompt_tokens = total("prompt_tokens")
+        completion_tokens = total("completion_tokens")
+
         densities = [r["density_est"] for r in runs if r.get("density_est") is not None]
         density_mean = round(sum(densities) / len(densities), 1) if densities else None
         density_spread = (round(statistics.pstdev(densities), 1)
@@ -1685,6 +1706,8 @@ async def azure_band_test(
             primary["repeat_bands"] = [r.get("band") for r in runs]
             primary["density_est"] = density_mean
             primary["density_spread"] = density_spread
+            primary["prompt_tokens"] = prompt_tokens
+            primary["completion_tokens"] = completion_tokens
             return primary
 
         mean = sum(midpoints) / len(midpoints)
@@ -1699,6 +1722,10 @@ async def azure_band_test(
         result["repeat_bands"] = [r.get("band") for r in runs]
         result["density_est"] = density_mean
         result["density_spread"] = density_spread
+        # Summed, not averaged: this is what the whole estimate cost, which is
+        # the number that matters when deciding how many rotations to run.
+        result["prompt_tokens"] = prompt_tokens
+        result["completion_tokens"] = completion_tokens
         # Wall clock, not the sum: the rotations run concurrently.
         result["inference_time_ms"] = max(r.get("inference_time_ms", 0) for r in runs)
         result["justification"] = (
@@ -1855,6 +1882,8 @@ async def azure_band_test(
                 # entered yet look identical, and only one of them is fixable
                 # by pressing save.
                 "real_pct_source": real_pct_source,
+                "prompt_tokens": parsed.get("prompt_tokens"),
+                "completion_tokens": parsed.get("completion_tokens"),
             }).execute()
 
             # Defensive: some client/API combinations can return a response
