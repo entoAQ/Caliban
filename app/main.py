@@ -1849,6 +1849,12 @@ async def azure_band_test(
                 "density_est": parsed.get("density_est"),
                 "density_spread": parsed.get("density_spread"),
                 "real_density": real_density_value,
+                # How the real value was obtained, recorded at capture time as
+                # well as on backfill. Without it a null real_pct is ambiguous:
+                # a lot that never matched and a lot whose results had not been
+                # entered yet look identical, and only one of them is fixable
+                # by pressing save.
+                "real_pct_source": real_pct_source,
             }).execute()
 
             # Defensive: some client/API combinations can return a response
