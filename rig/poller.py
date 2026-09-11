@@ -19,6 +19,7 @@ Setup:
 import json
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -68,6 +69,58 @@ class busy:
             os.remove(BUSY_FILE)
         except OSError:
             pass
+        return False
+
+
+# How long the camera may take before the rig assumes it has wedged. A capture
+# is ~5 s, ~13 s with the IR frame; calibration stages meter and iterate.
+CAPTURE_WATCHDOG_SECONDS = 45
+STAGE_WATCHDOG_SECONDS = 240
+
+
+class watchdog:
+    """Abort a camera call that never returns, and restart the poller.
+
+    After a CSI fault -- "Failed to queue buffer ... Input/output error" --
+    libcamera waits for a frame that will never come, and it waits inside this
+    process. The poller handles one command at a time, so every later command
+    then sits pending until someone restarts the service by hand; the queue's
+    stale-claim reclaim cannot help, because it only runs when a poller asks for
+    work. Seen on 2026-09-11 at 12:32.
+
+    Nothing inside the process can free a wedged libcamera, so the timer does
+    the one reliable thing: report the command failed with a message the
+    operator can act on, clear the busy marker so the updater is not left
+    deferring on a dead capture, and exit. systemd (Restart=always) brings the
+    poller back ten seconds later with a fresh camera session. A fault then
+    costs one photo instead of the rest of the shift.
+    """
+
+    def __init__(self, seconds, command_id, what):
+        self.seconds = seconds
+        self.command_id = command_id
+        self.what = what
+        self.timer = None
+
+    def _fire(self):
+        message = (f"Caméra bloquée : aucune image après {self.seconds} s ({self.what}). "
+                   "Le banc redémarre -- reprenez la photo dans 30 secondes.")
+        log(f"watchdog: {self.what} for {self.command_id} exceeded {self.seconds}s -- restarting")
+        report_failure(self.command_id, message)
+        try:
+            os.remove(BUSY_FILE)
+        except OSError:
+            pass
+        os._exit(3)
+
+    def __enter__(self):
+        self.timer = threading.Timer(self.seconds, self._fire)
+        self.timer.daemon = True
+        self.timer.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.timer.cancel()
         return False
 
 
@@ -207,15 +260,18 @@ def main():
             try:
                 with busy():
                     if kind.startswith("calib_"):
-                        complete(command["id"], run_stage(kind))
+                        with watchdog(STAGE_WATCHDOG_SECONDS, command["id"], kind):
+                            result = run_stage(kind)
+                        complete(command["id"], result)
                     else:
                         # A preview is a capture whose result nobody analyses.
                         # It goes through the same path deliberately: a preview
                         # that differs from a real capture is not a preview of
                         # anything.
                         label = command.get("lot_number") or kind.upper()
-                        visible, ir = shoot(label) if kind == "capture" else (
-                            capture.capture(label, "visible"), None)
+                        with watchdog(CAPTURE_WATCHDOG_SECONDS, command["id"], kind):
+                            visible, ir = shoot(label) if kind == "capture" else (
+                                capture.capture(label, "visible"), None)
                         upload(command["id"], visible, ir)
                 log(f"completed {command['id']}")
             except Exception as e:
