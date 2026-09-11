@@ -2204,6 +2204,35 @@ def operator_samples(operator: dict = Depends(require_capture_role())):
 
 
 
+@app.get("/operator/captures/{command_id}/image")
+def operator_capture_image(command_id: str, operator: dict = Depends(require_capture_role())):
+    """The photo a capture produced, for the operator to check framing before
+    an analysis is spent on it.
+
+    It is the very frame that ANALYSER will send, not a separate preview shot:
+    a preview taken before the real capture approves a photo that is never
+    analysed, and a tray nudged in between goes through unseen. Fetched here
+    with the service key because an operator cannot read the capture bucket,
+    and through the same ownership check as the analysis -- an operator sees
+    their own captures and nothing else.
+
+    Downscaled for the screen: the full 4608 px frame is several megabytes, and
+    framing is judged at a glance, not at full resolution.
+    """
+    is_operator = operator.get("role") == "operator"
+    contents, _lot_number, _path = _load_rig_capture(command_id, operator, is_operator)
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(contents)).convert("RGB")
+    img.thumbnail((1600, 1600), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return Response(content=buf.getvalue(), media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store"})
+
+
+
 @app.post("/reference-capture")
 async def reference_capture(
     file: UploadFile = File(...),
