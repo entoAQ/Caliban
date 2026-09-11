@@ -1428,12 +1428,16 @@ def require_capture_role():
 #                   good larvae along with the frass.
 # alert_at          ME% at or above which AQ is told as well. A reading that far
 #                   out is a non-conformance, not a knob to turn alone.
+# sample_interval_min  minutes between samples; the operator screen counts down
+#                   from the last analysed sample and alerts when one is due.
+#                   0 turns the countdown off.
 OPERATOR_DEFAULTS = {
     "repeats": 2,
     "escalate_repeats": 6,
     "increase_at": 8.0,
     "decrease_below": 3.0,
     "alert_at": 13.0,
+    "sample_interval_min": 30,
 }
 
 
@@ -1482,6 +1486,7 @@ def operator_settings():
 
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
+    settings["sample_interval_min"] = max(0, min(240, settings["sample_interval_min"]))
     return settings
 
 
@@ -2196,6 +2201,7 @@ def operator_samples(operator: dict = Depends(require_capture_role())):
     return {
         "cycle_start": cycle_start,
         "cycle_date": cycle_date,
+        "sample_interval_min": operator_settings()["sample_interval_min"],
         "samples": [
             {
                 "sample_id": r.get("lot_number_text"),
