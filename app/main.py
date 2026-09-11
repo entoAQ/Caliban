@@ -1071,6 +1071,46 @@ def parse_density(raw):
     return round(value, 1)
 
 
+def _plastic_vote(raw):
+    """One rotation's PLASTIQUE answer as (vote, description).
+
+    vote is 'oui', 'non' or 'incertain'. A line that is present but cannot be
+    read counts as 'incertain' rather than 'non': for a physical hazard, an
+    answer nobody can parse must not quietly become a clean bill.
+    """
+    text = (raw or "").strip()
+    head = text.split()[0].lower().strip(" .,;:-—") if text else ""
+    vote = {"oui": "oui", "non": "non", "incertain": "incertain",
+            "yes": "oui", "no": "non", "uncertain": "incertain"}.get(head)
+    if vote is None and text:
+        vote = "incertain"
+    desc = None
+    for sep in ("--", "—", " - ", ",", ";"):
+        if sep in text:
+            desc = text.split(sep, 1)[1].strip(" .") or None
+            break
+    return vote, desc
+
+
+def _attach_plastic(result, runs):
+    """Collapse a variant's rotations into one plastic verdict.
+
+    Flagged if ANY rotation says oui. Missing a fragment costs far more than an
+    operator glancing at a clean tray, and a flat glossy piece can show at one
+    orientation and hide at another -- which is exactly what rotations are for.
+    All votes are kept so AQ can see how clear-cut the call was.
+    """
+    votes = [r.get("plastic") for r in runs]
+    if all(v is None for v in votes):
+        return
+    result["plastic_votes"] = votes
+    result["plastic_flag"] = any(v == "oui" for v in votes)
+    result["plastic_desc"] = next(
+        (r.get("plastic_desc") for r in runs if r.get("plastic") == "oui" and r.get("plastic_desc")),
+        next((r.get("plastic_desc") for r in runs if r.get("plastic_desc")), None),
+    )
+
+
 def parse_band_response(text):
     """Extracts the structured band/confidence fields from BAND_PROMPT's
     response -- falls back to returning the raw text untouched if the
@@ -1079,6 +1119,9 @@ def parse_band_response(text):
     band = confidence = justification = None
     factors = None
     density = None
+    # None when the prompt does not ask about plastic at all, which is every
+    # variant except the plastic ones -- so absence means "not asked", never "no".
+    plastic = plastic_desc = None
     for line in text.strip().splitlines():
         if line.upper().startswith("BANDE:"):
             band = line.split(":", 1)[1].strip()
@@ -1091,12 +1134,16 @@ def parse_band_response(text):
             density = parse_density(line.split(":", 1)[1])
         elif line.upper().startswith("JUSTIFICATION:"):
             justification = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("PLASTIQUE:"):
+            plastic, plastic_desc = _plastic_vote(line.split(":", 1)[1])
     return {
         "band": band,
         "confidence": confidence,
         "factors": factors,
         "justification": justification,
         "density_est": density,
+        "plastic": plastic,
+        "plastic_desc": plastic_desc,
         "raw": text,
     }
 
@@ -1984,6 +2031,8 @@ async def azure_band_test(
             escalated = True
 
     parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
+    for v, result in zip(requested_variants, parsed_results):
+        _attach_plastic(result, by_variant[v])
 
     # Lot/real-value lookup happens ONCE per photo, not once per variant --
     # every variant is being tested against the exact same physical sample,
@@ -2130,6 +2179,13 @@ async def azure_band_test(
                     "instruction_alert": parsed.get("instruction_alert"),
                     "escalated": parsed.get("escalated", False),
                 } if command_id else {}),
+                # Plastic columns (rig/plastic_columns.sql), only when the
+                # prompt asked about plastic.
+                **({
+                    "plastic_flag": parsed.get("plastic_flag"),
+                    "plastic_votes": parsed.get("plastic_votes"),
+                    "plastic_desc": parsed.get("plastic_desc"),
+                } if parsed.get("plastic_votes") is not None else {}),
             }).execute()
 
             # Defensive: some client/API combinations can return a response
