@@ -1391,6 +1391,148 @@ def require_role(min_role: str):
     return dependency
 
 
+def require_capture_role():
+    """Admit an operator or anyone at QC and above -- and say which.
+
+    Returns {**caller, "role": role} rather than just the caller, because
+    azure_band_test does not merely let an operator in: it runs a different
+    analysis for them. The role comes from user_profiles, never from the
+    request, so nothing an operator sends can buy them QC behaviour.
+
+    'operator' is deliberately absent from ROLE_HIERARCHY. It is not a rung on
+    the QA ladder, and giving it any rank would let it through every other
+    require_role("qc") in this file. So it is admitted here by name, and it
+    fails every other check by falling back to rank 0, exactly as viewer does.
+    """
+    def dependency(caller: dict = Depends(get_current_operator)):
+        profile_resp = supabase.table("user_profiles").select("role").eq("id", caller["id"]).single().execute()
+        role = (profile_resp.data or {}).get("role", "viewer")
+        if role != "operator" and ROLE_HIERARCHY.get(role, 0) < ROLE_HIERARCHY["qc"]:
+            raise HTTPException(status_code=403, detail="Accès refusé -- rôle opérateur ou QC requis.")
+        return {**caller, "role": role}
+    return dependency
+
+
+# How an operator capture is analysed when system_config says nothing.
+#
+# repeats           rotations on every capture.
+# escalate_repeats  rotations in total once any of the first ones reads at or
+#                   above increase_at. Rotations are spent where a decision is
+#                   about to be made: most captures are conform and stop at the
+#                   base count, so the extra cost lands only on readings an
+#                   operator will act on.
+# increase_at       ME% at or above which the destoner goes up. The 8% line --
+#                   the conformity boundary, and the one the model has never
+#                   been validated against, which is why it gets the rotations.
+# decrease_below    ME% below which the destoner comes down, to stop discarding
+#                   good larvae along with the frass.
+# alert_at          ME% at or above which AQ is told as well. A reading that far
+#                   out is a non-conformance, not a knob to turn alone.
+OPERATOR_DEFAULTS = {
+    "repeats": 2,
+    "escalate_repeats": 6,
+    "increase_at": 8.0,
+    "decrease_below": 3.0,
+    "alert_at": 13.0,
+}
+
+
+def operator_settings():
+    """Operator analysis settings: the code defaults, overridden key by key by
+    system_config.operator_settings (a JSON object), with the prompt taken from
+    the same rig_prompt_variant AQ already sets for QC captures -- one method,
+    not two drifting apart.
+
+    Read fresh per capture, like rigConfig() in the browser, so a change AQ
+    makes reaches the next press rather than the next restart. Every failure
+    degrades to the defaults instead of refusing: an operator standing at the
+    line with a tray should get an answer, and the defaults are sane.
+    """
+    settings = dict(OPERATOR_DEFAULTS)
+    settings["variant"] = DEFAULT_PROMPT_VARIANT
+    try:
+        resp = (
+            supabase.table("system_config")
+            .select("key, value")
+            .in_("key", ["operator_settings", "rig_prompt_variant"])
+            .execute()
+        )
+        rows = {r["key"]: r["value"] for r in (resp.data or [])}
+    except Exception as e:
+        print(f"[operator_settings lookup failed] {type(e).__name__}: {e}")
+        return settings
+
+    variant = rows.get("rig_prompt_variant")
+    if isinstance(variant, str) and variant.strip():
+        settings["variant"] = variant.strip()
+
+    # system_config.value is text; the JSON inside it is parsed here.
+    overrides = rows.get("operator_settings")
+    if isinstance(overrides, str):
+        try:
+            overrides = json.loads(overrides)
+        except ValueError:
+            overrides = None
+    if isinstance(overrides, dict):
+        for key, default in OPERATOR_DEFAULTS.items():
+            try:
+                settings[key] = type(default)(overrides[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    settings["repeats"] = max(1, min(8, settings["repeats"]))
+    settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
+    return settings
+
+
+def operator_instruction(estimate_pct, settings):
+    """What the operator should do to the destoner, and whether AQ must hear
+    about it too. Returns (instruction, alert).
+
+    Decided from estimate_pct rather than the band label, so it holds whatever
+    band scale the configured prompt speaks: the thresholds are ME% values, and
+    a label is only a name for a range of them.
+    """
+    if estimate_pct is None:
+        return None, False
+    if estimate_pct >= settings["increase_at"]:
+        return "increase", estimate_pct >= settings["alert_at"]
+    if estimate_pct < settings["decrease_below"]:
+        return "decrease", False
+    return "hold", False
+
+
+def _load_rig_capture(command_id, caller, is_operator):
+    """Fetch a finished rig capture server-side. Returns (bytes, lot_number,
+    image_path).
+
+    Done here rather than in the browser so an operator never needs read access
+    to the capture bucket: they can analyse the photo they just took and nothing
+    else. The ownership check is what makes that true -- without it, any signed-in
+    operator could analyse, and record a row against, any command id they could
+    guess.
+    """
+    resp = (
+        supabase.table("capture_commands")
+        .select("id, kind, status, image_path, lot_number, requested_by")
+        .eq("id", command_id)
+        .limit(1)
+        .execute()
+    )
+    cmd = (resp.data or [None])[0]
+    if not cmd:
+        raise HTTPException(status_code=404, detail="Capture introuvable.")
+    if (cmd.get("kind") or "capture") != "capture":
+        raise HTTPException(status_code=400, detail="Cette commande n'est pas une capture.")
+    if cmd.get("status") != "done" or not cmd.get("image_path"):
+        raise HTTPException(status_code=409, detail="La capture n'est pas terminée.")
+    if is_operator and cmd.get("requested_by") != caller["id"]:
+        raise HTTPException(status_code=403, detail="Cette capture appartient à un autre utilisateur.")
+
+    contents = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(cmd["image_path"])
+    return contents, cmd.get("lot_number") or "", cmd["image_path"]
+
+
 def band_slug(band):
     """Turns a predicted band like '3-7%' into a clean identifier
     fragment like '3_7'. Falls back safely for an unstructured or
@@ -1457,14 +1599,29 @@ def get_reference_images(category="meo_density"):
 
 @app.post("/azure-band-test")
 async def azure_band_test(
-    file: UploadFile = File(...),
+    file: UploadFile = File(None),
     lot_number: str = Form(""),
     real_pct: str = Form(""),
     is_training: bool = Form(False),
     variants: str = Form(""),
     repeats: int = Form(1),
-    operator: dict = Depends(require_role("qc")),
+    command_id: str = Form(""),
+    operator: dict = Depends(require_capture_role()),
 ):
+    # An operator gets no say in how the analysis runs. Whatever the browser
+    # sent for variants, repeats, training or a real value is replaced by what
+    # AQ configured, and the photo must be a rig capture they took themselves --
+    # an operator cannot upload an arbitrary file and have it recorded.
+    is_operator = operator.get("role") == "operator"
+    settings = operator_settings() if is_operator else None
+    if is_operator:
+        if not command_id:
+            raise HTTPException(status_code=403, detail="Un opérateur ne peut analyser qu'une capture du banc.")
+        variants = settings["variant"]
+        repeats = settings["repeats"]
+        is_training = False
+        real_pct = ""
+
     # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
     # empty/omitted keeps the old single-call behavior (DEFAULT_PROMPT_VARIANT
     # only), so existing callers see no change in behavior or cost unless
@@ -1480,8 +1637,23 @@ async def azure_band_test(
         )
 
     client = get_azure_client()
-    contents = await file.read()
-    media_type = file.content_type or "image/jpeg"
+
+    # A rig capture arrives as a command id and is fetched here, so the browser
+    # never has to download a photo only to send it straight back. An upload
+    # from the band-test page still arrives as a file, exactly as before.
+    rig_image_path = None
+    source = "upload"
+    if command_id:
+        contents, lot_number, rig_image_path = _load_rig_capture(command_id, operator, is_operator)
+        media_type = "image/jpeg"
+        upload_name = rig_image_path
+        source = "operator" if is_operator else "rig"
+    elif file is not None:
+        contents = await file.read()
+        media_type = file.content_type or "image/jpeg"
+        upload_name = file.filename or ""
+    else:
+        raise HTTPException(status_code=400, detail="Aucune image fournie.")
     b64_image = base64.b64encode(contents).decode("utf-8")
 
     # Repeats are ROTATIONS, not re-samples.
@@ -1567,18 +1739,22 @@ async def azure_band_test(
     # it, any flagged row can actually be looked at later to see what the
     # model saw. Root motivation: "we need a concrete reason instead of
     # guessing" for the recurring over-read investigation.
-    capture_storage_path = None
-    try:
-        ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-        capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
-        upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
-            capture_storage_path, contents, file_options={"content-type": media_type}
-        )
-        if not upload_resp:
+    #
+    # A rig capture is already in storage -- the rig put it there -- so point at
+    # that copy rather than upload the same bytes a second time.
+    capture_storage_path = rig_image_path
+    if capture_storage_path is None:
+        try:
+            ext = os.path.splitext(upload_name)[1] or ".jpg"
+            capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
+            upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+                capture_storage_path, contents, file_options={"content-type": media_type}
+            )
+            if not upload_resp:
+                capture_storage_path = None
+        except Exception as e:
             capture_storage_path = None
-    except Exception as e:
-        capture_storage_path = None
-        print(f"[band-test capture upload failed] {type(e).__name__}: {e}")
+            print(f"[band-test capture upload failed] {type(e).__name__}: {e}")
 
     # Few-shot grounding: real reference photos with known values, judged
     # alongside the new photo rather than asked to reason about density
@@ -1755,6 +1931,41 @@ async def azure_band_test(
     # tuple grows.
     for job, run in zip(jobs, all_runs):
         by_variant[job[0]].append(run)
+
+    # Escalation, for operator captures only.
+    #
+    # If any of the first rotations reads at or above increase_at, the operator
+    # is about to be told to turn the destoner up -- so run more rotations before
+    # saying so, and decide from the mean of all of them. Each extra rotation is
+    # another presentation of the same sample, and they land only where a wrong
+    # answer costs something: a false "increase" discards good larvae, a missed
+    # one lets frass through. Conform readings, most of them, stop at the base.
+    #
+    # Not applied to QC captures. There the rotation count is a study setting
+    # that only means something held still across a run of lots, and escalating
+    # would quietly change it on exactly the samples the study needs most.
+    escalated = False
+    if is_operator:
+        variant = requested_variants[0]
+        actionable = any(
+            BAND_MIDPOINTS.get(r.get("band"), 0.0) >= settings["increase_at"]
+            for r in by_variant[variant]
+        )
+        extra = TRANSFORMS[repeats:max(repeats, settings["escalate_repeats"])]
+        if actionable and extra:
+            for angle, mirror in extra:
+                k = _key(angle, mirror)
+                if k not in rotated_b64:
+                    img = original.rotate(angle, expand=True)
+                    if mirror:
+                        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+                    rotated_b64[k] = _encode(img)
+            more = await asyncio.gather(*[
+                loop.run_in_executor(None, call_variant, variant, a, m) for a, m in extra
+            ])
+            by_variant[variant].extend(more)
+            escalated = True
+
     parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
 
     # Lot/real-value lookup happens ONCE per photo, not once per variant --
@@ -1843,6 +2054,11 @@ async def azure_band_test(
     # Recording is per-variant and best-effort -- one variant's insert
     # failing shouldn't hide the others' results.
     for parsed in parsed_results:
+        if is_operator:
+            instruction, alert = operator_instruction(parsed.get("estimate_pct"), settings)
+            parsed["instruction"] = instruction
+            parsed["instruction_alert"] = alert
+        parsed["escalated"] = escalated
         parsed["recorded_as"] = lot_text
         parsed["real_pct_used"] = real_pct_value
         parsed["real_pct_source"] = real_pct_source
@@ -1884,6 +2100,17 @@ async def azure_band_test(
                 "real_pct_source": real_pct_source,
                 "prompt_tokens": parsed.get("prompt_tokens"),
                 "completion_tokens": parsed.get("completion_tokens"),
+                # Rig-capture columns (rig/operator_capture.sql). Written only
+                # when there is a command, so if this code ever deploys ahead of
+                # that script it is operator captures that fail to record, not
+                # every upload in the plant -- the real_pct_source lesson.
+                **({
+                    "source": source,
+                    "capture_command_id": command_id,
+                    "operator_instruction": parsed.get("instruction"),
+                    "instruction_alert": parsed.get("instruction_alert"),
+                    "escalated": parsed.get("escalated", False),
+                } if command_id else {}),
             }).execute()
 
             # Defensive: some client/API combinations can return a response
