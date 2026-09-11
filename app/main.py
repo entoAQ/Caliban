@@ -1606,6 +1606,10 @@ async def azure_band_test(
     variants: str = Form(""),
     repeats: int = Form(1),
     command_id: str = Form(""),
+    # False for a re-score: analyse and return, record nothing. The caller files
+    # the result elsewhere (vision_rescores), so the same photo never appears
+    # twice in the estimate corpus.
+    record: bool = Form(True),
     operator: dict = Depends(require_capture_role()),
 ):
     # An operator gets no say in how the analysis runs. Whatever the browser
@@ -1621,6 +1625,7 @@ async def azure_band_test(
         repeats = settings["repeats"]
         is_training = False
         real_pct = ""
+        record = True
 
     # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
     # empty/omitted keeps the old single-call behavior (DEFAULT_PROMPT_VARIANT
@@ -1743,7 +1748,8 @@ async def azure_band_test(
     # A rig capture is already in storage -- the rig put it there -- so point at
     # that copy rather than upload the same bytes a second time.
     capture_storage_path = rig_image_path
-    if capture_storage_path is None:
+    # A re-score reads a photo that is already stored, so it uploads nothing.
+    if capture_storage_path is None and record:
         try:
             ext = os.path.splitext(upload_name)[1] or ".jpg"
             capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
@@ -2064,6 +2070,8 @@ async def azure_band_test(
         parsed["real_pct_source"] = real_pct_source
         parsed["error_flagged"] = is_outlier(parsed.get("band"), real_pct_value)
         parsed["storage_path"] = capture_storage_path
+        if not record:
+            continue
         if lookup_error:
             parsed["recording_error"] = lookup_error
             continue
@@ -2132,6 +2140,7 @@ async def azure_band_test(
         "real_pct_used": real_pct_value,
         "real_pct_source": real_pct_source,
         "real_density_used": real_density_value,
+        "recorded": record,
     }
 
 
