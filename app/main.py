@@ -2135,6 +2135,75 @@ async def azure_band_test(
     }
 
 
+@app.get("/operator/samples")
+def operator_samples(operator: dict = Depends(require_capture_role())):
+    """Every sample the caller has taken on the operator screen in the current
+    production cycle, newest first.
+
+    Served from here rather than read by the browser, because an operator
+    cannot select from vision_band_estimates -- its RLS is qc and up -- and
+    this is the only slice of it they have any business seeing.
+
+    "Current cycle" is the most recent production_cycles row that has started.
+    The database already did the America/Toronto arithmetic when it
+    materialised that row from cycle_schedule, so the window follows whatever
+    the plant's schedule says, including after the next change to it -- and
+    nothing here needs time zone data, which the slim Python image does not
+    ship. Between a cycle's close and the next one's start, that is still the
+    cycle that just ended, so a sample taken in the gap is listed rather than
+    silently belonging to nothing.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cycle_start = cycle_date = None
+    try:
+        cyc = (
+            supabase.table("production_cycles")
+            .select("cycle_start, cycle_date")
+            .lte("cycle_start", now.isoformat())
+            .order("cycle_start", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if cyc.data:
+            cycle_start = cyc.data[0]["cycle_start"]
+            cycle_date = cyc.data[0].get("cycle_date")
+    except Exception as e:
+        print(f"[operator_samples cycle lookup failed] {type(e).__name__}: {e}")
+    if cycle_start is None:
+        # No cycle materialised at all: show the last day rather than nothing.
+        cycle_start = (now - datetime.timedelta(hours=24)).isoformat()
+
+    resp = (
+        supabase.table("vision_band_estimates")
+        .select("lot_number_text, created_at, predicted_band, estimate_pct, "
+                "repeat_count, escalated, operator_instruction, instruction_alert")
+        .eq("created_by", operator["id"])
+        .eq("source", "operator")
+        .gte("created_at", cycle_start)
+        .order("created_at", desc=True)
+        .limit(500)
+        .execute()
+    )
+    return {
+        "cycle_start": cycle_start,
+        "cycle_date": cycle_date,
+        "samples": [
+            {
+                "sample_id": r.get("lot_number_text"),
+                "created_at": r.get("created_at"),
+                "band": r.get("predicted_band"),
+                "estimate_pct": r.get("estimate_pct"),
+                "repeat_count": r.get("repeat_count"),
+                "escalated": r.get("escalated"),
+                "instruction": r.get("operator_instruction"),
+                "instruction_alert": r.get("instruction_alert"),
+            }
+            for r in (resp.data or [])
+        ],
+    }
+
+
+
 @app.post("/reference-capture")
 async def reference_capture(
     file: UploadFile = File(...),
