@@ -1362,13 +1362,19 @@ def get_azure_client():
 #
 # VISION_MODELS lists them, comma-separated, each as label=provider:target:
 #
-#   gpt-5.1=azure:caliban-gpt51,gpt-5.4=azure:caliban-gpt54,sonnet-5=anthropic:claude-sonnet-5
+#   gpt-5.4=azure:gpt-5.4,sonnet-5=foundry:claude-sonnet-5
 #
 #   azure      target is a deployment name on the same Azure resource.
 #              Called the GPT-5 way: full-resolution images (detail high),
 #              reasoning turned down, and a larger answer budget.
-#   anthropic  target is a Claude model id, called on ANTHROPIC_API_KEY --
-#              the same key /claude-detect already uses.
+#   foundry    target is a Claude deployment name on the Foundry resource,
+#              called through Anthropic's Messages API as Foundry serves it
+#              (https://<resource>.services.ai.azure.com/anthropic). Billed
+#              on Azure; no Anthropic account needed. The resource and key
+#              default to the Azure OpenAI ones; CLAUDE_FOUNDRY_BASE_URL and
+#              CLAUDE_FOUNDRY_API_KEY override them if Claude lives elsewhere.
+#   anthropic  target is a Claude model id, called directly on
+#              ANTHROPIC_API_KEY (the key /claude-detect uses), if one is set.
 #
 # Unset, the re-score tab offers only the default model.
 DEFAULT_VISION_MODEL = {
@@ -1395,7 +1401,7 @@ def vision_models():
         label, _, spec = item.strip().partition("=")
         provider, _, target = spec.partition(":")
         label, provider, target = label.strip(), provider.strip().lower(), target.strip()
-        if not label or not target or label == "default" or provider not in ("azure", "anthropic"):
+        if not label or not target or label == "default" or provider not in ("azure", "foundry", "anthropic"):
             continue
         out[label] = {"label": label, "provider": provider, "target": target,
                       "name": f"{provider}/{target}"}
@@ -1404,6 +1410,43 @@ def vision_models():
 
 _azure_new_client = None
 _anthropic_client = None
+_foundry_claude_client = None
+
+
+def claude_foundry_base_url():
+    """Foundry's Anthropic endpoint for the resource Caliban already uses.
+
+    Both endpoint forms name the resource in their first label --
+    https://<resource>.openai.azure.com and
+    https://<resource>.services.ai.azure.com -- and Claude is served from the
+    second under /anthropic.
+    """
+    explicit = os.environ.get("CLAUDE_FOUNDRY_BASE_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    if not AZURE_OPENAI_ENDPOINT:
+        return None
+    host = AZURE_OPENAI_ENDPOINT.split("://", 1)[-1].split("/", 1)[0]
+    resource = host.split(".", 1)[0]
+    return f"https://{resource}.services.ai.azure.com/anthropic" if resource else None
+
+
+def _claude_client(provider):
+    """The client for a Claude entry: Foundry on Azure, or Anthropic direct."""
+    global _anthropic_client, _foundry_claude_client
+    if provider == "foundry":
+        if _foundry_claude_client is None:
+            base_url = claude_foundry_base_url()
+            api_key = os.environ.get("CLAUDE_FOUNDRY_API_KEY") or AZURE_OPENAI_API_KEY
+            if not base_url or not api_key:
+                raise HTTPException(status_code=503, detail="Point d'accès Claude (Foundry) non configuré sur ce service.")
+            _foundry_claude_client = anthropic.AnthropicFoundry(api_key=api_key, base_url=base_url)
+        return _foundry_claude_client
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY n'est pas configurée sur ce service.")
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
 
 
 def _usage(prompt_tokens, completion_tokens):
@@ -1467,11 +1510,7 @@ def _anthropic_complete(entry, content):
     translated block for block, in the same order, so the two providers are
     asked exactly the same question.
     """
-    global _anthropic_client
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY n'est pas configurée sur ce service.")
-    if _anthropic_client is None:
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    client = _claude_client(entry["provider"])
     blocks = []
     for b in content:
         if b.get("type") == "image_url":
@@ -1488,14 +1527,17 @@ def _anthropic_complete(entry, content):
     last = None
     for mode, extra in attempts:
         try:
-            r = _anthropic_client.messages.create(
+            r = client.messages.create(
                 model=entry["target"],
                 max_tokens=VISION_MAX_TOKENS_REASONING,
                 messages=[{"role": "user", "content": blocks}],
                 **extra,
             )
             break
-        except anthropic.BadRequestError as e:
+        # TypeError too: the Foundry client refuses a parameter it does not
+        # support (temperature) before sending anything, rather than letting
+        # the service answer 400.
+        except (anthropic.BadRequestError, TypeError) as e:
             last = e
     else:
         raise last
@@ -1506,7 +1548,7 @@ def _anthropic_complete(entry, content):
 
 
 def _vision_complete(entry, content):
-    if entry["provider"] == "anthropic":
+    if entry["provider"] in ("anthropic", "foundry"):
         return _anthropic_complete(entry, content)
     return _azure_gpt5_complete(entry, content)
 
