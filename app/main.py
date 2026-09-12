@@ -1350,6 +1350,174 @@ def get_azure_client():
     return _azure_client
 
 
+# ── Other vision models, for re-scoring only ─────────────────────────
+# The model every real estimate uses stays AZURE_OPENAI_DEPLOYMENT, called
+# exactly as before. Other models can be tried on stored photos from the
+# re-score tab, so a replacement is chosen on the lab-measured photos rather
+# than on production -- and GPT-4o 2024-05-13 retires on 2026-10-01, when Azure
+# swaps in gpt-5.1 on its own, so this comparison is not optional.
+#
+# VISION_MODELS lists them, comma-separated, each as label=provider:target:
+#
+#   gpt-5.1=azure:caliban-gpt51,gpt-5.4=azure:caliban-gpt54,sonnet-5=anthropic:claude-sonnet-5
+#
+#   azure      target is a deployment name on the same Azure resource.
+#              Called the GPT-5 way: full-resolution images (detail high),
+#              reasoning turned down, and a larger answer budget.
+#   anthropic  target is a Claude model id, called on ANTHROPIC_API_KEY --
+#              the same key /claude-detect already uses.
+#
+# Unset, the re-score tab offers only the default model.
+DEFAULT_VISION_MODEL = {
+    "label": "default",
+    "provider": "azure",
+    "target": AZURE_OPENAI_DEPLOYMENT,
+    "name": f"azure/{AZURE_OPENAI_DEPLOYMENT}",
+}
+
+# Newer Azure API version for the GPT-5 family. The default model keeps the
+# version it has always used, so nothing about production calls changes.
+AZURE_OPENAI_API_VERSION_NEW = os.environ.get("AZURE_OPENAI_API_VERSION_NEW", "2025-04-01-preview")
+
+# A reasoning model can spend its budget thinking and return nothing. The
+# answer itself is a few lines; this leaves room for a little reasoning on top
+# and is billed only for what is used.
+VISION_MAX_TOKENS_REASONING = 2000
+
+
+def vision_models():
+    """Extra models from VISION_MODELS, by label. Malformed entries are skipped."""
+    out = {}
+    for item in (os.environ.get("VISION_MODELS") or "").split(","):
+        label, _, spec = item.strip().partition("=")
+        provider, _, target = spec.partition(":")
+        label, provider, target = label.strip(), provider.strip().lower(), target.strip()
+        if not label or not target or label == "default" or provider not in ("azure", "anthropic"):
+            continue
+        out[label] = {"label": label, "provider": provider, "target": target,
+                      "name": f"{provider}/{target}"}
+    return out
+
+
+_azure_new_client = None
+_anthropic_client = None
+
+
+def _usage(prompt_tokens, completion_tokens):
+    return {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens}
+
+
+def _azure_gpt5_complete(entry, content):
+    """One vision call to a GPT-5-family Azure deployment.
+
+    detail=high, because resolution is the point: GPT-4o and gpt-5.1 shrink a
+    photo to about 1365x768, where a 3 mm fragment is some 10 pixels; the
+    patch-based models (gpt-5.2 onwards) read the full 2048 edge Caliban sends.
+
+    Sampling and reasoning parameters are tried from most to least controlled,
+    dropping whatever a model refuses: temperature and seed first, then
+    reasoning 'none' for 'low'. Which one was accepted is returned, so a result
+    says how it was produced.
+    """
+    global _azure_new_client
+    if _azure_new_client is None:
+        _azure_new_client = AzureOpenAI(
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION_NEW,
+        )
+    blocks = [
+        {**b, "image_url": {**b["image_url"], "detail": "high"}} if b.get("type") == "image_url" else b
+        for b in content
+    ]
+    attempts = [
+        ("t0+seed, reasoning none", {"temperature": 0, "seed": CALIBAN_SEED, "extra_body": {"reasoning_effort": "none"}}),
+        ("reasoning none", {"extra_body": {"reasoning_effort": "none"}}),
+        ("reasoning low", {"extra_body": {"reasoning_effort": "low"}}),
+        ("model defaults", {}),
+    ]
+    last = None
+    for mode, extra in attempts:
+        try:
+            r = _azure_new_client.chat.completions.create(
+                model=entry["target"],
+                max_completion_tokens=VISION_MAX_TOKENS_REASONING,
+                messages=[{"role": "user", "content": blocks}],
+                **extra,
+            )
+            break
+        except BadRequestError as e:
+            last = e
+    else:
+        raise last
+    u = getattr(r, "usage", None)
+    choice = r.choices[0]
+    return (choice.message.content or "", getattr(r, "model", None), mode,
+            getattr(choice, "finish_reason", None),
+            _usage(getattr(u, "prompt_tokens", None), getattr(u, "completion_tokens", None)))
+
+
+def _anthropic_complete(entry, content):
+    """One vision call to Claude, with the same prompt and the same image.
+
+    The content arrives in the OpenAI shape call_variant builds and is
+    translated block for block, in the same order, so the two providers are
+    asked exactly the same question.
+    """
+    global _anthropic_client
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY n'est pas configurée sur ce service.")
+    if _anthropic_client is None:
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    blocks = []
+    for b in content:
+        if b.get("type") == "image_url":
+            head, _, data = b["image_url"]["url"].partition(",")
+            media_type = head[len("data:"):].split(";")[0] or "image/jpeg"
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}})
+        else:
+            blocks.append({"type": "text", "text": b["text"]})
+    attempts = [
+        ("t0, no thinking", {"temperature": 0, "thinking": {"type": "disabled"}}),
+        ("no thinking", {"thinking": {"type": "disabled"}}),
+        ("model defaults", {}),
+    ]
+    last = None
+    for mode, extra in attempts:
+        try:
+            r = _anthropic_client.messages.create(
+                model=entry["target"],
+                max_tokens=VISION_MAX_TOKENS_REASONING,
+                messages=[{"role": "user", "content": blocks}],
+                **extra,
+            )
+            break
+        except anthropic.BadRequestError as e:
+            last = e
+    else:
+        raise last
+    text = "".join(getattr(x, "text", "") for x in r.content if getattr(x, "type", "") == "text")
+    u = getattr(r, "usage", None)
+    return (text, getattr(r, "model", None), mode, getattr(r, "stop_reason", None),
+            _usage(getattr(u, "input_tokens", None), getattr(u, "output_tokens", None)))
+
+
+def _vision_complete(entry, content):
+    if entry["provider"] == "anthropic":
+        return _anthropic_complete(entry, content)
+    return _azure_gpt5_complete(entry, content)
+
+
+@app.get("/vision-models")
+async def list_vision_models(operator: dict = Depends(get_current_operator)):
+    """What the re-score tab can offer. Targets are shown so a result can be
+    traced to the deployment that produced it; nothing secret is in them."""
+    return {
+        "default": {"label": "default", "name": DEFAULT_VISION_MODEL["name"]},
+        "models": [{"label": m["label"], "name": m["name"]} for m in vision_models().values()],
+    }
+
+
 _component_test_ids = "__unset__"  # sentinel distinct from None, so a genuine "not found" isn't re-queried every request
 
 
@@ -1668,6 +1836,8 @@ async def azure_band_test(
     # the result elsewhere (vision_rescores), so the same photo never appears
     # twice in the estimate corpus.
     record: bool = Form(True),
+    # A label from VISION_MODELS, for re-scores only. Empty is the default model.
+    model: str = Form(""),
     operator: dict = Depends(require_capture_role()),
 ):
     # An operator gets no say in how the analysis runs. Whatever the browser
@@ -1698,6 +1868,31 @@ async def azure_band_test(
             detail=f"Variante(s) de prompt inconnue(s) : {', '.join(unknown)}. "
                    f"Disponibles : {', '.join(sorted(registry))}.",
         )
+
+    # Another model may only re-score. A real estimate is always the default
+    # model's, so the estimate corpus stays one model's work and every accuracy
+    # figure built on it keeps meaning what it says. Operators never choose.
+    model = (model or "").strip()
+    if is_operator or model in ("", "default"):
+        model_entry = DEFAULT_VISION_MODEL
+    else:
+        model_entry = vision_models().get(model)
+        if model_entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Modèle inconnu : {model}. Disponibles : "
+                       f"{', '.join(['default', *vision_models()])}.",
+            )
+        if record:
+            raise HTTPException(
+                status_code=400,
+                detail="Un autre modèle ne sert qu'à re-noter : envoyez record=false.",
+            )
+        if model_entry["provider"] == "anthropic" and any(prompt_uses_references(v) for v in requested_variants):
+            raise HTTPException(
+                status_code=400,
+                detail="Les variantes avec photos de référence ne sont pas prises en charge pour Claude.",
+            )
 
     client = get_azure_client()
 
@@ -1858,31 +2053,45 @@ async def azure_band_test(
         content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{rotated_b64[_key(angle, mirror)]}"}})
 
         start = time.time()
-        try:
-            response = client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT,
-                max_completion_tokens=200,
-                temperature=0,
-                seed=CALIBAN_SEED,
-                messages=[{"role": "user", "content": content}],
-            )
-        except BadRequestError:
-            # Some deployed models (newer reasoning-tier ones especially)
-            # reject sampling params like temperature/seed outright rather
-            # than ignore them -- retry once without them instead of
-            # taking down the whole comparison over one incompatible
-            # variant. Whether this path is ever actually hit depends on
-            # whatever model AZURE_OPENAI_DEPLOYMENT currently points at.
-            response = client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT,
-                max_completion_tokens=200,
-                messages=[{"role": "user", "content": content}],
-            )
+        if model_entry is DEFAULT_VISION_MODEL:
+            try:
+                response = client.chat.completions.create(
+                    model=AZURE_OPENAI_DEPLOYMENT,
+                    max_completion_tokens=200,
+                    temperature=0,
+                    seed=CALIBAN_SEED,
+                    messages=[{"role": "user", "content": content}],
+                )
+            except BadRequestError:
+                # Some deployed models (newer reasoning-tier ones especially)
+                # reject sampling params like temperature/seed outright rather
+                # than ignore them -- retry once without them instead of
+                # taking down the whole comparison over one incompatible
+                # variant. Whether this path is ever actually hit depends on
+                # whatever model AZURE_OPENAI_DEPLOYMENT currently points at.
+                response = client.chat.completions.create(
+                    model=AZURE_OPENAI_DEPLOYMENT,
+                    max_completion_tokens=200,
+                    messages=[{"role": "user", "content": content}],
+                )
+            text = response.choices[0].message.content or ""
+            model_actual = getattr(response, "model", None)
+            call_mode = "default"
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+            u = getattr(response, "usage", None)
+            usage = _usage(getattr(u, "prompt_tokens", None), getattr(u, "completion_tokens", None))
+        else:
+            text, model_actual, call_mode, finish_reason, usage = _vision_complete(model_entry, content)
         elapsed_ms = int((time.time() - start) * 1000)
-        text = response.choices[0].message.content or ""
         parsed = parse_band_response(text)
         parsed["inference_time_ms"] = elapsed_ms
-        parsed["model"] = f"azure/{AZURE_OPENAI_DEPLOYMENT}"
+        parsed["model"] = model_entry["name"]
+        # What actually answered, as the provider reports it -- for Azure this
+        # includes the model version behind the deployment name, which is how
+        # a silent upgrade would show up.
+        parsed["model_actual"] = model_actual
+        parsed["call_mode"] = call_mode
+        parsed["finish_reason"] = finish_reason
         parsed["reference_count"] = len(variant_refs)
         parsed["prompt_version"] = variant_label
         parsed["prompt_hash"] = prompt_hash(variant_label)
@@ -1898,9 +2107,8 @@ async def azure_band_test(
         #
         # Defensive because usage is not guaranteed on every response shape,
         # and a missing count is not worth failing an analysis over.
-        usage = getattr(response, "usage", None)
-        parsed["prompt_tokens"] = getattr(usage, "prompt_tokens", None)
-        parsed["completion_tokens"] = getattr(usage, "completion_tokens", None)
+        parsed["prompt_tokens"] = usage["prompt_tokens"]
+        parsed["completion_tokens"] = usage["completion_tokens"]
         return parsed
 
 
@@ -2208,6 +2416,8 @@ async def azure_band_test(
         "real_pct_source": real_pct_source,
         "real_density_used": real_density_value,
         "recorded": record,
+        "model": model_entry["label"],
+        "model_name": model_entry["name"],
     }
 
 
