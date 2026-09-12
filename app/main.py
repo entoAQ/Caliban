@@ -1703,6 +1703,9 @@ OPERATOR_DEFAULTS = {
     "alert_at": 13.0,
     "sample_interval_min": 30,
     "followup_interval_min": 5,
+    # Two-prompt rule (see operator_prompt_pair). Empty = one prompt, as before.
+    "high_variant": "",
+    "low_variant": "",
 }
 
 
@@ -1753,6 +1756,8 @@ def operator_settings():
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["sample_interval_min"] = max(0, min(240, settings["sample_interval_min"]))
     settings["followup_interval_min"] = max(0, min(60, settings["followup_interval_min"]))
+    settings["high_variant"] = settings["high_variant"].strip()
+    settings["low_variant"] = settings["low_variant"].strip()
     return settings
 
 
@@ -1771,6 +1776,57 @@ def operator_instruction(estimate_pct, settings):
     if estimate_pct < settings["decrease_below"]:
         return "decrease", False
     return "hold", False
+
+
+def operator_prompt_pair(settings):
+    """(high, low) prompt labels when the two-prompt rule is on, else None.
+
+    Why two prompts: no single wording judges both ends well. On the lab-matched
+    operator samples of 2026-09-12, 3.2b kept clean trays under 3% but read every
+    8%+ tray as 3-8%, while 3.4b caught every 8%+ tray but lifted the clean ones.
+    So each decision goes to the prompt that is good at it: the high prompt
+    decides AUGMENTER, the low prompt decides DIMINUER.
+
+    Off unless both are set, different, and still exist -- a prompt that has
+    been removed must degrade to the single-prompt behaviour, not stop an
+    operator at the line with an error.
+    """
+    high, low = settings.get("high_variant") or "", settings.get("low_variant") or ""
+    if not high or not low or high == low:
+        return None
+    registry = prompt_registry()
+    if high not in registry or low not in registry:
+        print(f"[operator_prompt_pair] prompt missing, falling back to one prompt: {high!r}, {low!r}")
+        return None
+    return high, low
+
+
+def combined_instruction(high, low, settings):
+    """The two-prompt rule. Returns (instruction, alert, deciding_result).
+
+    AUGMENTER when the high prompt's estimate reaches increase_at; otherwise
+    DIMINUER when the low prompt's estimate is under decrease_below; otherwise
+    no change. The operator is shown the band of the prompt that decided, so the
+    band and the instruction always agree. If one prompt produced no estimate,
+    the other decides alone with the ordinary single-prompt rule.
+    """
+    he, le = high.get("estimate_pct"), low.get("estimate_pct")
+    if he is None and le is None:
+        return None, False, high
+    if he is None:
+        instruction, alert = operator_instruction(le, settings)
+        return instruction, alert, low
+    if le is None:
+        instruction, alert = operator_instruction(he, settings)
+        return instruction, alert, high
+    if he >= settings["increase_at"]:
+        return "increase", he >= settings["alert_at"], high
+    if le < settings["decrease_below"]:
+        return "decrease", False, low
+    # No change. Show the low prompt's band, which is the better judge below 8%,
+    # unless it reads 8%+ itself -- then the high prompt's, so the band shown
+    # never suggests an increase that was not given.
+    return "hold", False, (low if le < settings["increase_at"] else high)
 
 
 def _load_rig_capture(command_id, caller, is_operator):
@@ -1891,10 +1947,14 @@ async def azure_band_test(
     # an operator cannot upload an arbitrary file and have it recorded.
     is_operator = operator.get("role") == "operator"
     settings = operator_settings() if is_operator else None
+    pair = None
     if is_operator:
         if not command_id:
             raise HTTPException(status_code=403, detail="Un opérateur ne peut analyser qu'une capture du banc.")
-        variants = settings["variant"]
+        pair = operator_prompt_pair(settings)
+        # High first: escalation adds rotations to the first prompt only, and
+        # the extra rotations belong to the AUGMENTER decision.
+        variants = ",".join(pair) if pair else settings["variant"]
         repeats = settings["repeats"]
         is_training = False
         real_pct = ""
@@ -2370,10 +2430,23 @@ async def azure_band_test(
         lookup_error = f"{type(e).__name__}: {e}"
         print(f"[vision_band_estimates lot/real-pct lookup failed] {lookup_error}")
 
+    # Two-prompt rule: decided once for the capture. Only the deciding prompt's
+    # row carries the instruction, so the operator's history -- which lists rows
+    # with an instruction -- shows one line per sample, and the other prompt's
+    # row still records what it read.
+    decider = None
+    if is_operator and pair and len(parsed_results) == 2:
+        rule_instruction, rule_alert, decider = combined_instruction(parsed_results[0], parsed_results[1], settings)
+
     # Recording is per-variant and best-effort -- one variant's insert
     # failing shouldn't hide the others' results.
     for parsed in parsed_results:
-        if is_operator:
+        if is_operator and decider is not None:
+            parsed["rule_role"] = "high" if parsed is parsed_results[0] else "low"
+            parsed["decided_by"] = decider.get("prompt_version")
+            parsed["instruction"] = rule_instruction if parsed is decider else None
+            parsed["instruction_alert"] = rule_alert if parsed is decider else False
+        elif is_operator:
             instruction, alert = operator_instruction(parsed.get("estimate_pct"), settings)
             parsed["instruction"] = instruction
             parsed["instruction_alert"] = alert
@@ -2454,6 +2527,9 @@ async def azure_band_test(
             parsed["recording_error"] = f"{type(e).__name__}: {e}"
             print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
 
+    if decider is not None:
+        parsed_results = [decider] + [r for r in parsed_results if r is not decider]
+
     return {
         "results": parsed_results,
         "recorded_as": lot_text,
@@ -2510,6 +2586,9 @@ def operator_samples(operator: dict = Depends(require_capture_role())):
                 "repeat_count, escalated, operator_instruction, instruction_alert")
         .eq("created_by", operator["id"])
         .eq("source", "operator")
+        # One line per sample: under the two-prompt rule only the deciding
+        # prompt's row carries an instruction.
+        .not_.is_("operator_instruction", "null")
         .gte("created_at", cycle_start)
         .order("created_at", desc=True)
         .limit(500)
