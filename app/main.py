@@ -1302,7 +1302,8 @@ async def claude_detect(
 #                             the wrong one of these three.
 #   AZURE_OPENAI_API_KEY
 #   AZURE_OPENAI_DEPLOYMENT   the name YOU gave the deployed model when
-#                             you deployed gpt-4o in the Foundry portal
+#                             you deployed the model (gpt-5.1 as of
+#                             Sep 2026, originally gpt-4o) in the Foundry portal
 #                             (not necessarily "gpt-4o" itself -- this is
 #                             a deployment name you chose, confirm it in
 #                             Foundry > Models + endpoints)
@@ -1354,8 +1355,10 @@ def get_azure_client():
 # The model every real estimate uses stays AZURE_OPENAI_DEPLOYMENT, called
 # exactly as before. Other models can be tried on stored photos from the
 # re-score tab, so a replacement is chosen on the lab-measured photos rather
-# than on production -- and GPT-4o 2024-05-13 retires on 2026-10-01, when Azure
-# swaps in gpt-5.1 on its own, so this comparison is not optional.
+# than on production. The default deployment is gpt-5.1 (retires 2027-05-15),
+# which still shrinks a photo to about 1365x768 the way GPT-4o did; the newer
+# patch-based models read the full 2048 edge, and whether that resolution buys
+# accuracy on these trays is what this comparison is for.
 #
 # VISION_MODELS lists them, comma-separated, each as label=provider:target:
 #
