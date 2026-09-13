@@ -1706,6 +1706,9 @@ OPERATOR_DEFAULTS = {
     # Two-prompt rule (see operator_prompt_pair). Empty = one prompt, as before.
     "high_variant": "",
     "low_variant": "",
+    # Tell AQ when this many AUGMENTER decisions come in a row within a
+    # production cycle (increase_streak_alert). 0 = off.
+    "alert_consecutive_increase": 2,
 }
 
 
@@ -1756,6 +1759,7 @@ def operator_settings():
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["sample_interval_min"] = max(0, min(240, settings["sample_interval_min"]))
     settings["followup_interval_min"] = max(0, min(60, settings["followup_interval_min"]))
+    settings["alert_consecutive_increase"] = max(0, min(10, settings["alert_consecutive_increase"]))
     settings["high_variant"] = settings["high_variant"].strip()
     settings["low_variant"] = settings["low_variant"].strip()
     return settings
@@ -1776,6 +1780,81 @@ def operator_instruction(estimate_pct, settings):
     if estimate_pct < settings["decrease_below"]:
         return "decrease", False
     return "hold", False
+
+
+def current_cycle_start():
+    """(cycle_start, cycle_date) of the production cycle in progress.
+
+    The most recent production_cycles row that has started. The database did
+    the America/Toronto arithmetic when it materialised that row from
+    cycle_schedule, so this follows the plant's schedule and needs no time zone
+    data (the slim Python image ships none). Between one cycle's close and the
+    next one's start it is still the cycle that just ended. With no cycle at
+    all, the last 24 hours.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    try:
+        cyc = (
+            supabase.table("production_cycles")
+            .select("cycle_start, cycle_date")
+            .lte("cycle_start", now.isoformat())
+            .order("cycle_start", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if cyc.data:
+            return cyc.data[0]["cycle_start"], cyc.data[0].get("cycle_date")
+    except Exception as e:
+        print(f"[current_cycle_start lookup failed] {type(e).__name__}: {e}")
+    return (now - datetime.timedelta(hours=24)).isoformat(), None
+
+
+def increase_streak_alert(settings):
+    """True when this AUGMENTER completes a run of alert_consecutive_increase.
+
+    Called only for a capture that has just been decided AUGMENTER, before its
+    own row is written, so it looks at the previous n-1 decisions. Counted on
+    the rig, not per operator -- the rig is shared across a shift change and a
+    handover must not reset it -- and within the production cycle, so the last
+    sample of yesterday does not start today's run.
+
+    Why it matters: AUGMENTER is followed by a check sample a few minutes
+    later. If that one is AUGMENTER too, the adjustment did not work -- the
+    destoner may be at its limit, or something upstream changed -- and that is
+    for AQ to know about, not for the operator to keep turning a dial.
+    """
+    n = settings.get("alert_consecutive_increase", 0)
+    if n <= 0:
+        return False
+    if n == 1:
+        return True
+    try:
+        cycle_start, _ = current_cycle_start()
+        rows = (
+            supabase.table("vision_band_estimates")
+            .select("operator_instruction")
+            .eq("source", "operator")
+            .not_.is_("operator_instruction", "null")
+            .gte("created_at", cycle_start)
+            .order("created_at", desc=True)
+            .limit(n - 1)
+            .execute()
+        ).data or []
+    except Exception as e:
+        print(f"[increase_streak_alert lookup failed] {type(e).__name__}: {e}")
+        return False
+    return len(rows) == n - 1 and all(r.get("operator_instruction") == "increase" for r in rows)
+
+
+def _apply_streak(instruction, alert, settings):
+    """(alert, reason) after the consecutive-AUGMENTER rule. reason is
+    'threshold' when the single-sample alert fired, 'streak' when the run did,
+    None otherwise."""
+    if alert:
+        return True, "threshold"
+    if instruction == "increase" and increase_streak_alert(settings):
+        return True, "streak"
+    return False, None
 
 
 def operator_prompt_pair(settings):
@@ -2437,6 +2516,7 @@ async def azure_band_test(
     decider = None
     if is_operator and pair and len(parsed_results) == 2:
         rule_instruction, rule_alert, decider = combined_instruction(parsed_results[0], parsed_results[1], settings)
+        rule_alert, rule_reason = _apply_streak(rule_instruction, rule_alert, settings)
 
     # Recording is per-variant and best-effort -- one variant's insert
     # failing shouldn't hide the others' results.
@@ -2446,10 +2526,16 @@ async def azure_band_test(
             parsed["decided_by"] = decider.get("prompt_version")
             parsed["instruction"] = rule_instruction if parsed is decider else None
             parsed["instruction_alert"] = rule_alert if parsed is decider else False
+            if parsed is decider:
+                parsed["alert_reason"] = rule_reason
+                parsed["alert_streak"] = settings["alert_consecutive_increase"]
         elif is_operator:
             instruction, alert = operator_instruction(parsed.get("estimate_pct"), settings)
+            alert, reason = _apply_streak(instruction, alert, settings)
             parsed["instruction"] = instruction
             parsed["instruction_alert"] = alert
+            parsed["alert_reason"] = reason
+            parsed["alert_streak"] = settings["alert_consecutive_increase"]
         parsed["escalated"] = escalated
         parsed["recorded_as"] = lot_text
         parsed["real_pct_used"] = real_pct_value
@@ -2560,25 +2646,7 @@ def operator_samples(operator: dict = Depends(require_capture_role())):
     cycle that just ended, so a sample taken in the gap is listed rather than
     silently belonging to nothing.
     """
-    now = datetime.datetime.now(datetime.timezone.utc)
-    cycle_start = cycle_date = None
-    try:
-        cyc = (
-            supabase.table("production_cycles")
-            .select("cycle_start, cycle_date")
-            .lte("cycle_start", now.isoformat())
-            .order("cycle_start", desc=True)
-            .limit(1)
-            .execute()
-        )
-        if cyc.data:
-            cycle_start = cyc.data[0]["cycle_start"]
-            cycle_date = cyc.data[0].get("cycle_date")
-    except Exception as e:
-        print(f"[operator_samples cycle lookup failed] {type(e).__name__}: {e}")
-    if cycle_start is None:
-        # No cycle materialised at all: show the last day rather than nothing.
-        cycle_start = (now - datetime.timedelta(hours=24)).isoformat()
+    cycle_start, cycle_date = current_cycle_start()
 
     resp = (
         supabase.table("vision_band_estimates")
@@ -2598,7 +2666,7 @@ def operator_samples(operator: dict = Depends(require_capture_role())):
         "cycle_start": cycle_start,
         "cycle_date": cycle_date,
         **{k: v for k, v in operator_settings().items()
-           if k in ("sample_interval_min", "followup_interval_min")},
+           if k in ("sample_interval_min", "followup_interval_min", "alert_consecutive_increase")},
         "samples": [
             {
                 "sample_id": r.get("lot_number_text"),
