@@ -1712,6 +1712,16 @@ OPERATOR_DEFAULTS = {
 }
 
 
+# The instruction must always agree with the band the operator types into
+# Ignition. DIMINUER below 4.0 once came with a 3-8% band -- two <3% readings and
+# two 3-8% average 3.5, which is labelled 3-8% -- and "3-8% but reduce" read as
+# a contradiction on the line. So whatever AQ sets, DIMINUER is only possible
+# where the band is <3% and AUGMENTER only where it is 8-13% or above: the
+# lower bounds of the coarse scale's second and third bands, 3.0 and 8.0.
+OP_DECREASE_MAX = BAND_SCALES["coarse"][1][1]
+OP_INCREASE_MIN = BAND_SCALES["coarse"][2][1]
+
+
 def operator_settings():
     """Operator analysis settings: the code defaults, overridden key by key by
     system_config.operator_settings (a JSON object), with the prompt taken from
@@ -1754,6 +1764,10 @@ def operator_settings():
                 settings[key] = type(default)(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
+
+    settings["decrease_below"] = min(settings["decrease_below"], OP_DECREASE_MAX)
+    settings["increase_at"] = max(settings["increase_at"], OP_INCREASE_MIN)
+    settings["alert_at"] = max(settings["alert_at"], settings["increase_at"])
 
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
