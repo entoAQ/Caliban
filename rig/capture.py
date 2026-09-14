@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime
@@ -55,6 +56,94 @@ FLATFIELD_FILE = Path.home() / "rig_flatfield.npy"
 # this is the reference surface's own texture and the sensor's noise, and
 # storing it would print this particular plate into every future capture.
 GRID = 24
+
+# LED lighting flickers at twice the mains frequency (120 Hz here). The sensor
+# reads a frame line by line, so an exposure that is not a whole number of
+# flicker cycles lights some rows more than others: horizontal bands. On the
+# 2026-09 operator photos they measured about +/-10% brightness on bare tray,
+# and sat in the same rows photo after photo -- baked into the flat field,
+# which was built from one short, banded frame.
+MAINS_HZ = float(os.environ.get("RIG_MAINS_HZ", "60"))
+FLICKER_PERIOD_US = 1e6 / (2 * MAINS_HZ)
+
+# Frames averaged for the flat field. Live flicker lands on different rows from
+# one frame to the next when the timing drifts, and noise drops with the count.
+FLAT_FRAMES = 8
+
+# Band spacings searched for, in rows. The rig's photos showed 160-250.
+BAND_MIN_ROWS, BAND_MAX_ROWS = 40, 800
+
+
+def flicker_safe(exposure_us, gain, min_gain=1.0, max_gain=16.0):
+    """(exposure_us, gain) with the exposure a whole number of flicker cycles
+    and the gain adjusted so the image is exactly as bright as before.
+
+    Tries the nearest whole numbers of cycles below and above, keeping the one
+    needing the least gain change within the sensor's range -- below 1.0 the
+    sensor cannot darken, so a longer exposure would clip. If no whole number
+    fits (a bright scene needing less than one cycle, like the bare tray),
+    the exposure is returned unchanged: that frame will band, which is why the
+    flat field no longer trusts any frame to be free of bands.
+    """
+    n_low = int(exposure_us // FLICKER_PERIOD_US)
+    best = None
+    for n in (n_low, n_low + 1):
+        if n < 1:
+            continue
+        # Whole microseconds first, then the gain from that exact figure.
+        exp = int(round(n * FLICKER_PERIOD_US))
+        g = gain * exposure_us / exp
+        if min_gain <= g <= max_gain:
+            change = abs(g / gain - 1)
+            if best is None or change < best[2]:
+                best = (exp, g, change)
+    if best is None:
+        return int(exposure_us), float(gain)
+    return best[0], float(best[1])
+
+
+def _remove_bands(frame, min_amp_pct=0.5):
+    """Divide horizontal flicker bands out of a (h, w, 3) float frame.
+
+    Bands are a function of the row alone, the same across the whole width, so
+    they show in the row-by-row brightness profile. That profile is fitted as a
+    smooth trend (the lighting, which changes slowly down the tray) plus a
+    periodic part at the band spacing found in it, with two harmonics because
+    flicker is rarely a pure sine. Fitted together, the bands cannot pull the
+    trend, and only the periodic part is divided out -- so the lighting the
+    flat field exists to measure is left exactly as it was.
+
+    Returns (frame, amplitude_pct, period_rows); a frame with no bands worth
+    the name (under min_amp_pct) comes back untouched, with (0.0, None).
+    """
+    h = frame.shape[0]
+    rows = frame.mean(axis=(1, 2)).astype(np.float64)
+    y = (np.arange(h) + 0.5) / h * 2 - 1
+    r = np.arange(h, dtype=np.float64)
+    poly = np.stack([y ** k for k in range(7)], axis=1)
+
+    trend = poly @ np.linalg.lstsq(poly, rows, rcond=None)[0]
+    resid = rows / trend - 1
+    spec = np.abs(np.fft.rfft(resid))
+    freqs = np.fft.rfftfreq(h)
+    band = (freqs > 1 / BAND_MAX_ROWS) & (freqs < 1 / BAND_MIN_ROWS)
+    f0 = freqs[band][np.argmax(spec[band])]
+
+    def fit(freq):
+        waves = [np.stack([np.sin(2 * np.pi * k * freq * r), np.cos(2 * np.pi * k * freq * r)], axis=1)
+                 for k in (1, 2, 3)]
+        A = np.concatenate([poly] + waves, axis=1)
+        coef = np.linalg.lstsq(A, rows, rcond=None)[0]
+        return float(((A @ coef - rows) ** 2).sum()), freq, A, coef
+
+    # The FFT only places the spacing to within a bin; refine it.
+    _, freq, A, coef = min((fit(fq) for fq in np.linspace(f0 - 1 / h, f0 + 1 / h, 81)),
+                           key=lambda t: t[0])
+    ripple = 1 + (A[:, 7:] @ coef[7:]) / (A[:, :7] @ coef[:7])
+    amp = float((np.percentile(ripple, 99) - np.percentile(ripple, 1)) / 2 * 100)
+    if amp < min_amp_pct:
+        return frame, 0.0, None
+    return frame / ripple[:, None, None].astype(np.float32), amp, float(1 / freq)
 # The imx708's native array is 16:9, not the 4:3 the OV5647 gave. There is no
 # full-sensor 4:3 mode to fall back to, so the framing genuinely changes with
 # the camera -- every stored crop, region and exposure predates this and must
@@ -194,6 +283,8 @@ def measure(ev=0.0, reset_white_balance=False):
     picam2.close()
 
     exposure = int(metadata["ExposureTime"] * (2.0 ** ev))
+    # A whole number of flicker cycles, gain adjusted to keep the brightness.
+    exposure, gain = flicker_safe(exposure, float(metadata["AnalogueGain"]))
 
     # Update rather than replace. The crop is a property of the rig's geometry,
     # not of its exposure, and silently discarding it here meant re-measuring
@@ -203,7 +294,8 @@ def measure(ev=0.0, reset_white_balance=False):
     settings.update({
         "exposure_time": exposure,
         "ev_bias": ev,
-        "analogue_gain": float(metadata["AnalogueGain"]),
+        "analogue_gain": gain,
+        "mains_hz": MAINS_HZ,
         "measured_at": datetime.now().isoformat(timespec="seconds"),
     })
 
@@ -509,6 +601,9 @@ def flatfield():
         }
     )
     frame = picam2.capture_array().astype(np.float32)
+    for _ in range(FLAT_FRAMES - 1):
+        frame += picam2.capture_array()
+    frame /= FLAT_FRAMES
     picam2.stop()
     picam2.close()
 
@@ -526,6 +621,11 @@ def flatfield():
             "the pattern being measured. Use a pale matte surface and enough\n"
             "light that 'measure' settles near gain 1.0."
         )
+
+    # Divide out flicker bands first. The grid below is fine enough to record
+    # them, and did: one banded reference frame stamped its stripes onto every
+    # capture until the next calibration.
+    frame, band_amp, band_period = _remove_bands(frame)
 
     # Block-average down to a coarse grid before doing anything else. The thing
     # being measured is illumination, which varies smoothly across the frame;
@@ -551,11 +651,17 @@ def flatfield():
 
     np.save(FLATFIELD_FILE, gains.astype(np.float32))
     settings["flat_fielded_at"] = datetime.now().isoformat(timespec="seconds")
+    settings["flat_bands_pct"] = round(band_amp, 2)
+    settings["flat_bands_period_rows"] = round(band_period, 1) if band_period else None
     SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 
     print(f"Illumination range across the frame: {coarse.mean(axis=2).min():.0f}"
           f" to {coarse.mean(axis=2).max():.0f} of 255")
     print(f"Largest correction: x{extreme:.2f}")
+    if band_period:
+        print(f"Flicker bands removed from the reference: +/-{band_amp:.1f}%, every {band_period:.0f} rows")
+    else:
+        print("No flicker bands found in the reference")
     print(f"Written to {FLATFIELD_FILE}")
 
     if extreme > 2.0:
