@@ -2562,7 +2562,7 @@ async def azure_band_test(
             parsed["recording_error"] = lookup_error
             continue
         try:
-            insert_resp = supabase.table("vision_band_estimates").insert({
+            row = {
                 "lot_id": lot_id,
                 "lot_number_text": lot_text,
                 "predicted_band": parsed.get("band"),
@@ -2612,7 +2612,19 @@ async def azure_band_test(
                     "plastic_votes": parsed.get("plastic_votes"),
                     "plastic_desc": parsed.get("plastic_desc"),
                 } if parsed.get("plastic_votes") is not None else {}),
-            }).execute()
+                # Every rotation's band (rig/repeat_bands.sql), for fitting the
+                # band values against lot results later.
+                "repeat_bands": parsed.get("repeat_bands"),
+            }
+            try:
+                insert_resp = supabase.table("vision_band_estimates").insert(row).execute()
+            except Exception as e:
+                # Deployed ahead of rig/repeat_bands.sql: save the row without
+                # the new column rather than lose the capture.
+                if "repeat_bands" not in str(e):
+                    raise
+                row.pop("repeat_bands")
+                insert_resp = supabase.table("vision_band_estimates").insert(row).execute()
 
             # Defensive: some client/API combinations can return a response
             # with no error raised but also no actual row -- treat "insert
