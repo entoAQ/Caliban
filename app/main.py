@@ -1922,6 +1922,40 @@ def combined_instruction(high, low, settings):
     return "hold", False, (low if le < settings["increase_at"] else high)
 
 
+# A photo the rig could not really take -- the light off, the lens blocked, the
+# camera knocked out of its mount (2026-09-15: operators moved the rig and the
+# camera popped out; every capture after that was black). The model answers a
+# black frame as confidently as a tray, so the frame is judged before any call
+# is made: there is no band in a photo with nothing in it.
+BLACK_MEAN_MAX = 20.0      # of 255; a lit tray sits well above 100
+FLAT_STD_MAX = 6.0         # near-uniform frame: nothing to see
+DARK_MEAN_MAX = 60.0       # ... and dark with it
+BLOWN_MEAN_MIN = 245.0     # flooded with light
+
+
+def unusable_photo(img):
+    """Why this photo cannot be judged, or None if it looks like a real tray.
+
+    Measured on a small grey copy: the mean is the brightness, the standard
+    deviation is how much there is to see. Both in 0-255.
+    """
+    from PIL import ImageStat
+
+    small = img.convert("L").resize((64, 64))
+    stat = ImageStat.Stat(small)
+    mean, std = stat.mean[0], stat.stddev[0]
+    if mean <= BLACK_MEAN_MAX:
+        return (f"Photo noire (luminosité moyenne {mean:.0f}/255) -- éclairage éteint, "
+                f"objectif obstrué ou caméra déplacée. Prévenir l'AQ.")
+    if std <= FLAT_STD_MAX and mean <= DARK_MEAN_MAX:
+        return (f"Photo vide et sombre (luminosité {mean:.0f}/255, variation {std:.1f}) -- "
+                f"la caméra ne voit pas le plateau. Prévenir l'AQ.")
+    if mean >= BLOWN_MEAN_MIN and std <= FLAT_STD_MAX:
+        return (f"Photo surexposée (luminosité {mean:.0f}/255, variation {std:.1f}) -- "
+                f"éclairage ou exposition à vérifier. Prévenir l'AQ.")
+    return None
+
+
 def _load_rig_capture(command_id, caller, is_operator):
     """Fetch a finished rig capture server-side. Returns (bytes, lot_number,
     image_path).
@@ -2171,6 +2205,16 @@ async def azure_band_test(
     original = Image.open(io.BytesIO(contents)).convert("RGB")
     if max(original.size) > MODEL_MAX_EDGE:
         original.thumbnail((MODEL_MAX_EDGE, MODEL_MAX_EDGE), Image.LANCZOS)
+
+    # Refused rather than analysed: nothing recorded, no Azure calls spent, and
+    # the operator screen shows an error, which never reads as an instruction.
+    # Uploads from the band-test page are left alone -- a dark test image there
+    # can be deliberate.
+    if command_id:
+        why = unusable_photo(original)
+        if why:
+            print(f"[capture refused] {command_id}: {why}")
+            raise HTTPException(status_code=422, detail=why)
 
     def _encode(img):
         buf = io.BytesIO()
