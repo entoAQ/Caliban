@@ -310,6 +310,50 @@ def area(volume_ml):
     print(f"Written to {REFERENCE_FILE}")
 
 
+def measure_volume():
+    """One ToF reading: sensed height, volume, and the calibration it relied
+    on -- everything density() needs except the mass.
+
+    Split out on its own so the capture pathway can take this reading at the
+    same moment as the MEO photo, before the sample has been weighed. Mass
+    and density get attached later, once they exist -- see
+    tof_density_readings.mass_g in SGSC, filled in by backfill the same way
+    vision_band_estimates.real_density already is.
+
+    Raises RuntimeError rather than calling sys.exit, unlike the CLI
+    commands: a caller in the capture pathway needs to catch this and
+    continue without a ToF reading, not have the whole process killed by a
+    sensor that failed to warm up in time.
+    """
+    stored, ref = _load_reference()
+    area_mm2 = stored.get("sensed_area_mm2")
+    if not area_mm2:
+        raise RuntimeError("No area calibration. Run 'area --volume-ml N' "
+                            "once, with a known volume in the tray.")
+
+    lidar = _sensor()
+    height, delta = _height(lidar, ref)
+
+    volume_ml = height * area_mm2 / 1000.0
+    if volume_ml <= 0:
+        raise RuntimeError("Measured volume is zero or negative. Is there "
+                            "anything in the tray, and is the reference "
+                            "still valid?")
+
+    # Precision is dominated by the height term; mass and area are far better
+    # known. Stating it as a percentage is what stops the number being read
+    # as more exact than it is.
+    error_pct = 100.0 * HEIGHT_PRECISION_MM / height
+
+    return {
+        "height_mm": round(height, 1),
+        "volume_ml": round(volume_ml, 1),
+        "uncertainty_pct": round(error_pct, 0),
+        "reference_recorded_at": stored.get("recorded_at"),
+        "sensed_area_mm2": area_mm2,
+    }
+
+
 def density(mass_g, lot=None):
     """Bulk density from mass and the volume the sensor measures.
 
@@ -335,31 +379,20 @@ def density(mass_g, lot=None):
     the reading looking trustworthy: a shallow, high-uncertainty reading is
     itself something worth having on record, not something to quietly drop.
     """
-    stored, ref = _load_reference()
-    area_mm2 = stored.get("sensed_area_mm2")
-    if not area_mm2:
-        sys.exit("No area calibration. Run 'area --volume-ml N' once, with a "
-                 "known volume in the tray.")
+    try:
+        reading = measure_volume()
+    except RuntimeError as e:
+        sys.exit(str(e))
 
-    lidar = _sensor()
-    height, delta = _height(lidar, ref)
-
-    volume_ml = height * area_mm2 / 1000.0
-    if volume_ml <= 0:
-        sys.exit("Measured volume is zero or negative. Is there anything in "
-                 "the tray, and is the reference still valid?")
-
+    height = reading["height_mm"]
+    volume_ml = reading["volume_ml"]
+    error_pct = reading["uncertainty_pct"]
     density_g_l = mass_g / (volume_ml / 1000.0)
 
     print(f"Mean depth    : {height:6.1f} mm")
     print(f"Volume        : {volume_ml:6.1f} mL")
     print(f"Mass          : {mass_g:6.1f} g")
     print(f"Bulk density  : {density_g_l:6.0f} g/L")
-
-    # Precision is dominated by the height term; mass and area are far better
-    # known. Stating it as a percentage is what stops the number being read as
-    # more exact than it is.
-    error_pct = 100.0 * HEIGHT_PRECISION_MM / height
     print(f"\nUncertainty   : about {error_pct:.0f}% "
           f"(±{HEIGHT_PRECISION_MM} mm on {height:.1f} mm of depth)")
     if error_pct > 15:

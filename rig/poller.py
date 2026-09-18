@@ -27,6 +27,7 @@ from datetime import datetime
 import requests
 
 import capture
+import tof
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 RIG_API_KEY = os.environ.get("RIG_API_KEY", "")
@@ -144,14 +145,17 @@ def claim():
 
 
 def shoot(lot_number):
-    """Capture the visible frame, and the IR frame if the rig has IR boards.
+    """Capture the visible frame, the IR frame if fitted, and a ToF reading
+    of the same tray if the sensor is fitted and calibrated.
 
-    Returns (visible_path, ir_path_or_None).
+    Returns (visible_path, ir_path_or_None, tof_reading_or_None).
 
-    IR is best-effort on purpose. A missing IR frame is a complete result --
-    the rig is useful without the IR boards attached, and refusing to deliver
-    a perfectly good visible capture because the second one failed would be
-    the wrong trade for an operator standing at the bench waiting."""
+    Both IR and ToF are best-effort, same reasoning either way: the rig is
+    useful without them, and refusing to deliver a perfectly good visible
+    capture because a second sensor failed would be the wrong trade for an
+    operator standing at the bench waiting. The ToF reading has no mass yet
+    -- that arrives later as a backfill -- so a failure here costs nothing
+    but a future density number, never the capture itself."""
     visible = capture.capture(lot_number, "visible")
 
     ir = None
@@ -165,7 +169,13 @@ def shoot(lot_number):
         except Exception as e:
             log(f"IR capture failed, continuing with visible only: {e}")
 
-    return visible, ir
+    tof_reading = None
+    try:
+        tof_reading = tof.measure_volume()
+    except Exception as e:
+        log(f"ToF reading failed, continuing without it: {e}")
+
+    return visible, ir, tof_reading
 
 
 def run_stage(kind):
@@ -199,15 +209,20 @@ def complete(command_id, result):
     resp.raise_for_status()
 
 
-def upload(command_id, visible_path, ir_path):
+def upload(command_id, visible_path, ir_path, tof_reading=None):
     files = {"file": (os.path.basename(visible_path), open(visible_path, "rb"), "image/jpeg")}
     if ir_path:
         files["ir_file"] = (os.path.basename(ir_path), open(ir_path, "rb"), "image/jpeg")
+    # Sent as the same "result" form field the calib_* stages already use for
+    # measurements -- one shape for "here is JSON alongside/instead of a
+    # file", not a second one invented just for this.
+    data = {"result": json.dumps({"tof": tof_reading})} if tof_reading else {}
     try:
         resp = requests.post(
             f"{CALIBAN_URL}/capture-commands/{command_id}/complete",
             headers=headers(),
             files=files,
+            data=data,
             timeout=REQUEST_TIMEOUT,
         )
         resp.raise_for_status()
@@ -270,9 +285,9 @@ def main():
                         # anything.
                         label = command.get("lot_number") or kind.upper()
                         with watchdog(CAPTURE_WATCHDOG_SECONDS, command["id"], kind):
-                            visible, ir = shoot(label) if kind == "capture" else (
-                                capture.capture(label, "visible"), None)
-                        upload(command["id"], visible, ir)
+                            visible, ir, tof_reading = shoot(label) if kind == "capture" else (
+                                capture.capture(label, "visible"), None, None)
+                        upload(command["id"], visible, ir, tof_reading)
                 log(f"completed {command['id']}")
             except Exception as e:
                 log(f"capture failed for {command['id']}: {type(e).__name__}: {e}")

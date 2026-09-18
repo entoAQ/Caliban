@@ -3150,15 +3150,47 @@ async def capture_commands_complete(
         image_path = await _store(file, "visible")
         ir_path = await _store(ir_file, "ir") if ir_file is not None else None
 
-        update_resp = supabase.table("capture_commands").update({
+        # A capture can now carry a result alongside its image -- the ToF
+        # reading of the same tray, taken at the same moment as the photo.
+        # Previously this branch never looked at `result` at all, so a
+        # reading sent here would have been silently dropped.
+        update_fields = {
             "status": "done",
             "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "image_path": image_path,
             "ir_image_path": ir_path,
-        }).eq("id", command_id).execute()
+        }
+        tof_reading = None
+        if result is not None:
+            try:
+                parsed = json.loads(result)
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=400, detail=f"Résultat JSON invalide : {e}"
+                )
+            update_fields["result"] = parsed
+            tof_reading = parsed.get("tof")
+
+        update_resp = supabase.table("capture_commands").update(update_fields).eq("id", command_id).execute()
 
         if not update_resp.data:
             raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
+
+        # Best-effort, same reasoning as the IR frame above: the operator is
+        # waiting on the photo, and a ToF row is calibration data for later,
+        # not something worth failing their capture over.
+        if tof_reading:
+            try:
+                supabase.table("tof_density_readings").insert({
+                    "lot_number_text": update_resp.data[0].get("lot_number"),
+                    "height_mm": tof_reading.get("height_mm"),
+                    "volume_ml": tof_reading.get("volume_ml"),
+                    "uncertainty_pct": tof_reading.get("uncertainty_pct"),
+                    "reference_recorded_at": tof_reading.get("reference_recorded_at"),
+                    "sensed_area_mm2": tof_reading.get("sensed_area_mm2"),
+                }).execute()
+            except Exception as e:
+                print(f"[tof_density_readings insert failed] {command_id}: {type(e).__name__}: {e}")
 
         return {"status": "ok", "image_path": image_path, "ir_image_path": ir_path}
 
