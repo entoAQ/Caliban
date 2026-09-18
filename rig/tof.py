@@ -451,6 +451,39 @@ def density(mass_g, lot=None):
     print(f"\nLogged to {LOG_FILE}" + (f" (lot {lot})" if lot else " (no lot given)"))
 
 
+def read_live():
+    """Keep re-reading the scene against the reference until Ctrl+C.
+
+    For probing the field of view's physical boundary by hand -- place an
+    object at a tray position, watch which cells respond, move it, repeat.
+    One open sensor connection reused across the whole session rather than
+    re-running `read` per position, which would pay the sensor's connect
+    and warmup cost every single time.
+    """
+    if not REFERENCE_FILE.exists():
+        sys.exit(f"No reference at {REFERENCE_FILE}. Run 'reference' first, "
+                 "on an empty flat tray.")
+
+    ref = np.array([[np.nan if v is None else v for v in row]
+                    for row in json.loads(REFERENCE_FILE.read_text())["grid_mm"]])
+
+    lidar = _sensor()
+    print("Reading live -- Ctrl+C to stop.")
+    print("Positive = nearer than the empty-tray reference, i.e. something is there.\n")
+    try:
+        while True:
+            grid, _ = _measure(lidar)
+            delta = ref - grid
+            print("\033[2J\033[H", end="")  # clear screen, cursor to top
+            for row in delta:
+                print("  " + " ".join("   ." if not np.isfinite(v) else f"{v:6.1f}"
+                                      for v in row))
+            print(f"\nZones reporting: {np.isfinite(grid).sum()}/{GRID * GRID}"
+                  "   (Ctrl+C to stop)")
+    except KeyboardInterrupt:
+        print("\nStopped.")
+
+
 def read(tolerance):
     """Compare the current scene against the reference."""
     if not REFERENCE_FILE.exists():
@@ -533,6 +566,12 @@ def main():
         help="millimetres of tilt across the field before complaining "
              "(default 3, about 1 percent of working distance)",
     )
+    rd.add_argument(
+        "--live", action="store_true",
+        help="keep re-reading and reprinting the grid until Ctrl+C, for "
+             "probing the field of view's edges by hand instead of a single "
+             "snapshot",
+    )
 
     args = parser.parse_args()
     if args.command == "reference":
@@ -544,6 +583,8 @@ def main():
             area(args.volume_ml)
     elif args.command == "density":
         density(args.mass_g, args.lot)
+    elif args.live:
+        read_live()
     else:
         read(args.tolerance)
 
