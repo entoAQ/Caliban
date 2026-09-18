@@ -272,6 +272,35 @@ def _height(lidar, ref):
     return float(finite.mean()), delta
 
 
+def area_direct(area_mm2):
+    """Set the sensed area from a direct physical measurement instead of a
+    poured volume.
+
+    The volume method below only holds if every poured mL lands inside the
+    sensor's field of view -- true with a mask or insert that fits entirely
+    within the shot, false for a free pour across the whole physical tray,
+    part of which sits outside the shot by design here. Pouring the whole
+    tray flat still gives a correct height reading (the sensor only ever
+    measures what it can see), but the volume number would include material
+    the sensor never counted, which quietly inflates the calibrated area and
+    understates every density reading that follows.
+
+    Measuring the footprint directly sidesteps that: find where the field of
+    view starts and stops by watching `tof.py read` while moving a small
+    object across the tray at tray height, mark those points, and measure the
+    resulting rectangle with a ruler (see rig/README.md). Length x width in
+    mm2 goes straight in here, no pour required.
+    """
+    stored, ref = _load_reference()
+    stored["sensed_area_mm2"] = round(area_mm2, 0)
+    stored["area_calibrated_at"] = datetime.now().isoformat(timespec="seconds")
+    REFERENCE_FILE.write_text(json.dumps(stored, indent=2))
+
+    print(f"Sensed area   : {area_mm2 / 100:.0f} cm2 "
+          f"({area_mm2 ** 0.5:.0f} mm square equivalent)")
+    print(f"Written to {REFERENCE_FILE}")
+
+
 def area(volume_ml):
     """Calibrate how much tray the sensor actually sees, from a known volume.
 
@@ -286,6 +315,9 @@ def area(volume_ml):
     tray, or rice levelled off. A heap in the middle gives the same volume and
     the same answer in principle, but leaves the outer zones reading zero,
     where the noise is proportionally largest.
+
+    Only valid when the pour is confined to the sensor's field of view --
+    see area_direct() otherwise.
     """
     stored, ref = _load_reference()
     lidar = _sensor()
@@ -474,9 +506,17 @@ def main():
 
     sub.add_parser("reference", help="record the flat baseline (empty tray)")
 
-    ar = sub.add_parser("area", help="calibrate the sensed area from a known volume")
-    ar.add_argument("--volume-ml", type=float, required=True,
-                    help="volume currently in the tray, in millilitres")
+    ar = sub.add_parser("area", help="calibrate the sensed area from a known volume, or set it directly")
+    ar_group = ar.add_mutually_exclusive_group(required=True)
+    ar_group.add_argument("--volume-ml", type=float,
+                    help="volume currently in the tray, in millilitres -- only "
+                         "correct if the pour is confined to the sensor's field "
+                         "of view (a mask/insert); a free pour across a tray "
+                         "that extends beyond the shot overstates it")
+    ar_group.add_argument("--area-mm2", type=float,
+                    help="sensed footprint area in mm2 (length x width), "
+                         "measured directly with a ruler -- use this when a "
+                         "masked pour isn't practical")
 
     dn = sub.add_parser("density", help="bulk density from mass and sensed volume")
     dn.add_argument("--mass-g", type=float, required=True,
@@ -498,7 +538,10 @@ def main():
     if args.command == "reference":
         reference()
     elif args.command == "area":
-        area(args.volume_ml)
+        if args.area_mm2 is not None:
+            area_direct(args.area_mm2)
+        else:
+            area(args.volume_ml)
     elif args.command == "density":
         density(args.mass_g, args.lot)
     else:
