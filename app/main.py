@@ -1933,17 +1933,24 @@ DARK_MEAN_MAX = 60.0       # ... and dark with it
 BLOWN_MEAN_MIN = 245.0     # flooded with light
 
 
-def unusable_photo(img):
-    """Why this photo cannot be judged, or None if it looks like a real tray.
+def photo_stats(img):
+    """(mean, std) brightness of a photo, 0-255, on a small grey copy.
 
-    Measured on a small grey copy: the mean is the brightness, the standard
-    deviation is how much there is to see. Both in 0-255.
+    The mean is how bright the frame is, the standard deviation how much there
+    is to see in it. Kept with every estimate (rig/photo_light.sql): exposure
+    and gain are fixed at calibration, so if the bench light is turned down
+    afterwards every photo darkens -- and a darker tray reads as more MEO.
+    Without this recorded, that is indistinguishable from real contamination.
     """
     from PIL import ImageStat
 
-    small = img.convert("L").resize((64, 64))
-    stat = ImageStat.Stat(small)
-    mean, std = stat.mean[0], stat.stddev[0]
+    stat = ImageStat.Stat(img.convert("L").resize((64, 64)))
+    return round(stat.mean[0], 1), round(stat.stddev[0], 1)
+
+
+def unusable_photo(img):
+    """Why this photo cannot be judged, or None if it looks like a real tray."""
+    mean, std = photo_stats(img)
     if mean <= BLACK_MEAN_MAX:
         return (f"Photo noire (luminosité moyenne {mean:.0f}/255) -- éclairage éteint, "
                 f"objectif obstrué ou caméra déplacée. Prévenir l'AQ.")
@@ -2210,6 +2217,7 @@ async def azure_band_test(
     # the operator screen shows an error, which never reads as an instruction.
     # Uploads from the band-test page are left alone -- a dark test image there
     # can be deliberate.
+    photo_mean, photo_std = photo_stats(original)
     if command_id:
         why = unusable_photo(original)
         if why:
@@ -2600,6 +2608,8 @@ async def azure_band_test(
         parsed["real_pct_source"] = real_pct_source
         parsed["error_flagged"] = is_outlier(parsed.get("band"), real_pct_value)
         parsed["storage_path"] = capture_storage_path
+        parsed["photo_mean"] = photo_mean
+        parsed["photo_std"] = photo_std
         if not record:
             continue
         if lookup_error:
@@ -2659,16 +2669,24 @@ async def azure_band_test(
                 # Every rotation's band (rig/repeat_bands.sql), for fitting the
                 # band values against lot results later.
                 "repeat_bands": parsed.get("repeat_bands"),
+                # How bright this photo was (rig/photo_light.sql).
+                "photo_mean": photo_mean,
+                "photo_std": photo_std,
             }
-            try:
-                insert_resp = supabase.table("vision_band_estimates").insert(row).execute()
-            except Exception as e:
-                # Deployed ahead of rig/repeat_bands.sql: save the row without
-                # the new column rather than lose the capture.
-                if "repeat_bands" not in str(e):
-                    raise
-                row.pop("repeat_bands")
-                insert_resp = supabase.table("vision_band_estimates").insert(row).execute()
+            # Deployed ahead of one of the scripts that add these columns
+            # (rig/repeat_bands.sql, rig/photo_light.sql): drop whichever the
+            # database does not know yet rather than lose the capture.
+            optional = ["repeat_bands", "photo_mean", "photo_std"]
+            while True:
+                try:
+                    insert_resp = supabase.table("vision_band_estimates").insert(row).execute()
+                    break
+                except Exception as e:
+                    missing = next((c for c in optional if c in row and c in str(e)), None)
+                    if missing is None:
+                        raise
+                    print(f"[vision_band_estimates] column {missing} missing -- saving without it")
+                    row.pop(missing)
 
             # Defensive: some client/API combinations can return a response
             # with no error raised but also no actual row -- treat "insert
@@ -2696,6 +2714,45 @@ async def azure_band_test(
         "model": model_entry["label"],
         "model_name": model_entry["name"],
     }
+
+
+@app.post("/admin/photo-stats/backfill")
+def photo_stats_backfill(limit: int = 200, operator: dict = Depends(require_role("qc"))):
+    """Measure the brightness of stored captures that have none yet.
+
+    One-off, and safe to run repeatedly: only rows with a storage_path and no
+    photo_mean are touched, newest first, `limit` at a time. Written so the
+    2026-09-15 readings can be checked against how bright their photos were --
+    the light was turned down that day, and a darker tray reads as more MEO.
+    """
+    from PIL import Image
+
+    try:
+        rows = (
+            supabase.table("vision_band_estimates")
+            .select("id, storage_path")
+            .not_.is_("storage_path", "null")
+            .is_("photo_mean", "null")
+            .order("created_at", desc=True)
+            .limit(max(1, min(500, limit)))
+            .execute()
+        ).data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lecture impossible : {type(e).__name__}: {e}")
+
+    done, failed = 0, []
+    for row in rows:
+        try:
+            content = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(row["storage_path"])
+            mean, std = photo_stats(Image.open(io.BytesIO(content)).convert("RGB"))
+            supabase.table("vision_band_estimates").update(
+                {"photo_mean": mean, "photo_std": std}).eq("id", row["id"]).execute()
+            done += 1
+        except Exception as e:
+            failed.append(f"{row['storage_path']}: {type(e).__name__}")
+    print(f"[photo-stats backfill] measured {done}, failed {len(failed)}, remaining unknown")
+    return {"status": "ok", "measured": done, "failed": failed[:10], "failed_count": len(failed),
+            "more": len(rows) == max(1, min(500, limit))}
 
 
 @app.get("/operator/samples")
