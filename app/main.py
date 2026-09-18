@@ -2717,14 +2717,22 @@ async def azure_band_test(
 
 
 @app.post("/admin/photo-stats/backfill")
-def photo_stats_backfill(limit: int = 200, operator: dict = Depends(require_role("qc"))):
+def photo_stats_backfill(limit: int = 25, operator: dict = Depends(require_role("qc"))):
     """Measure the brightness of stored captures that have none yet.
 
     One-off, and safe to run repeatedly: only rows with a storage_path and no
     photo_mean are touched, newest first, `limit` at a time. Written so the
     2026-09-15 readings can be checked against how bright their photos were --
     the light was turned down that day, and a darker tray reads as more MEO.
+
+    Deliberately small and time-bounded. Each photo is a download of a megabyte
+    or two, and App Service cuts a request off after a few minutes: a batch of
+    200 returned 504 (which reaches the browser as a CORS error, since a
+    gateway error carries no CORS headers). So it stops at BACKFILL_SECONDS and
+    says `more`, leaving the caller to come back for the rest.
     """
+    BACKFILL_SECONDS = 90
+    started = time.time()
     from PIL import Image
 
     try:
@@ -2734,14 +2742,17 @@ def photo_stats_backfill(limit: int = 200, operator: dict = Depends(require_role
             .not_.is_("storage_path", "null")
             .is_("photo_mean", "null")
             .order("created_at", desc=True)
-            .limit(max(1, min(500, limit)))
+            .limit(max(1, min(100, limit)))
             .execute()
         ).data or []
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Lecture impossible : {type(e).__name__}: {e}")
 
-    done, failed = 0, []
+    done, failed, ran_out_of_time = 0, [], False
     for row in rows:
+        if time.time() - started > BACKFILL_SECONDS:
+            ran_out_of_time = True
+            break
         try:
             content = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(row["storage_path"])
             mean, std = photo_stats(Image.open(io.BytesIO(content)).convert("RGB"))
@@ -2750,9 +2761,11 @@ def photo_stats_backfill(limit: int = 200, operator: dict = Depends(require_role
             done += 1
         except Exception as e:
             failed.append(f"{row['storage_path']}: {type(e).__name__}")
-    print(f"[photo-stats backfill] measured {done}, failed {len(failed)}, remaining unknown")
+    print(f"[photo-stats backfill] measured {done}, failed {len(failed)}"
+          + (" (stopped on time)" if ran_out_of_time else ""))
     return {"status": "ok", "measured": done, "failed": failed[:10], "failed_count": len(failed),
-            "more": len(rows) == max(1, min(500, limit))}
+            "seconds": round(time.time() - started, 1),
+            "more": ran_out_of_time or len(rows) == max(1, min(100, limit))}
 
 
 @app.get("/operator/samples")
