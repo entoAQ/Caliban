@@ -50,6 +50,7 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import sys
 import time
@@ -59,6 +60,12 @@ from pathlib import Path
 import numpy as np
 
 REFERENCE_FILE = Path.home() / "rig_tof_reference.json"
+
+# Outside the checkout, next to rig_tof_reference.json -- this is the rig's
+# own running log, not something a `git pull` should ever touch or reset.
+LOG_FILE = Path.home() / "tof_density_log.csv"
+LOG_FIELDS = ["timestamp", "lot", "mass_g", "height_mm", "volume_ml",
+              "density_g_l", "uncertainty_pct"]
 
 I2C_BUS = 1
 I2C_ADDR = 0x33
@@ -303,7 +310,7 @@ def area(volume_ml):
     print(f"Written to {REFERENCE_FILE}")
 
 
-def density(mass_g):
+def density(mass_g, lot=None):
     """Bulk density from mass and the volume the sensor measures.
 
     This is a real measurement, unlike the vision estimate: mass over volume,
@@ -321,6 +328,12 @@ def density(mass_g):
     Depth is what decides whether it works at all. Height precision is about
     2.5 mm, so a 6 mm scattered layer carries 40% error and a 40 mm poured bed
     carries 6%.
+
+    Every call appends one row to LOG_FILE, --lot or not -- an unlabelled row
+    still has a timestamp, which is enough to match it to a lot afterwards the
+    same way the Ignition readings were matched. Logging is not conditional on
+    the reading looking trustworthy: a shallow, high-uncertainty reading is
+    itself something worth having on record, not something to quietly drop.
     """
     stored, ref = _load_reference()
     area_mm2 = stored.get("sensed_area_mm2")
@@ -355,6 +368,22 @@ def density(mass_g):
             "depth is the whole game here, and the fix is pouring it into a\n"
             "heap or a smaller container rather than reading a thin scatter."
         )
+
+    is_new = not LOG_FILE.exists()
+    with LOG_FILE.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=LOG_FIELDS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "lot": lot or "",
+            "mass_g": mass_g,
+            "height_mm": round(height, 1),
+            "volume_ml": round(volume_ml, 1),
+            "density_g_l": round(density_g_l, 0),
+            "uncertainty_pct": round(error_pct, 0),
+        })
+    print(f"\nLogged to {LOG_FILE}" + (f" (lot {lot})" if lot else " (no lot given)"))
 
 
 def read(tolerance):
@@ -419,6 +448,11 @@ def main():
     dn = sub.add_parser("density", help="bulk density from mass and sensed volume")
     dn.add_argument("--mass-g", type=float, required=True,
                     help="mass of the material in the tray, in grams")
+    dn.add_argument("--lot", type=str, default=None,
+                    help="lot number to tag this reading with in the log, "
+                         "e.g. 20260918-BB07 (optional, but makes matching "
+                         "against the lab result later a lookup instead of a "
+                         "timestamp guess)")
 
     rd = sub.add_parser("read", help="compare the current scene to the reference")
     rd.add_argument(
@@ -433,7 +467,7 @@ def main():
     elif args.command == "area":
         area(args.volume_ml)
     elif args.command == "density":
-        density(args.mass_g)
+        density(args.mass_g, args.lot)
     else:
         read(args.tolerance)
 
