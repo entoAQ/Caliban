@@ -1602,28 +1602,50 @@ def _vision_complete(entry, content):
 # envelope is actually larvae versus air trapped between them, which is a
 # real physical question a photograph can speak to (larva size and
 # plumpness) that a depth sensor alone cannot.
-DENSITY_VISION_PROMPT_VERSION = "tof-v1"
+#
+# tof-v1 (2026-09-19, superseded same day): gave the model raw geometry only
+# and asked it to infer "what a reading like this usually corresponds to"
+# from a stated typical range (130-260 g/L). Every answer across the first
+# real batch came back as a small nudge off that range's centre -- the
+# justifications literally said "legerement superieure a la valeur moyenne
+# attendue" almost verbatim, every time, regardless of what the photo
+# actually showed. The range was doing the estimating, not the photograph.
+#
+# tof-v2: gives the model the actual height-only estimate for THIS reading
+# (computed the same way density_est_g_l is, from the live model in
+# system_config) as a concrete number to adjust, and drops the generic
+# typical-range line entirely -- there is no longer a generic anchor for the
+# model to fall back on instead of looking at the photo.
+DENSITY_VISION_PROMPT_VERSION = "tof-v2"
 
 
-def density_vision_prompt(height_mm, sensed_area_mm2, volume_ml):
+def density_vision_prompt(height_mm, sensed_area_mm2, volume_ml, height_only_est=None):
     area_cm2 = (sensed_area_mm2 / 100.0) if sensed_area_mm2 else None
     area_line = f"{area_cm2:.0f} cm2" if area_cm2 is not None else "an unknown area"
+    anchor_line = (
+        f"A simple model using depth alone -- fit against a small number of past readings paired with a real measured "
+        f"density, so it already reflects typical packing and air content on average, just not for THIS specific tray -- "
+        f"puts this reading at about {height_only_est:.0f} g/L. Treat that as your STARTING point before you look at the photo, "
+        f"not as an answer to just repeat: it is an average, and this specific sample may pack tighter or looser than average."
+        if height_only_est is not None else
+        "No depth-only starting figure is available for this reading -- judge from the sensor numbers and the photograph directly."
+    )
     return f"""You are looking at a photograph of black soldier fly larvae (Hermetia illucens) on a white tray, taken by a fixed calibration rig. A separate time-of-flight depth sensor measured this exact tray at the same moment this photo was taken.
 
 Sensor reading: mean depth {height_mm:.1f} mm above the empty-tray baseline, across a sensed footprint of {area_line}, for a total envelope volume of {volume_ml:.0f} mL.
 
-That envelope volume is not all larvae -- it includes the air trapped between them, and how much of it is air depends on the larvae's own shape, which the sensor cannot see and only this photograph can show you.
+{anchor_line}
 
-Judge that from the photograph. Larger, rounder, plumper larvae nest badly and trap more air between them, so the SAME envelope volume holds LESS actual material and corresponds to a LOWER bulk density. Smaller, flatter, more shrivelled larvae pack closer together, so the same envelope holds MORE material and corresponds to a HIGHER bulk density. Loose fine material (dust, small fragments) fills the gaps between larvae and raises density further.
+Judge how densely packed this sample's larvae actually are -- something only the photograph can show you, not the sensor. Larger, rounder, plumper larvae nest badly and trap more air between them than a typical sample, which pulls true density LOWER. Smaller, flatter, more shrivelled larvae pack closer together than typical, which pulls it HIGHER. Loose fine material (dust, small fragments) filling the gaps between larvae also pushes it higher.
 
-Typical bulk density for this product is roughly 130-260 g/L. Start from what a sensor reading like this one usually corresponds to, then adjust up or down from what the larvae in THIS photograph actually look like -- do not just report a number derived from the volume alone, and do not ignore the sensor reading either.
+Move the number by however much the photograph actually justifies, in whichever direction it justifies -- a small nudge if the packing looks unremarkable, a large correction if the larvae are clearly bigger/puffier or clearly smaller/flatter than a typical sample. Do not just restate the starting figure, and do not apply a token adjustment out of habit.
 
 Answer EXACTLY in this format, with nothing before or after:
 
 DENSITE_G_L: [your best single-number estimate, in grams per litre]
 BANDE: [a single value among : <170, 170-200, 200-220, >220]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
-JUSTIFICATION: [one sentence, in French, what you saw in the photograph that moved your estimate up or down from a sensor-only reading, or confirmed it]"""
+JUSTIFICATION: [one sentence, in French, what you saw in the photograph that moved your estimate away from the depth-only starting figure, and by roughly how much]"""
 
 
 def parse_density_vision_response(text):
@@ -1657,17 +1679,22 @@ def parse_density_vision_response(text):
     return {"density_g_l": density_g_l, "band": band, "confidence": confidence, "justification": justification}
 
 
-def call_density_vision(image_b64, media_type, tof_reading):
+def call_density_vision(image_b64, media_type, tof_reading, height_only_est=None):
     """One vision call estimating density from a photo anchored on its
     paired ToF reading. Returns None if the ToF reading is incomplete
     (nothing to anchor on) rather than guessing from the photo alone --
-    that is the previous, already-weak approach this replaces."""
+    that is the previous, already-weak approach this replaces.
+
+    height_only_est is the same height-only model's number already computed
+    for this row (density_est_g_l) -- passed in rather than recomputed, so
+    the vision prompt and the stored column can never silently disagree
+    about what the depth-only estimate was."""
     height_mm = tof_reading.get("height_mm")
     volume_ml = tof_reading.get("volume_ml")
     if height_mm is None or volume_ml is None:
         return None
 
-    prompt = density_vision_prompt(height_mm, tof_reading.get("sensed_area_mm2"), volume_ml)
+    prompt = density_vision_prompt(height_mm, tof_reading.get("sensed_area_mm2"), volume_ml, height_only_est)
     content = [
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
@@ -3279,7 +3306,7 @@ def capture_commands_next(_: bool = Depends(verify_rig_key)):
     }
 
 
-def _run_density_vision(row_id, contents, media_type, tof_reading):
+def _run_density_vision(row_id, contents, media_type, tof_reading, height_only_est=None):
     """Runs after the HTTP response has already gone back to the rig.
 
     A vision call can take several seconds -- fine for an operator watching
@@ -3290,7 +3317,7 @@ def _run_density_vision(row_id, contents, media_type, tof_reading):
     tof_density_readings already has rather than blocking its creation."""
     try:
         b64 = base64.b64encode(contents).decode("utf-8")
-        result = call_density_vision(b64, media_type, tof_reading)
+        result = call_density_vision(b64, media_type, tof_reading, height_only_est)
     except Exception as e:
         print(f"[density vision call failed] {row_id}: {type(e).__name__}: {e}")
         return
@@ -3471,6 +3498,7 @@ async def capture_commands_complete(
                 background_tasks.add_task(
                     _run_density_vision, tof_row_id, visible_contents,
                     file.content_type or "image/jpeg", tof_reading,
+                    row.get("density_est_g_l"),
                 )
 
         return {"status": "ok", "image_path": image_path, "ir_image_path": ir_path}
