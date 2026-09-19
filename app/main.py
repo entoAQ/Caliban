@@ -3221,6 +3221,13 @@ async def capture_commands_complete(
                 "uncertainty_pct": tof_reading.get("uncertainty_pct"),
                 "reference_recorded_at": tof_reading.get("reference_recorded_at"),
                 "sensed_area_mm2": tof_reading.get("sensed_area_mm2"),
+                # Surface texture, not just mean depth -- see
+                # 2026-09-19-tof-density-texture.sql. Recorded so it can be
+                # checked as a density predictor later; not used by the
+                # height-only model below yet.
+                "height_std_mm": tof_reading.get("height_std_mm"),
+                "height_range_mm": tof_reading.get("height_range_mm"),
+                "coverage_frac": tof_reading.get("coverage_frac"),
             }
 
             # Scored at write time, not read time -- see tof_density_model()

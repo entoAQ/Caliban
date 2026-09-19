@@ -65,7 +65,8 @@ REFERENCE_FILE = Path.home() / "rig_tof_reference.json"
 # own running log, not something a `git pull` should ever touch or reset.
 LOG_FILE = Path.home() / "tof_density_log.csv"
 LOG_FIELDS = ["timestamp", "lot", "mass_g", "height_mm", "volume_ml",
-              "density_g_l", "uncertainty_pct"]
+              "density_g_l", "uncertainty_pct", "height_std_mm",
+              "height_range_mm", "coverage_frac"]
 
 I2C_BUS = 1
 I2C_ADDR = 0x33
@@ -262,13 +263,18 @@ def _height(lidar, ref):
     times sensed area is the true volume of material above the plane whether
     it is spread thinly or heaped in one corner, because the bare zones
     contribute a genuine zero rather than a missing value.
+
+    Raises RuntimeError, not sys.exit -- measure_volume() calls this from
+    inside the live capture pathway, where SystemExit would kill the whole
+    poller process rather than just fail the one reading. CLI callers catch
+    it and exit the way they always have; see area()/read()/read_live().
     """
     grid, _ = _measure(lidar)
     delta = ref - grid
     finite = delta[np.isfinite(delta)]
     if finite.size < GRID * GRID / 2:
-        sys.exit("Too few zones returned to say anything. Check nothing is "
-                 "blocking the sensor.")
+        raise RuntimeError("Too few zones returned to say anything. Check "
+                            "nothing is blocking the sensor.")
     return float(finite.mean()), delta
 
 
@@ -321,7 +327,10 @@ def area(volume_ml):
     """
     stored, ref = _load_reference()
     lidar = _sensor()
-    height, _ = _height(lidar, ref)
+    try:
+        height, _ = _height(lidar, ref)
+    except RuntimeError as e:
+        sys.exit(str(e))
 
     if height < 5.0:
         sys.exit(
@@ -377,8 +386,23 @@ def measure_volume():
     # as more exact than it is.
     error_pct = 100.0 * HEIGHT_PRECISION_MM / height
 
+    # Texture of the surface, not just its mean -- density() and every CLI
+    # caller only ever wanted the mean, but the capture pathway can use the
+    # rest. A rougher, more uneven surface plausibly reflects larger/plumper
+    # larvae (a real granular-packing correlate of density); a flat, even
+    # surface plausibly reflects fine, settled material. Unvalidated -- these
+    # are recorded so that question is answerable once there is real density
+    # to regress them against, not because the relationship is assumed here.
+    finite = delta[np.isfinite(delta)]
+    height_std = float(np.std(finite)) if finite.size else None
+    height_range = float(np.max(finite) - np.min(finite)) if finite.size else None
+    coverage_frac = float(finite.size) / (GRID * GRID)
+
     return {
         "height_mm": round(height, 1),
+        "height_std_mm": round(height_std, 2) if height_std is not None else None,
+        "height_range_mm": round(height_range, 1) if height_range is not None else None,
+        "coverage_frac": round(coverage_frac, 3),
         "volume_ml": round(volume_ml, 1),
         "uncertainty_pct": round(error_pct, 0),
         "reference_recorded_at": stored.get("recorded_at"),
@@ -425,6 +449,10 @@ def density(mass_g, lot=None):
     print(f"Volume        : {volume_ml:6.1f} mL")
     print(f"Mass          : {mass_g:6.1f} g")
     print(f"Bulk density  : {density_g_l:6.0f} g/L")
+    if reading.get("height_std_mm") is not None:
+        print(f"Surface       : ±{reading['height_std_mm']:.1f} mm rough, "
+              f"{reading['height_range_mm']:.1f} mm range, "
+              f"{reading['coverage_frac']*100:.0f}% coverage")
     print(f"\nUncertainty   : about {error_pct:.0f}% "
           f"(±{HEIGHT_PRECISION_MM} mm on {height:.1f} mm of depth)")
     if error_pct > 15:
@@ -447,6 +475,9 @@ def density(mass_g, lot=None):
             "volume_ml": round(volume_ml, 1),
             "density_g_l": round(density_g_l, 0),
             "uncertainty_pct": round(error_pct, 0),
+            "height_std_mm": reading.get("height_std_mm"),
+            "height_range_mm": reading.get("height_range_mm"),
+            "coverage_frac": reading.get("coverage_frac"),
         })
     print(f"\nLogged to {LOG_FILE}" + (f" (lot {lot})" if lot else " (no lot given)"))
 
