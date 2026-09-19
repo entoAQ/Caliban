@@ -3440,7 +3440,17 @@ async def capture_commands_complete(
                 if insert_resp.data:
                     tof_row_id = insert_resp.data[0].get("id")
             except Exception as e:
-                print(f"[tof_density_readings insert failed] {command_id}: {type(e).__name__}: {e}")
+                error_text = f"{type(e).__name__}: {e}"
+                print(f"[tof_density_readings insert failed] {command_id}: {error_text}")
+                # Written to the row itself, not just printed: nobody here
+                # has quick access to Azure's log stream, and this is the
+                # database both sides can already query.
+                try:
+                    supabase.table("capture_commands").update(
+                        {"tof_insert_error": error_text[:2000]}
+                    ).eq("id", command_id).execute()
+                except Exception:
+                    pass
 
             # Completely separate from the MEO analysis: its own prompt, its
             # own bands, its own call, scheduled after the response below so
