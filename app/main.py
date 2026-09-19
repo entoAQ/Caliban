@@ -880,6 +880,37 @@ assert "140 g/L" in _P32 and "250 g/L" in _P32, "anchors missing from 3.2"
 assert "480-560" not in _P32, "the old unanchored example survived"
 BAND_PROMPT_VARIANTS["3.2"] = _P32
 
+# 3.2c is 3.2 with DENSITE removed and nothing else changed.
+#
+# DENSITE correlated with measured density at r = 0.19 (see
+# rig/prompt_3_3_draft.sql) -- weak enough that every variant from 3.3
+# onward (3.4, 3.4b, 3.4c) dropped it. 3.2 and its db-derived sibling 3.2b
+# predate that finding and never did, and as of 2026-09-19
+# system_config.rig_prompt_variant and operator_settings.low_variant were
+# still pointing live traffic at exactly those two, asking a question
+# already known not to work. Density estimation now has its own instrument
+# -- the bench rig's time-of-flight sensor, entirely decoupled from this
+# prompt -- so there is no reason left to spend tokens and attention on it
+# here.
+#
+# A new label, not an edit to _P32: this variant family's own rule (see the
+# comment above _P31) is that a prompt is never rewritten in place, because
+# doing so would leave prompt_hash claiming two different texts for one
+# label. That rule is followed here for the same reason it always is.
+_P32c = _P32.replace(
+    """DENSITE: [the sample's bulk density in grams per litre. Anchor it on these two measured references from this same rig:
+  - a tray of mostly large, puffy, well-rounded larvae is about 140 g/L
+  - a tray of mostly small, flat, shrivelled larvae is about 250 g/L
+Note the direction: bigger and puffier means LOWER density, because rounded larvae nest badly and trap air between them, while small flat ones pack closer together. Fine material fills the gaps and raises it further. Almost every sample falls between these two references. Do not answer outside 120-280 g/L unless the tray looks clearly more extreme than either description, and say so in the justification if you do. Give a single number or a narrow range.]
+JUSTIFICATION:""",
+    "JUSTIFICATION:",
+)
+
+assert _P32c != _P32, "DENSITE removal did not apply"
+assert "DENSITE:" not in _P32c, "DENSITE survived into 3.2c"
+assert _P32c.count("JUSTIFICATION:") == 1, "JUSTIFICATION line did not survive intact"
+BAND_PROMPT_VARIANTS["3.2c"] = _P32c
+
 
 # REVERTED to 1.5 on 2026-08-23. The dish method was abandoned: it proved less
 # accurate than scattering onto a tray, which is what the rig now photographs.

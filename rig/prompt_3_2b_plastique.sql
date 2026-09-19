@@ -17,6 +17,11 @@
 --
 -- Selectable under Gestion de l'échantillonnage once inserted; not active
 -- until chosen there. Test it on the re-score tab before using it anywhere.
+--
+-- Updated 2026-09-19 to drop DENSITE, matching prompt_3_2b.sql -- see that
+-- file's header for why. Editing in place, not a new label, for the same
+-- reason: this is the db-sourced side of the prompt family, where that is
+-- the established practice.
 
 insert into vision_prompts (label, prompt_text, band_scale, notes)
 values ('3.2b-p', $prompt$You are looking at a photograph of black soldier fly larvae (Hermetia illucens) scattered on a white tray, taken by a fixed calibration rig. Estimate how much MEO is visible -- organic foreign matter, the rearing residue also called frass.
@@ -44,14 +49,10 @@ Answer EXACTLY in this format, with nothing before or after:
 BANDE: [a single value among : <3%, 3-8%, 8-13%, >13%]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 FACTEURS: [comma-separated list, only from : prepupes, fragments_ecrases, poussiere, densite_reelle, autre -- the factors that ACTUALLY influenced this band choice on this specific photo, not a generic list]
-DENSITE: [the sample's bulk density in grams per litre. Anchor it on these two measured references from this same rig:
-  - a tray of mostly large, puffy, well-rounded larvae is about 140 g/L
-  - a tray of mostly small, flat, shrivelled larvae is about 250 g/L
-Note the direction: bigger and puffier means LOWER density, because rounded larvae nest badly and trap air between them, while small flat ones pack closer together. Fine material fills the gaps and raises it further. Almost every sample falls between these two references. Do not answer outside 120-280 g/L unless the tray looks clearly more extreme than either description, and say so in the justification if you do. Give a single number or a narrow range.]
 PLASTIQUE: [oui, non, ou incertain] -- if oui or incertain, add in a few French words what it looks like and where on the tray, e.g. « fragment blanc anguleux, coin supérieur gauche »
 JUSTIFICATION: [one sentence, in French, what drove this choice]$prompt$,
         'coarse',
-        '3.2b plus a plastic check (fragments >= 3 mm, judged by shape). MEO wording identical to 3.2b.')
+        '3.2b plus a plastic check (fragments >= 3 mm, judged by shape). MEO wording identical to 3.2b. No DENSITE.')
 on conflict (label) do update
     set prompt_text = excluded.prompt_text,
         band_scale  = excluded.band_scale,
