@@ -33,7 +33,7 @@ import uuid
 # this timestamp against when you committed/pushed a change.
 STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -1582,6 +1582,106 @@ def _vision_complete(entry, content):
     if entry["provider"] in ("anthropic", "foundry"):
         return _anthropic_complete(entry, content)
     return _azure_gpt5_complete(entry, content)
+
+
+# ── Density-from-photo, anchored on the ToF reading ──────────────────────
+#
+# Completely separate from the MEO prompt family above: different question,
+# different bands (the four sampling bands -- <170/170-200/200-220/>220 --
+# not MEO percentage), different call, its own result columns. DENSITE was
+# removed from every MEO prompt (2026-09-19) specifically so density
+# estimation could be asked properly on its own rather than as an
+# afterthought competing for the same response.
+#
+# The previous DENSITE attempt (3.1-3.2) asked the model to guess density
+# from the photo alone, anchored on two fixed generic examples (140 g/L /
+# 250 g/L). It correlated with measured density at r = 0.19 -- weak. This
+# version anchors on something much stronger: a real depth-sensor reading of
+# THIS specific tray, taken at the same moment as the photo. The sensor
+# gives the envelope volume; the photo is what can say how much of that
+# envelope is actually larvae versus air trapped between them, which is a
+# real physical question a photograph can speak to (larva size and
+# plumpness) that a depth sensor alone cannot.
+DENSITY_VISION_PROMPT_VERSION = "tof-v1"
+
+
+def density_vision_prompt(height_mm, sensed_area_mm2, volume_ml):
+    area_cm2 = (sensed_area_mm2 / 100.0) if sensed_area_mm2 else None
+    area_line = f"{area_cm2:.0f} cm2" if area_cm2 is not None else "an unknown area"
+    return f"""You are looking at a photograph of black soldier fly larvae (Hermetia illucens) on a white tray, taken by a fixed calibration rig. A separate time-of-flight depth sensor measured this exact tray at the same moment this photo was taken.
+
+Sensor reading: mean depth {height_mm:.1f} mm above the empty-tray baseline, across a sensed footprint of {area_line}, for a total envelope volume of {volume_ml:.0f} mL.
+
+That envelope volume is not all larvae -- it includes the air trapped between them, and how much of it is air depends on the larvae's own shape, which the sensor cannot see and only this photograph can show you.
+
+Judge that from the photograph. Larger, rounder, plumper larvae nest badly and trap more air between them, so the SAME envelope volume holds LESS actual material and corresponds to a LOWER bulk density. Smaller, flatter, more shrivelled larvae pack closer together, so the same envelope holds MORE material and corresponds to a HIGHER bulk density. Loose fine material (dust, small fragments) fills the gaps between larvae and raises density further.
+
+Typical bulk density for this product is roughly 130-260 g/L. Start from what a sensor reading like this one usually corresponds to, then adjust up or down from what the larvae in THIS photograph actually look like -- do not just report a number derived from the volume alone, and do not ignore the sensor reading either.
+
+Answer EXACTLY in this format, with nothing before or after:
+
+DENSITE_G_L: [your best single-number estimate, in grams per litre]
+BANDE: [a single value among : <170, 170-200, 200-220, >220]
+CONFIANCE: [Faible, Moyenne, ou Élevée]
+JUSTIFICATION: [one sentence, in French, what you saw in the photograph that moved your estimate up or down from a sensor-only reading, or confirmed it]"""
+
+
+def parse_density_vision_response(text):
+    """Extract DENSITE_G_L / BANDE / CONFIANCE / JUSTIFICATION.
+
+    Kept separate from parse_band_response even though both are line-based
+    parsers of a similar shape: BANDE here names the four sampling bands,
+    not a MEO percentage band, and mixing the two would make a density
+    response silently parseable as a (wrong) MEO one or vice versa.
+    """
+    density_g_l = None
+    band = None
+    confidence = None
+    justification = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        upper = line.upper()
+        if upper.startswith("DENSITE_G_L:"):
+            match = re.search(r"[\d.]+", line.split(":", 1)[1])
+            if match:
+                try:
+                    density_g_l = float(match.group())
+                except ValueError:
+                    density_g_l = None
+        elif upper.startswith("BANDE:"):
+            band = line.split(":", 1)[1].strip()
+        elif upper.startswith("CONFIANCE:"):
+            confidence = line.split(":", 1)[1].strip()
+        elif upper.startswith("JUSTIFICATION:"):
+            justification = line.split(":", 1)[1].strip()
+    return {"density_g_l": density_g_l, "band": band, "confidence": confidence, "justification": justification}
+
+
+def call_density_vision(image_b64, media_type, tof_reading):
+    """One vision call estimating density from a photo anchored on its
+    paired ToF reading. Returns None if the ToF reading is incomplete
+    (nothing to anchor on) rather than guessing from the photo alone --
+    that is the previous, already-weak approach this replaces."""
+    height_mm = tof_reading.get("height_mm")
+    volume_ml = tof_reading.get("volume_ml")
+    if height_mm is None or volume_ml is None:
+        return None
+
+    prompt = density_vision_prompt(height_mm, tof_reading.get("sensed_area_mm2"), volume_ml)
+    content = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
+    ]
+    text, model_name, mode, finish_reason, usage = _vision_complete(DEFAULT_VISION_MODEL, content)
+    parsed = parse_density_vision_response(text)
+    return {
+        **parsed,
+        "raw_response": text,
+        "model": model_name,
+        "prompt_version": DENSITY_VISION_PROMPT_VERSION,
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+    }
 
 
 @app.get("/vision-models")
@@ -3153,9 +3253,41 @@ def capture_commands_next(_: bool = Depends(verify_rig_key)):
     }
 
 
+def _run_density_vision(row_id, contents, media_type, tof_reading):
+    """Runs after the HTTP response has already gone back to the rig.
+
+    A vision call can take several seconds -- fine for an operator watching
+    a browser, not fine stacked on top of everything else a capture already
+    does inside the rig's own request timeout (30s) and capture watchdog
+    (45s). This is scheduled as a background task specifically so the rig
+    gets its "done" back immediately and this runs after, updating the row
+    tof_density_readings already has rather than blocking its creation."""
+    try:
+        b64 = base64.b64encode(contents).decode("utf-8")
+        result = call_density_vision(b64, media_type, tof_reading)
+    except Exception as e:
+        print(f"[density vision call failed] {row_id}: {type(e).__name__}: {e}")
+        return
+    if not result:
+        return
+    try:
+        supabase.table("tof_density_readings").update({
+            "vision_density_est_g_l": result.get("density_g_l"),
+            "vision_density_band": result.get("band"),
+            "vision_confidence": result.get("confidence"),
+            "vision_justification": result.get("justification"),
+            "vision_raw_response": result.get("raw_response"),
+            "vision_model": result.get("model"),
+            "vision_prompt_version": result.get("prompt_version"),
+        }).eq("id", row_id).execute()
+    except Exception as e:
+        print(f"[density vision row update failed] {row_id}: {type(e).__name__}: {e}")
+
+
 @app.post("/capture-commands/{command_id}/complete")
 async def capture_commands_complete(
     command_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(None),
     ir_file: UploadFile = File(None),
     result: str = Form(None),
@@ -3177,14 +3309,13 @@ async def capture_commands_complete(
     reverse order would leave commands marked done that point at images which
     do not exist, and the operator would be told their photo was ready."""
 
-    async def _store(upload, band):
-        contents = await upload.read()
-        ext = os.path.splitext(upload.filename or "")[1] or ".jpg"
+    def _store(contents, filename, content_type, band):
+        ext = os.path.splitext(filename or "")[1] or ".jpg"
         path = f"rig/{command_id}_{band}{ext}"
         resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
             path,
             contents,
-            file_options={"content-type": upload.content_type or "image/jpeg"},
+            file_options={"content-type": content_type or "image/jpeg"},
         )
         if not resp:
             raise RuntimeError(f"Storage upload returned no response: {resp!r}")
@@ -3212,8 +3343,14 @@ async def capture_commands_complete(
                 raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
             return {"status": "ok", "result": parsed}
 
-        image_path = await _store(file, "visible")
-        ir_path = await _store(ir_file, "ir") if ir_file is not None else None
+        # Read once, kept around: the visible photo's bytes are needed again
+        # below for the density-vision call, and an UploadFile's stream can
+        # only be consumed once.
+        visible_contents = await file.read()
+        ir_contents = await ir_file.read() if ir_file is not None else None
+
+        image_path = _store(visible_contents, file.filename, file.content_type, "visible")
+        ir_path = _store(ir_contents, ir_file.filename, ir_file.content_type, "ir") if ir_contents is not None else None
 
         # A capture can now carry a result alongside its image -- the ToF
         # reading of the same tray, taken at the same moment as the photo.
@@ -3271,10 +3408,24 @@ async def capture_commands_complete(
                 row["density_est_g_l"] = round(intercept + slope * height_mm, 1)
                 row["density_est_model"] = label
 
+            tof_row_id = None
             try:
-                supabase.table("tof_density_readings").insert(row).execute()
+                insert_resp = supabase.table("tof_density_readings").insert(row).execute()
+                if insert_resp.data:
+                    tof_row_id = insert_resp.data[0].get("id")
             except Exception as e:
                 print(f"[tof_density_readings insert failed] {command_id}: {type(e).__name__}: {e}")
+
+            # Completely separate from the MEO analysis: its own prompt, its
+            # own bands, its own call, scheduled after the response below so
+            # a multi-second vision call never sits on top of the rig's own
+            # request timeout. Only fires when there is a row to update and
+            # a photo to show it.
+            if tof_row_id and visible_contents:
+                background_tasks.add_task(
+                    _run_density_vision, tof_row_id, visible_contents,
+                    file.content_type or "image/jpeg", tof_reading,
+                )
 
         return {"status": "ok", "image_path": image_path, "ir_image_path": ir_path}
 
