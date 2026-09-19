@@ -3435,19 +3435,29 @@ async def capture_commands_complete(
                 row["density_est_model"] = label
 
             tof_row_id = None
+            tof_error_text = None
             try:
                 insert_resp = supabase.table("tof_density_readings").insert(row).execute()
                 if insert_resp.data:
                     tof_row_id = insert_resp.data[0].get("id")
+                else:
+                    # Some client versions return an empty .data with no
+                    # exception on failure rather than raising -- this is
+                    # exactly the case that went unrecorded before: no row,
+                    # no exception, nothing printed, nothing to query.
+                    tof_error_text = (f"insert returned no data; "
+                                       f"error attr: {getattr(insert_resp, 'error', None)!r}")
             except Exception as e:
-                error_text = f"{type(e).__name__}: {e}"
-                print(f"[tof_density_readings insert failed] {command_id}: {error_text}")
+                tof_error_text = f"{type(e).__name__}: {e}"
+
+            if tof_error_text:
+                print(f"[tof_density_readings insert failed] {command_id}: {tof_error_text}")
                 # Written to the row itself, not just printed: nobody here
                 # has quick access to Azure's log stream, and this is the
                 # database both sides can already query.
                 try:
                     supabase.table("capture_commands").update(
-                        {"tof_insert_error": error_text[:2000]}
+                        {"tof_insert_error": tof_error_text[:2000]}
                     ).eq("id", command_id).execute()
                 except Exception:
                     pass
