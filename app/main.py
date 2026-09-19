@@ -1672,15 +1672,41 @@ def call_density_vision(image_b64, media_type, tof_reading):
         {"type": "text", "text": prompt},
         {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
     ]
-    text, model_name, mode, finish_reason, usage = _vision_complete(DEFAULT_VISION_MODEL, content)
+
+    # Called the same way call_variant() calls DEFAULT_VISION_MODEL, not via
+    # _vision_complete()/_azure_gpt5_complete() -- those exist for the
+    # re-score tab's ALTERNATE models, on a separately configured client and
+    # newer API version that is only ever exercised against whichever model
+    # a re-score happens to try, never against AZURE_OPENAI_DEPLOYMENT
+    # itself. Using that path here would run the one call that has to work
+    # in production through the one path that has never been proven to.
+    client = get_azure_client()
+    try:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            max_completion_tokens=200,
+            temperature=0,
+            seed=CALIBAN_SEED,
+            messages=[{"role": "user", "content": content}],
+        )
+    except BadRequestError:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            max_completion_tokens=200,
+            messages=[{"role": "user", "content": content}],
+        )
+    text = response.choices[0].message.content or ""
+    model_name = getattr(response, "model", None)
+    u = getattr(response, "usage", None)
+
     parsed = parse_density_vision_response(text)
     return {
         **parsed,
         "raw_response": text,
         "model": model_name,
         "prompt_version": DENSITY_VISION_PROMPT_VERSION,
-        "prompt_tokens": usage.get("prompt_tokens"),
-        "completion_tokens": usage.get("completion_tokens"),
+        "prompt_tokens": getattr(u, "prompt_tokens", None),
+        "completion_tokens": getattr(u, "completion_tokens", None),
     }
 
 
