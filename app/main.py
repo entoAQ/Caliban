@@ -1615,8 +1615,18 @@ def _vision_complete(entry, content):
 # (computed the same way density_est_g_l is, from the live model in
 # system_config) as a concrete number to adjust, and drops the generic
 # typical-range line entirely -- there is no longer a generic anchor for the
-# model to fall back on instead of looking at the photo.
-DENSITY_VISION_PROMPT_VERSION = "tof-v2"
+# model to fall back on instead of looking at the photo. Estimates started
+# actually moving off the anchor in sensible directions (e.g. down for
+# larger/puffier larvae) -- though the two samples seen so far had the
+# justification's STATED direction disagree with the number it actually
+# reported (says "lower", number goes up). Left alone for now: the plan is
+# to let this run and fit a correction against real values later rather
+# than keep hand-tuning wording on two data points.
+#
+# tof-v3: same reasoning, only the requested precision changes -- rounded to
+# the nearest 5 g/L, so numbers read as 145/150 rather than false precision
+# like 142/148 that the underlying estimate cannot actually support.
+DENSITY_VISION_PROMPT_VERSION = "tof-v3"
 
 
 def density_vision_prompt(height_mm, sensed_area_mm2, volume_ml, height_only_est=None):
@@ -1642,7 +1652,7 @@ Move the number by however much the photograph actually justifies, in whichever 
 
 Answer EXACTLY in this format, with nothing before or after:
 
-DENSITE_G_L: [your best single-number estimate, in grams per litre]
+DENSITE_G_L: [your best single-number estimate, in grams per litre, rounded to the nearest 5 -- e.g. 145 or 150, never 142 or 148]
 BANDE: [a single value among : <170, 170-200, 200-220, >220]
 CONFIANCE: [Faible, Moyenne, ou Élevée]
 JUSTIFICATION: [one sentence, in French, what you saw in the photograph that moved your estimate away from the depth-only starting figure, and by roughly how much]"""
