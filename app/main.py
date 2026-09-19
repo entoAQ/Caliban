@@ -1779,6 +1779,40 @@ def operator_settings():
     return settings
 
 
+def tof_density_model():
+    """The current height-only density estimate model, as (intercept, slope,
+    label), or None if it isn't configured or isn't sane.
+
+    Coefficients live in system_config, not here, because this "model" is a
+    straight line through a handful of points and will be refit constantly
+    while the corpus is small -- a SQL update takes effect on the next
+    capture; a constant in this file needs a commit and a redeploy for the
+    same change. Read fresh per capture, like operator_settings() above, so a
+    refit reaches the very next reading.
+
+    Returns None rather than a stale or guessed default on any failure --
+    scoring a reading with the wrong coefficients silently would be worse
+    than not scoring it at all, since a wrong estimate looks exactly like a
+    right one until someone checks.
+    """
+    try:
+        resp = (
+            supabase.table("system_config")
+            .select("key, value")
+            .in_("key", ["tof_density_model_intercept", "tof_density_model_slope",
+                         "tof_density_model_label"])
+            .execute()
+        )
+        rows = {r["key"]: r["value"] for r in (resp.data or [])}
+        intercept = float(rows["tof_density_model_intercept"])
+        slope = float(rows["tof_density_model_slope"])
+        label = rows.get("tof_density_model_label") or "unlabelled"
+        return intercept, slope, label
+    except Exception as e:
+        print(f"[tof_density_model lookup failed] {type(e).__name__}: {e}")
+        return None
+
+
 def operator_instruction(estimate_pct, settings):
     """What the operator should do to the destoner, and whether AQ must hear
     about it too. Returns (instruction, alert).
@@ -3180,15 +3214,27 @@ async def capture_commands_complete(
         # waiting on the photo, and a ToF row is calibration data for later,
         # not something worth failing their capture over.
         if tof_reading:
+            row = {
+                "lot_number_text": update_resp.data[0].get("lot_number"),
+                "height_mm": tof_reading.get("height_mm"),
+                "volume_ml": tof_reading.get("volume_ml"),
+                "uncertainty_pct": tof_reading.get("uncertainty_pct"),
+                "reference_recorded_at": tof_reading.get("reference_recorded_at"),
+                "sensed_area_mm2": tof_reading.get("sensed_area_mm2"),
+            }
+
+            # Scored at write time, not read time -- see tof_density_model()
+            # for why: a later refit must not silently change what an
+            # existing row is recorded as having predicted.
+            model = tof_density_model()
+            height_mm = tof_reading.get("height_mm")
+            if model and height_mm is not None:
+                intercept, slope, label = model
+                row["density_est_g_l"] = round(intercept + slope * height_mm, 1)
+                row["density_est_model"] = label
+
             try:
-                supabase.table("tof_density_readings").insert({
-                    "lot_number_text": update_resp.data[0].get("lot_number"),
-                    "height_mm": tof_reading.get("height_mm"),
-                    "volume_ml": tof_reading.get("volume_ml"),
-                    "uncertainty_pct": tof_reading.get("uncertainty_pct"),
-                    "reference_recorded_at": tof_reading.get("reference_recorded_at"),
-                    "sensed_area_mm2": tof_reading.get("sensed_area_mm2"),
-                }).execute()
+                supabase.table("tof_density_readings").insert(row).execute()
             except Exception as e:
                 print(f"[tof_density_readings insert failed] {command_id}: {type(e).__name__}: {e}")
 
