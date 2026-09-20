@@ -2,6 +2,27 @@
 
 Guidance for Claude Code (and anyone else) working in this repo.
 
+## Ship a news item with any user-facing change
+
+SGSC (the main app, separate repo) has an in-app news popup for communicating
+changes to QC/QA floor staff — `news_items`/`news_reads` tables, added
+2026-09-20, in the **same Supabase project** this repo already writes to via
+`supabase_client.py` (service-role, bypasses RLS). Caliban has no UI of its
+own, but a change here can still be user-visible — a new capture prompt, a
+changed destoner threshold, a fixed false-positive rate — and someone on the
+floor has no way to know unless it's announced there.
+
+When a change here would matter to someone using the app (not internal
+refactors/infra), write the item as a French title + one or two short
+paragraphs (plain language, not a changelog) and give it to Tim as a ready
+INSERT to run in the Supabase SQL editor — there's no service-role key in the
+local dev shell here either, so it can't be run directly:
+```sql
+INSERT INTO public.news_items (title, body, category)
+VALUES ('<titre>', '<explication>', 'feature'); -- or 'aq' for a non-code AQ announcement
+```
+Say so explicitly at the end of the turn so it isn't missed.
+
 ## Vision prompt language
 
 **Every vision prompt's instructions are written in English.** Only the
