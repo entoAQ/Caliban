@@ -2220,6 +2220,44 @@ def unusable_photo(img):
     return None
 
 
+# A rig capture is almost always analysed (via /azure-band-test) within
+# seconds of being uploaded here, by a *separate* HTTP request that has no
+# access to the bytes this process just read off the wire. Without this,
+# that second request re-downloads the exact file this process just
+# uploaded, in full -- pure egress against Supabase Storage's free-tier
+# quota, for a photo already sitting in memory a few lines above. A short
+# TTL and a small cap keep this from being a second, unbounded memory leak:
+# a cache hit only ever saves the *next* read of the *same* file, so
+# holding entries any longer buys nothing.
+_RECENT_CAPTURE_CACHE = {}
+_RECENT_CAPTURE_TTL = 300  # seconds
+_RECENT_CAPTURE_MAX = 50
+
+
+def _cache_recent_capture(path, contents):
+    if not path or contents is None:
+        return
+    now = time.time()
+    expired = [k for k, (_, ts) in _RECENT_CAPTURE_CACHE.items() if now - ts > _RECENT_CAPTURE_TTL]
+    for k in expired:
+        del _RECENT_CAPTURE_CACHE[k]
+    if len(_RECENT_CAPTURE_CACHE) >= _RECENT_CAPTURE_MAX:
+        oldest = min(_RECENT_CAPTURE_CACHE, key=lambda k: _RECENT_CAPTURE_CACHE[k][1])
+        del _RECENT_CAPTURE_CACHE[oldest]
+    _RECENT_CAPTURE_CACHE[path] = (contents, now)
+
+
+def _pop_recent_capture(path):
+    entry = _RECENT_CAPTURE_CACHE.get(path)
+    if not entry:
+        return None
+    contents, ts = entry
+    del _RECENT_CAPTURE_CACHE[path]
+    if time.time() - ts > _RECENT_CAPTURE_TTL:
+        return None
+    return contents
+
+
 def _load_rig_capture(command_id, caller, is_operator):
     """Fetch a finished rig capture server-side. Returns (bytes, lot_number,
     image_path).
@@ -2247,7 +2285,9 @@ def _load_rig_capture(command_id, caller, is_operator):
     if is_operator and cmd.get("requested_by") != caller["id"]:
         raise HTTPException(status_code=403, detail="Cette capture appartient à un autre utilisateur.")
 
-    contents = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(cmd["image_path"])
+    contents = _pop_recent_capture(cmd["image_path"])
+    if contents is None:
+        contents = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(cmd["image_path"])
     return contents, cmd.get("lot_number") or "", cmd["image_path"]
 
 
@@ -3443,6 +3483,11 @@ async def capture_commands_complete(
 
         image_path = _store(visible_contents, file.filename, file.content_type, "visible")
         ir_path = _store(ir_contents, ir_file.filename, ir_file.content_type, "ir") if ir_contents is not None else None
+        # The very next request is almost always /azure-band-test asking for
+        # this exact photo back -- hand it these bytes instead of making it
+        # re-download what this process just uploaded (see _RECENT_CAPTURE_CACHE).
+        _cache_recent_capture(image_path, visible_contents)
+        _cache_recent_capture(ir_path, ir_contents)
 
         # A capture can now carry a result alongside its image -- the ToF
         # reading of the same tray, taken at the same moment as the photo.
