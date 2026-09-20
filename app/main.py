@@ -2007,6 +2007,35 @@ def tof_density_model():
         return None
 
 
+def density_vision_enabled():
+    """Whether the density-from-photo vision call should fire at all.
+
+    Paused 2026-09-20: a real batch (n=20, matched against Ignition values)
+    showed neither the height-only model nor the vision estimate carrying
+    real signal (correlation ~0 for both) -- both sat in a narrow band
+    regardless of the real value. Rather than keep spending a vision call on
+    every capture while that's true, this is a config flag (default ON,
+    same "absent means normal behaviour" pattern as every other switch
+    here) so it can be turned back on the moment there's something worth
+    testing it against -- e.g. once CVAT tagging produces a trained model to
+    compare it with -- without a redeploy.
+    """
+    try:
+        resp = (
+            supabase.table("system_config")
+            .select("value")
+            .eq("key", "density_vision_enabled")
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return True
+        return str(rows[0]["value"]).strip().lower() not in ("false", "0", "off")
+    except Exception as e:
+        print(f"[density_vision_enabled lookup failed] {type(e).__name__}: {e}")
+        return True
+
+
 def operator_instruction(estimate_pct, settings):
     """What the operator should do to the destoner, and whether AQ must hear
     about it too. Returns (instruction, alert).
@@ -3502,9 +3531,9 @@ async def capture_commands_complete(
             # Completely separate from the MEO analysis: its own prompt, its
             # own bands, its own call, scheduled after the response below so
             # a multi-second vision call never sits on top of the rig's own
-            # request timeout. Only fires when there is a row to update and
-            # a photo to show it.
-            if tof_row_id and visible_contents:
+            # request timeout. Only fires when there is a row to update, a
+            # photo to show it, and the switch (system_config) is on.
+            if tof_row_id and visible_contents and density_vision_enabled():
                 background_tasks.add_task(
                     _run_density_vision, tof_row_id, visible_contents,
                     file.content_type or "image/jpeg", tof_reading,
