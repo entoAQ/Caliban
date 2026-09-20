@@ -14,14 +14,17 @@ floor has no way to know unless it's announced there.
 
 When a change here would matter to someone using the app (not internal
 refactors/infra), write the item as a French title + one or two short
-paragraphs (plain language, not a changelog) and give it to Tim as a ready
-INSERT to run in the Supabase SQL editor — there's no service-role key in the
-local dev shell here either, so it can't be run directly:
-```sql
-INSERT INTO public.news_items (title, body, category)
-VALUES ('<titre>', '<explication>', 'feature'); -- or 'aq' for a non-code AQ announcement
+paragraphs (plain language, not a changelog). This repo has no `database/`
+queue of its own — sgsc-app does (`database/_pending-news.jsonl`, run via
+`node scripts/run-pending-news.mjs`, see that repo's CLAUDE.md) — so give Tim
+the one JSON line to append there himself:
+```json
+{"title": "<titre>", "body": "<explication>", "category": "feature"}
 ```
-Say so explicitly at the end of the turn so it isn't missed.
+`category` is `'feature'` for app-visible changes, `'aq'` for a non-code AQ
+announcement. Say so explicitly at the end of the turn so it isn't missed —
+still manual on purpose (Tim reviews before anything goes live), just no raw
+SQL to write.
 
 ## Vision prompt language
 
