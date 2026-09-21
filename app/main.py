@@ -2258,7 +2258,7 @@ def _pop_recent_capture(path):
     return contents
 
 
-def _load_rig_capture(command_id, caller, is_operator):
+def _load_rig_capture(command_id, caller, is_operator, allowed_kinds=("capture",)):
     """Fetch a finished rig capture server-side. Returns (bytes, lot_number,
     image_path).
 
@@ -2267,6 +2267,13 @@ def _load_rig_capture(command_id, caller, is_operator):
     else. The ownership check is what makes that true -- without it, any signed-in
     operator could analyse, and record a row against, any command id they could
     guess.
+
+    allowed_kinds defaults to plain captures only -- in particular it excludes
+    'capture_reject'. /azure-band-test relies on that default: a reject-stream
+    photo must never be analysable or land in vision_band_estimates (see
+    rig/reject_capture_kind.sql), so it doesn't pass allowed_kinds at all. Only
+    the image-preview endpoint below widens it, since an operator reviewing a
+    reject photo before keeping it is harmless.
     """
     resp = (
         supabase.table("capture_commands")
@@ -2278,7 +2285,7 @@ def _load_rig_capture(command_id, caller, is_operator):
     cmd = (resp.data or [None])[0]
     if not cmd:
         raise HTTPException(status_code=404, detail="Capture introuvable.")
-    if (cmd.get("kind") or "capture") != "capture":
+    if (cmd.get("kind") or "capture") not in allowed_kinds:
         raise HTTPException(status_code=400, detail="Cette commande n'est pas une capture.")
     if cmd.get("status") != "done" or not cmd.get("image_path"):
         raise HTTPException(status_code=409, detail="La capture n'est pas terminée.")
@@ -3135,9 +3142,15 @@ def operator_capture_image(command_id: str, operator: dict = Depends(require_cap
 
     Downscaled for the screen: the full 4608 px frame is several megabytes, and
     framing is judged at a glance, not at full resolution.
+
+    Also serves a 'capture_reject' photo -- an operator reviewing a reject-
+    stream frame before keeping it needs to see it too, even though it can
+    never reach /azure-band-test (see _load_rig_capture).
     """
     is_operator = operator.get("role") == "operator"
-    contents, _lot_number, _path = _load_rig_capture(command_id, operator, is_operator)
+    contents, _lot_number, _path = _load_rig_capture(
+        command_id, operator, is_operator, allowed_kinds=("capture", "capture_reject")
+    )
 
     from PIL import Image
 
