@@ -3230,7 +3230,7 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
 # (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
 # would put a reject-decision prompt one wrong click away from being run as
 # if it were a MEO reading.
-REJECT_VISION_PROMPT_VERSION = "reject-v1"
+REJECT_VISION_PROMPT_VERSION = "reject-v2"
 
 
 def reject_vision_prompt():
@@ -3242,9 +3242,9 @@ Judge against the area the material itself covers, not against the whole photogr
 
 What each material looks like:
 
-Larvae are glossy, elongated, tapered at both ends and clearly segmented, golden-tan with darker brown bands. This is the product you would be recovering by reworking the stream. Prepupae (larvae approaching pupation, dark brown to nearly black, same segmented shape) are also product -- a dark colour alone is never a sign of contamination, judge by shape and texture.
+Larvae are glossy, elongated, tapered at both ends and clearly segmented, golden-tan with darker brown bands. This is the product you would be recovering by reworking the stream. Prepupae (larvae approaching pupation, dark brown to nearly black, same segmented shape) are also product -- a dark colour alone is never a sign of contamination on its own, but a prepupa is always individually recognizable as a larva-shaped object: elongated, segmented, tapered at both ends. It never appears as a dense, uniform, textured mass with no individual shapes in it.
 
-Frass is matte, porous, and crumbly, with irregular ragged outlines, like crumbs of dried soil or bark -- grey-brown to greyish-tan, often duller and greyer than the larvae, no gloss, no segments, no elongated shape. This is waste: expected in a reject stream, and on its own not a reason to discard the stream if enough larvae are mixed in with it.
+Frass is matte, porous, and crumbly, with irregular ragged outlines, like crumbs of dried soil or bark -- typically grey-brown to greyish-tan, but a heavy concentration of it (as in a genuinely dirty reject stream) can read as a dense, dark, fine-grained carpet with no individual larva silhouettes visible anywhere in it. A mass like that is frass/waste, however dark it looks -- the test is not colour, it is whether you can pick out individual larva-shaped pieces inside it. If you cannot, it is waste, not prepupae. This is expected in a reject stream, and on its own not a reason to discard the stream if enough larvae are mixed in with it elsewhere on the tray.
 
 Foreign material is anything not organic to the process -- plastic fragments, stones or grit, metal, glass, or similar debris. This is distinct from frass: it is rigid, sharp-edged, or has a synthetic sheen or colour frass never has. Its presence is a separate, harder signal than the frass/larvae ratio -- reworking a stream contaminated this way risks feeding that material back into product regardless of how much larvae it also contains.
 
@@ -3253,7 +3253,16 @@ Give two independent readings before deciding:
 1. How much of the material is recoverable larvae versus frass/waste, judged the way an inspector would glance at it -- not a precise count.
 2. Whether you can see foreign material as defined above, distinct from frass.
 
-Then decide: reprise (rework) if there is enough larvae mixed in to be worth recovering and no foreign material is visible; rejet (discard) if larvae are scarce relative to frass/waste, OR if foreign material is visible regardless of how much larvae is present -- foreign material alone is enough to decide rejet even on an otherwise larvae-rich stream.
+Judge LARVES as the fraction of the tray's occupied area that is clearly larvae -- individually recognizable golden-tan (or dark prepupal) segmented shapes -- not a raw count and not "is there some visible somewhere":
+
+abondantes -- larvae dominate what you see at a glance; waste is scattered among them, not the reverse.
+moderees -- larvae and waste each cover a substantial, comparable share; you could point to real patches of both.
+faibles -- waste dominates the picture; larvae are a minority, often pushed to the margins or scattered thinly over or around a mass of waste.
+quasi_absentes -- almost no recognizable larvae; the tray is essentially wall-to-wall waste.
+
+Larvae confined to the edges or margins of the tray, with the bulk of the interior covered by a dense waste mass, is faibles or quasi_absentes, not abondantes or moderees -- do not let a fringe of visible larvae around a solid mass of waste inflate the reading.
+
+Then decide: reprise (rework) if there is enough larvae mixed in to be worth recovering and no foreign material is visible; rejet (discard) if larvae are scarce relative to frass/waste (faibles or quasi_absentes), OR if foreign material is visible regardless of how much larvae is present -- foreign material alone is enough to decide rejet even on an otherwise larvae-rich stream.
 
 Answer EXACTLY in this format, with nothing before or after:
 
