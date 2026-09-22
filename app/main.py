@@ -3297,6 +3297,35 @@ def parse_reject_vision_response(text):
     }
 
 
+def _call_reject_vision(contents, media_type):
+    """The Azure call and parse, shared by the automatic background path and
+    the explicit re-run endpoint below. Raises on failure -- each caller
+    decides what to do with that (log and give up silently for the
+    background task, surface as a 500 for someone waiting on it)."""
+    b64 = base64.b64encode(contents).decode("utf-8")
+    content = [
+        {"type": "text", "text": reject_vision_prompt()},
+        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
+    ]
+    client = get_azure_client()
+    try:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            max_completion_tokens=200,
+            temperature=0,
+            seed=CALIBAN_SEED,
+            messages=[{"role": "user", "content": content}],
+        )
+    except BadRequestError:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            max_completion_tokens=200,
+            messages=[{"role": "user", "content": content}],
+        )
+    text = response.choices[0].message.content or ""
+    return parse_reject_vision_response(text), text
+
+
 def _run_reject_vision(command_id, contents, media_type):
     """Runs after the HTTP response has already gone back to the rig --
     same reasoning as _run_density_vision: a multi-second vision call must
@@ -3304,32 +3333,11 @@ def _run_reject_vision(command_id, contents, media_type):
     watchdog, and the operator waiting on their reject photo should never be
     the one paying for it."""
     try:
-        b64 = base64.b64encode(contents).decode("utf-8")
-        content = [
-            {"type": "text", "text": reject_vision_prompt()},
-            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
-        ]
-        client = get_azure_client()
-        try:
-            response = client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT,
-                max_completion_tokens=200,
-                temperature=0,
-                seed=CALIBAN_SEED,
-                messages=[{"role": "user", "content": content}],
-            )
-        except BadRequestError:
-            response = client.chat.completions.create(
-                model=AZURE_OPENAI_DEPLOYMENT,
-                max_completion_tokens=200,
-                messages=[{"role": "user", "content": content}],
-            )
-        text = response.choices[0].message.content or ""
+        parsed, text = _call_reject_vision(contents, media_type)
     except Exception as e:
         print(f"[reject vision call failed] {command_id}: {type(e).__name__}: {e}")
         return
 
-    parsed = parse_reject_vision_response(text)
     try:
         supabase.table("reject_stream_readings").insert({
             "command_id": command_id,
@@ -3357,6 +3365,39 @@ def admin_reject_reading(command_id: str, operator: dict = Depends(require_role(
     )
     rows = resp.data or []
     return {"reading": rows[0] if rows else None}
+
+
+@app.post("/admin/reject-readings/{command_id}/rerun")
+def admin_reject_vision_rerun(command_id: str, operator: dict = Depends(require_role("qc"))):
+    """Re-run the reject-vision prompt against an already-captured reject
+    photo -- for testing a prompt change against photos taken before that
+    change existed, without a real re-capture.
+
+    Synchronous, unlike the automatic path: called explicitly by someone at
+    this screen waiting on the answer, not from the rig's own watchdog-timed
+    upload, so there is no request-timeout pressure here to avoid the way
+    there is in capture_commands_complete. Inserts a new reading row (kept
+    alongside any earlier ones, not overwriting -- admin_reject_reading
+    already returns the most recent by created_at) and returns it directly."""
+    contents, _lot_number, _path = _load_rig_capture(
+        command_id, operator, is_operator=False, allowed_kinds=("capture_reject",)
+    )
+    try:
+        parsed, text = _call_reject_vision(contents, "image/jpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Échec de l'analyse : {type(e).__name__}: {e}")
+
+    try:
+        supabase.table("reject_stream_readings").insert({
+            "command_id": command_id,
+            **parsed,
+            "raw_response": text,
+            "prompt_version": REJECT_VISION_PROMPT_VERSION,
+        }).execute()
+    except Exception as e:
+        print(f"[reject_stream_readings insert failed] {command_id}: {type(e).__name__}: {e}")
+
+    return {**parsed, "raw_response": text, "prompt_version": REJECT_VISION_PROMPT_VERSION}
 
 
 @app.post("/reference-capture")
