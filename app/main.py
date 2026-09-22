@@ -2036,6 +2036,39 @@ def density_vision_enabled():
         return True
 
 
+def reject_vision_enabled():
+    """Whether the reject-stream rework/reject vision call should fire
+    automatically after a reject-kind capture completes.
+
+    Default OFF -- absent means off, the opposite of density_vision_enabled()
+    and every other switch in this file. This prompt is brand new and
+    unproven (see reject_vision_prompt), and three earlier attempts to
+    deploy it -- two synchronous/browser-triggered, one as a background
+    task -- all failed the same way for the same reason, nothing to do with
+    Azure calls, background tasks, or Azure App Service at all: a
+    require_role("qc")-gated route was placed textually before def
+    require_role in the file, so Depends(require_role("qc")) raised
+    NameError at import time on every container start. Fixed by placement,
+    not by architecture. The flag stays off by default anyway, so this code
+    can be deployed and its import proven clean before it ever executes.
+    Flip it on in system_config once that's confirmed, no redeploy needed.
+    """
+    try:
+        resp = (
+            supabase.table("system_config")
+            .select("value")
+            .eq("key", "reject_vision_enabled")
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return False
+        return str(rows[0]["value"]).strip().lower() in ("true", "1", "on")
+    except Exception as e:
+        print(f"[reject_vision_enabled lookup failed] {type(e).__name__}: {e}")
+        return False
+
+
 def operator_instruction(estimate_pct, settings):
     """What the operator should do to the destoner, and whether AQ must hear
     about it too. Returns (instruction, alert).
@@ -3181,6 +3214,142 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
     return {"captures": resp.data or []}
 
 
+# ── Reject-stream rework/reject, draft v1 ───────────────────────────
+#
+# Gated behind reject_vision_enabled() (default off, defined above) and run
+# as a background task from capture_commands_complete, same shape as
+# call_density_vision. Placed here, after require_role and admin_reject_
+# captures rather than up by call_density_vision, specifically because
+# admin_reject_reading's Depends(require_role("qc")) needs require_role
+# already defined at this point in the file -- see reject_vision_enabled's
+# docstring for the three deploys that got this wrong.
+#
+# Not in the vision_prompts table: that table's rows are read by
+# parse_band_response, which expects a BANDE: MEO-percentage line, and a row
+# in it is offered to /azure-band-test -- this prompt's answer shape
+# (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
+# would put a reject-decision prompt one wrong click away from being run as
+# if it were a MEO reading.
+REJECT_VISION_PROMPT_VERSION = "reject-v1"
+
+
+def reject_vision_prompt():
+    return """You are looking at a photograph of material rejected by a destoner, on a white tray, taken by a fixed calibration rig -- black soldier fly larvae (Hermetia illucens) mixed with rearing residue (frass) and whatever else the destoner separated out. The question is whether this stream is worth running back through the destoner to recover the larvae in it, or whether it should simply be discarded.
+
+The photograph is taken under controlled conditions you can rely on. The camera is directly overhead and square to the tray, and the colours are fixed. The frame is 400 mm wide. A larva is 15 to 20 mm long, so it spans roughly one twenty-fifth of the image width -- use that as your ruler. A band of soft striped shadow may appear along one edge of the frame, beyond the sample: it is part of the rig, not the sample, and must be ignored.
+
+Judge against the area the material itself covers, not against the whole photograph. Bare white tray is empty space and must not enter your judgement either way.
+
+What each material looks like:
+
+Larvae are glossy, elongated, tapered at both ends and clearly segmented, golden-tan with darker brown bands. This is the product you would be recovering by reworking the stream. Prepupae (larvae approaching pupation, dark brown to nearly black, same segmented shape) are also product -- a dark colour alone is never a sign of contamination, judge by shape and texture.
+
+Frass is matte, porous, and crumbly, with irregular ragged outlines, like crumbs of dried soil or bark -- grey-brown to greyish-tan, often duller and greyer than the larvae, no gloss, no segments, no elongated shape. This is waste: expected in a reject stream, and on its own not a reason to discard the stream if enough larvae are mixed in with it.
+
+Foreign material is anything not organic to the process -- plastic fragments, stones or grit, metal, glass, or similar debris. This is distinct from frass: it is rigid, sharp-edged, or has a synthetic sheen or colour frass never has. Its presence is a separate, harder signal than the frass/larvae ratio -- reworking a stream contaminated this way risks feeding that material back into product regardless of how much larvae it also contains.
+
+Give two independent readings before deciding:
+
+1. How much of the material is recoverable larvae versus frass/waste, judged the way an inspector would glance at it -- not a precise count.
+2. Whether you can see foreign material as defined above, distinct from frass.
+
+Then decide: reprise (rework) if there is enough larvae mixed in to be worth recovering and no foreign material is visible; rejet (discard) if larvae are scarce relative to frass/waste, OR if foreign material is visible regardless of how much larvae is present -- foreign material alone is enough to decide rejet even on an otherwise larvae-rich stream.
+
+Answer EXACTLY in this format, with nothing before or after:
+
+LARVES: [quasi_absentes, faibles, moderees, ou abondantes -- the recoverable-larvae fraction against frass/waste]
+MATIERE_ETRANGERE: [oui, non, ou incertain]
+CONFIANCE: [Faible, Moyenne, ou Elevee]
+DECISION: [reprise ou rejet]
+JUSTIFICATION: [one sentence, in French, what drove this decision]"""
+
+
+def parse_reject_vision_response(text):
+    larves = matiere = confiance = decision = justification = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        upper = line.upper()
+        if upper.startswith("LARVES:"):
+            larves = line.split(":", 1)[1].strip()
+        elif upper.startswith("MATIERE_ETRANGERE:"):
+            matiere = line.split(":", 1)[1].strip()
+        elif upper.startswith("CONFIANCE:"):
+            confiance = line.split(":", 1)[1].strip()
+        elif upper.startswith("DECISION:"):
+            decision = line.split(":", 1)[1].strip()
+        elif upper.startswith("JUSTIFICATION:"):
+            justification = line.split(":", 1)[1].strip()
+    return {
+        "larves": larves,
+        "matiere_etrangere": matiere,
+        "confiance": confiance,
+        "decision": decision,
+        "justification": justification,
+    }
+
+
+def _run_reject_vision(command_id, contents, media_type):
+    """Runs after the HTTP response has already gone back to the rig --
+    same reasoning as _run_density_vision: a multi-second vision call must
+    never sit on top of the rig's own request timeout or the capture
+    watchdog, and the operator waiting on their reject photo should never be
+    the one paying for it."""
+    try:
+        b64 = base64.b64encode(contents).decode("utf-8")
+        content = [
+            {"type": "text", "text": reject_vision_prompt()},
+            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64}"}},
+        ]
+        client = get_azure_client()
+        try:
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                max_completion_tokens=200,
+                temperature=0,
+                seed=CALIBAN_SEED,
+                messages=[{"role": "user", "content": content}],
+            )
+        except BadRequestError:
+            response = client.chat.completions.create(
+                model=AZURE_OPENAI_DEPLOYMENT,
+                max_completion_tokens=200,
+                messages=[{"role": "user", "content": content}],
+            )
+        text = response.choices[0].message.content or ""
+    except Exception as e:
+        print(f"[reject vision call failed] {command_id}: {type(e).__name__}: {e}")
+        return
+
+    parsed = parse_reject_vision_response(text)
+    try:
+        supabase.table("reject_stream_readings").insert({
+            "command_id": command_id,
+            **parsed,
+            "raw_response": text,
+            "prompt_version": REJECT_VISION_PROMPT_VERSION,
+        }).execute()
+    except Exception as e:
+        print(f"[reject_stream_readings insert failed] {command_id}: {type(e).__name__}: {e}")
+
+
+@app.get("/admin/reject-readings/{command_id}")
+def admin_reject_reading(command_id: str, operator: dict = Depends(require_role("qc"))):
+    """The reject-vision reading for one capture, if the background task has
+    produced one yet -- polled from the Rejets tab rather than pushed, same
+    reasoning as everywhere else a background vision call's result is
+    fetched after the fact."""
+    resp = (
+        supabase.table("reject_stream_readings")
+        .select("*")
+        .eq("command_id", command_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    return {"reading": rows[0] if rows else None}
+
+
 @app.post("/reference-capture")
 async def reference_capture(
     file: UploadFile = File(...),
@@ -3545,6 +3714,17 @@ async def capture_commands_complete(
 
         if not update_resp.data:
             raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
+
+        # Scheduled after the response below so a multi-second vision call
+        # never sits on top of the rig's own request timeout, same reasoning
+        # as the density-vision call further down. Only fires for a reject
+        # capture (never a real line sample), only with a photo to show it,
+        # and only when the switch (system_config, default off) is on.
+        if (update_resp.data[0].get("kind") == "capture_reject"
+                and visible_contents and reject_vision_enabled()):
+            background_tasks.add_task(
+                _run_reject_vision, command_id, visible_contents, file.content_type or "image/jpeg",
+            )
 
         # Best-effort, same reasoning as the IR frame above: the operator is
         # waiting on the photo, and a ToF row is calibration data for later,
