@@ -3283,7 +3283,7 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
 # (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
 # would put a reject-decision prompt one wrong click away from being run as
 # if it were a MEO reading.
-REJECT_VISION_PROMPT_VERSION = "reject-v4"
+REJECT_VISION_PROMPT_VERSION = "reject-v5"
 
 
 def reject_vision_prompt():
@@ -3321,7 +3321,7 @@ These percentages are area estimates, not head counts -- a great many tiny larva
 
 Larvae confined to the edges or margins of the tray, with the bulk of the interior covered by a dense waste mass, is faibles or quasi_absentes, not abondantes or moderees -- do not let a fringe of visible larvae around a solid mass of waste inflate the reading.
 
-Then decide: reprise (rework) if there is enough larvae mixed in to be worth recovering and no foreign material is visible; rejet (discard) if larvae are scarce relative to frass/waste (faibles or quasi_absentes), OR if foreign material is visible regardless of how much larvae is present -- foreign material alone is enough to decide rejet even on an otherwise larvae-rich stream.
+Then decide: reprise (rework) only if LARVES is abondantes AND no foreign material is visible; rejet (discard) otherwise -- that includes moderees. A tray that is a genuine, roughly even split of larvae and frass (moderees) is still rejet: at that ratio, reworking the stream to recover the larvae isn't worth doing. Larvae have to clearly dominate the tray, not just match the frass, before it's worth reworking. Foreign material is also on its own enough to decide rejet, regardless of how much larvae is present, even on an otherwise abondantes stream.
 
 Answer EXACTLY in this format, with nothing before or after:
 
