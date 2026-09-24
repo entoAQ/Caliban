@@ -1904,10 +1904,18 @@ def require_capture_role():
 # increase_at       ME% at or above which the destoner goes up. The 8% line --
 #                   the conformity boundary, and the one the model has never
 #                   been validated against, which is why it gets the rotations.
+#                   Below increase_medium_at, AUGMENTER shows as "minor".
+# increase_medium_at  ME% at or above which AUGMENTER shows as "medium"
+#                   rather than "minor" -- the coarse6 8-10%/10-13% line. Below
+#                   alert_at still, so this is severity wording only; it does
+#                   not change whether AQ is told (that's alert_at, and the
+#                   consecutive-AUGMENTER streak counts a minor/medium/major
+#                   reading the same either way).
 # decrease_below    ME% below which the destoner comes down, to stop discarding
 #                   good larvae along with the frass.
-# alert_at          ME% at or above which AQ is told as well. A reading that far
-#                   out is a non-conformance, not a knob to turn alone.
+# alert_at          ME% at or above which AQ is told as well, and above which
+#                   AUGMENTER shows as "major". A reading that far out is a
+#                   non-conformance, not a knob to turn alone.
 # sample_interval_min  minutes between samples; the operator screen counts down
 #                   from the last analysed sample and alerts when one is due.
 #                   0 turns the countdown off.
@@ -1919,6 +1927,7 @@ OPERATOR_DEFAULTS = {
     "repeats": 2,
     "escalate_repeats": 6,
     "increase_at": 8.0,
+    "increase_medium_at": 10.0,
     "decrease_below": 3.0,
     "alert_at": 13.0,
     "sample_interval_min": 30,
@@ -1990,7 +1999,8 @@ def operator_settings():
 
     settings["decrease_below"] = min(settings["decrease_below"], OP_DECREASE_MAX)
     settings["increase_at"] = max(settings["increase_at"], OP_INCREASE_MIN)
-    settings["alert_at"] = max(settings["alert_at"], settings["increase_at"])
+    settings["increase_medium_at"] = max(settings["increase_medium_at"], settings["increase_at"])
+    settings["alert_at"] = max(settings["alert_at"], settings["increase_medium_at"])
 
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
@@ -2098,6 +2108,18 @@ def reject_vision_enabled():
         return False
 
 
+def increase_tier(estimate_pct, settings):
+    """'increase_minor' / 'increase_medium' / 'increase_major' for an estimate
+    already known to be >= increase_at. Severity wording only -- does not
+    decide the alert flag (alert_at does that, independently) or the
+    consecutive-AUGMENTER streak (which counts any tier the same)."""
+    if estimate_pct >= settings["alert_at"]:
+        return "increase_major"
+    if estimate_pct >= settings["increase_medium_at"]:
+        return "increase_medium"
+    return "increase_minor"
+
+
 def operator_instruction(estimate_pct, settings):
     """What the operator should do to the destoner, and whether AQ must hear
     about it too. Returns (instruction, alert).
@@ -2109,7 +2131,7 @@ def operator_instruction(estimate_pct, settings):
     if estimate_pct is None:
         return None, False
     if estimate_pct >= settings["increase_at"]:
-        return "increase", estimate_pct >= settings["alert_at"]
+        return increase_tier(estimate_pct, settings), estimate_pct >= settings["alert_at"]
     if estimate_pct < settings["decrease_below"]:
         return "decrease", False
     return "hold", False
@@ -2176,7 +2198,9 @@ def increase_streak_alert(settings):
     except Exception as e:
         print(f"[increase_streak_alert lookup failed] {type(e).__name__}: {e}")
         return False
-    return len(rows) == n - 1 and all(r.get("operator_instruction") == "increase" for r in rows)
+    return len(rows) == n - 1 and all(
+        (r.get("operator_instruction") or "").startswith("increase") for r in rows
+    )
 
 
 def _apply_streak(instruction, alert, settings):
@@ -2185,7 +2209,7 @@ def _apply_streak(instruction, alert, settings):
     None otherwise."""
     if alert:
         return True, "threshold"
-    if instruction == "increase" and increase_streak_alert(settings):
+    if (instruction or "").startswith("increase") and increase_streak_alert(settings):
         return True, "streak"
     return False, None
 
@@ -2232,7 +2256,7 @@ def combined_instruction(high, low, settings):
         instruction, alert = operator_instruction(he, settings)
         return instruction, alert, high
     if he >= settings["increase_at"]:
-        return "increase", he >= settings["alert_at"], high
+        return increase_tier(he, settings), he >= settings["alert_at"], high
     if le < settings["decrease_below"]:
         return "decrease", False, low
     # No change. Show the low prompt's band, which is the better judge below 8%,
