@@ -3230,7 +3230,7 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
 # (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
 # would put a reject-decision prompt one wrong click away from being run as
 # if it were a MEO reading.
-REJECT_VISION_PROMPT_VERSION = "reject-v2"
+REJECT_VISION_PROMPT_VERSION = "reject-v3"
 
 
 def reject_vision_prompt():
@@ -3245,6 +3245,8 @@ What each material looks like:
 Larvae are glossy, elongated, tapered at both ends and clearly segmented, golden-tan with darker brown bands. This is the product you would be recovering by reworking the stream. Prepupae (larvae approaching pupation, dark brown to nearly black, same segmented shape) are also product -- a dark colour alone is never a sign of contamination on its own, but a prepupa is always individually recognizable as a larva-shaped object: elongated, segmented, tapered at both ends. It never appears as a dense, uniform, textured mass with no individual shapes in it.
 
 Frass is matte, porous, and crumbly, with irregular ragged outlines, like crumbs of dried soil or bark -- typically grey-brown to greyish-tan, but a heavy concentration of it (as in a genuinely dirty reject stream) can read as a dense, dark, fine-grained carpet with no individual larva silhouettes visible anywhere in it. A mass like that is frass/waste, however dark it looks -- the test is not colour, it is whether you can pick out individual larva-shaped pieces inside it. If you cannot, it is waste, not prepupae. This is expected in a reject stream, and on its own not a reason to discard the stream if enough larvae are mixed in with it elsewhere on the tray.
+
+A dark carpet is not always that clean-cut, though: often you can pick out a handful of individual larvae scattered within an otherwise dark, fine-grained mass. Being able to name a few larva-shapes inside such a region does not make the region larvae-dominant -- count only the area those visible larvae actually occupy toward LARVES, and count the rest of that mass as waste, the same as if no larvae were visible in it at all. Golden-tan larvae are also more visually salient than dark frass -- they catch the eye first and can make a mass look more larvae-rich than it is. Do not judge LARVES by which material grabs your attention; scan the occupied area corner to corner and weigh actual coverage.
 
 Foreign material is anything not organic to the process -- plastic fragments, stones or grit, metal, glass, or similar debris. This is distinct from frass: it is rigid, sharp-edged, or has a synthetic sheen or colour frass never has. Its presence is a separate, harder signal than the frass/larvae ratio -- reworking a stream contaminated this way risks feeding that material back into product regardless of how much larvae it also contains.
 
