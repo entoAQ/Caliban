@@ -1215,6 +1215,24 @@ BAND_SCALES = {
         ("8-13%", 8.0, 10.5),
         (">13%", 13.0, 16.0),
     ],
+    # Six bands in steps of roughly 3, replacing "coarse" for the live
+    # operator prompts (3.2b, 3.4b -- see rig/prompt_3_2b_bands6.sql and
+    # rig/prompt_3_4b_bands6.sql). "coarse" widened 3-8/8-13 into single
+    # buckets specifically to give the model a question it could answer
+    # consistently; this narrows the two ends the operator screen actually
+    # acts on (below 3, above 8) back down without reopening the original
+    # 3-7/7-10 confusion the four-band scale was built to fix in the first
+    # place -- 8-10/10-13 exist so a later AQ severity tier (minor/medium
+    # at those two, major above 13) has bands to key off, but that tiering
+    # is operator-screen (SGSC) work, not decided by this scale on its own.
+    "coarse6": [
+        ("<3%", 0.0, 1.5),
+        ("3-5%", 3.0, 4.0),
+        ("5-8%", 5.0, 6.5),
+        ("8-10%", 8.0, 9.0),
+        ("10-13%", 10.0, 11.5),
+        (">13%", 13.0, 16.0),
+    ],
 }
 
 # Which scale each variant speaks. Absent means "standard", so every existing
@@ -1227,8 +1245,16 @@ VARIANT_BAND_SCALE = {"3.1": "coarse", "3.2": "coarse"}
 BAND_MIDPOINTS = {}
 for _scale in BAND_SCALES.values():
     for _label, _lower, _mid in _scale:
-        assert _label not in BAND_MIDPOINTS, f"duplicate band label {_label}"
-        BAND_MIDPOINTS[_label] = _mid
+        if _label in BAND_MIDPOINTS:
+            # "coarse" and "coarse6" deliberately share their end labels
+            # (<3%, >13%) because both scales mean the same thing there --
+            # only the middle got split into finer bands. Same label, same
+            # midpoint is fine; same label with a different midpoint would
+            # mean two scales silently disagreeing about what it means, and
+            # that must still fail loudly.
+            assert BAND_MIDPOINTS[_label] == _mid, f"band label {_label} maps to different midpoints across scales"
+        else:
+            BAND_MIDPOINTS[_label] = _mid
 
 # How far a predicted band's midpoint has to be from the known real ME%
 # before a row gets auto-flagged for human review. 3 points is about one
@@ -1910,10 +1936,13 @@ OPERATOR_DEFAULTS = {
 # Ignition. DIMINUER below 4.0 once came with a 3-8% band -- two <3% readings and
 # two 3-8% average 3.5, which is labelled 3-8% -- and "3-8% but reduce" read as
 # a contradiction on the line. So whatever AQ sets, DIMINUER is only possible
-# where the band is <3% and AUGMENTER only where it is 8-13% or above: the
-# lower bounds of the coarse scale's second and third bands, 3.0 and 8.0.
-OP_DECREASE_MAX = BAND_SCALES["coarse"][1][1]
-OP_INCREASE_MIN = BAND_SCALES["coarse"][2][1]
+# where the band is <3% and AUGMENTER only where it is 8-10% or above: the
+# lower bounds of coarse6's second and fourth bands, 3.0 and 8.0 -- unchanged
+# from the old coarse-scale values, since 3.2b/3.4b moving to coarse6 only
+# split the middle into finer bands, it did not move the <3/8+ boundary
+# lines this screen actually decides on.
+OP_DECREASE_MAX = BAND_SCALES["coarse6"][1][1]
+OP_INCREASE_MIN = BAND_SCALES["coarse6"][3][1]
 
 
 def operator_settings():

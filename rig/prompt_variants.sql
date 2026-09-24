@@ -29,7 +29,7 @@ create table if not exists vision_prompts (
     -- service -- get this wrong and the model's answers are read against the
     -- wrong boundaries, silently.
     band_scale   text not null default 'standard'
-                 check (band_scale in ('standard', 'coarse')),
+                 check (band_scale in ('standard', 'coarse', 'coarse6')),
 
     -- Few-shot reference photos, opt-in per variant. Deliberately not a
     -- default: a new prompt gets no references unless somebody decides it
