@@ -3259,7 +3259,7 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
 # (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
 # would put a reject-decision prompt one wrong click away from being run as
 # if it were a MEO reading.
-REJECT_VISION_PROMPT_VERSION = "reject-v3"
+REJECT_VISION_PROMPT_VERSION = "reject-v4"
 
 
 def reject_vision_prompt():
@@ -3277,6 +3277,8 @@ Frass is matte, porous, and crumbly, with irregular ragged outlines, like crumbs
 
 A dark carpet is not always that clean-cut, though: often you can pick out a handful of individual larvae scattered within an otherwise dark, fine-grained mass. Being able to name a few larva-shapes inside such a region does not make the region larvae-dominant -- count only the area those visible larvae actually occupy toward LARVES, and count the rest of that mass as waste, the same as if no larvae were visible in it at all. Golden-tan larvae are also more visually salient than dark frass -- they catch the eye first and can make a mass look more larvae-rich than it is. Do not judge LARVES by which material grabs your attention; scan the occupied area corner to corner and weigh actual coverage.
 
+Apply this test directly: identify which material forms the continuous background of the tray and which appears as discrete pieces sitting on or within that background. If the dark, fine-grained carpet is the continuous background -- filling most of the frame, edge to edge -- and larvae appear as separate light-coloured flecks scattered across or embedded in it, that is a frass-dominant tray (faibles or quasi_absentes) no matter how many individual larvae you can pick out or count. It does not become moderees just because there are a lot of them -- a large number of small, scattered inclusions is still a minority of the area. moderees requires the reverse or a true split: larvae forming their own solid, contiguous patches that stand apart from the frass, not points speckled through it.
+
 Foreign material is anything not organic to the process -- plastic fragments, stones or grit, metal, glass, or similar debris. This is distinct from frass: it is rigid, sharp-edged, or has a synthetic sheen or colour frass never has. Its presence is a separate, harder signal than the frass/larvae ratio -- reworking a stream contaminated this way risks feeding that material back into product regardless of how much larvae it also contains.
 
 Give two independent readings before deciding:
@@ -3286,10 +3288,12 @@ Give two independent readings before deciding:
 
 Judge LARVES as the fraction of the tray's occupied area that is clearly larvae -- individually recognizable golden-tan (or dark prepupal) segmented shapes -- not a raw count and not "is there some visible somewhere":
 
-abondantes -- larvae dominate what you see at a glance; waste is scattered among them, not the reverse.
-moderees -- larvae and waste each cover a substantial, comparable share; you could point to real patches of both.
-faibles -- waste dominates the picture; larvae are a minority, often pushed to the margins or scattered thinly over or around a mass of waste.
-quasi_absentes -- almost no recognizable larvae; the tray is essentially wall-to-wall waste.
+abondantes -- roughly 60% or more of the occupied area is larvae; they dominate what you see at a glance, waste is scattered among them, not the reverse.
+moderees -- roughly 40-60% of the occupied area is larvae, forming real, solid patches of their own that stand apart from the frass -- not scattered flecks or specks throughout a frass background, however numerous.
+faibles -- roughly 10-40% of the occupied area is larvae; waste dominates the picture, larvae are a minority, often pushed to the margins, or present as scattered flecks/specks within or on top of a continuous frass carpet rather than patches of their own.
+quasi_absentes -- under 10%; almost no recognizable larvae, the tray is essentially wall-to-wall waste.
+
+These percentages are area estimates, not head counts -- a great many tiny larvae scattered as isolated flecks through a dark carpet can easily be under 40% of the area even though each one is individually nameable.
 
 Larvae confined to the edges or margins of the tray, with the bulk of the interior covered by a dense waste mass, is faibles or quasi_absentes, not abondantes or moderees -- do not let a fringe of visible larvae around a solid mass of waste inflate the reading.
 
