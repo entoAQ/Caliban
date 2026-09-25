@@ -2165,7 +2165,7 @@ def current_cycle_start():
 
 
 def increase_streak_alert(settings):
-    """True when this AUGMENTER completes a run of alert_consecutive_increase.
+    """Whether this AUGMENTER completes a run of alert_consecutive_increase.
 
     Called only for a capture that has just been decided AUGMENTER, before its
     own row is written, so it looks at the previous n-1 decisions. Counted on
@@ -2177,12 +2177,16 @@ def increase_streak_alert(settings):
     later. If that one is AUGMENTER too, the adjustment did not work -- the
     destoner may be at its limit, or something upstream changed -- and that is
     for AQ to know about, not for the operator to keep turning a dial.
+
+    Returns (alert, new). new is True only for the capture that COMPLETES the
+    run -- the one before the window was not AUGMENTER, or there was none this
+    cycle. The flag itself stays up for the 3rd, 4th... AUGMENTER in a row (the
+    banner should keep saying so), but the Teams message must go out once per
+    run, not once per sample, or the channel gets muted within a shift.
     """
     n = settings.get("alert_consecutive_increase", 0)
     if n <= 0:
-        return False
-    if n == 1:
-        return True
+        return False, False
     try:
         cycle_start, _ = current_cycle_start()
         rows = (
@@ -2192,26 +2196,95 @@ def increase_streak_alert(settings):
             .not_.is_("operator_instruction", "null")
             .gte("created_at", cycle_start)
             .order("created_at", desc=True)
-            .limit(n - 1)
+            .limit(n)
             .execute()
         ).data or []
     except Exception as e:
         print(f"[increase_streak_alert lookup failed] {type(e).__name__}: {e}")
-        return False
-    return len(rows) == n - 1 and all(
-        (r.get("operator_instruction") or "").startswith("increase") for r in rows
-    )
+        # n == 1 needs no history to alert; it just cannot tell a new run.
+        return n == 1, False
+    inc = [(r.get("operator_instruction") or "").startswith("increase") for r in rows]
+    alert = len(inc) >= n - 1 and all(inc[: n - 1])
+    return alert, alert and (len(inc) < n or not inc[n - 1])
 
 
 def _apply_streak(instruction, alert, settings):
-    """(alert, reason) after the consecutive-AUGMENTER rule. reason is
+    """(alert, reason, notify) after the consecutive-AUGMENTER rule. reason is
     'threshold' when the single-sample alert fired, 'streak' when the run did,
-    None otherwise."""
+    None otherwise. notify is True when this capture starts a new run and AQ
+    should hear about it on Teams (notify_increase_streak).
+
+    The run is checked even when the single-sample alert already fired: the
+    second AUGMENTER of a run is quite likely to be a major one over alert_at,
+    and that is exactly the case AQ most needs to hear about."""
+    streak, new = False, False
+    if (instruction or "").startswith("increase"):
+        streak, new = increase_streak_alert(settings)
     if alert:
-        return True, "threshold"
-    if (instruction or "").startswith("increase") and increase_streak_alert(settings):
-        return True, "streak"
-    return False, None
+        return True, "threshold", new
+    if streak:
+        return True, "streak", new
+    return False, None, False
+
+
+# Workflows "When a Teams webhook request is received" URL for the AQ channel.
+# An env var, not system_config: the URL is the only credential -- anyone who
+# has it can post to the channel -- and system_config is readable from every
+# signed-in browser. Unset = no Teams messages, nothing else changes.
+TEAMS_ALERT_WEBHOOK_URL = os.environ.get("TEAMS_ALERT_WEBHOOK_URL")
+
+
+def notify_increase_streak(n, instruction, estimate_pct, lot_text):
+    """Tell AQ on Teams that the destoner adjustment is not working.
+
+    Fire-and-forget on a thread: the operator is waiting on this response and
+    a slow or failing Teams must never delay or break the capture. Plain
+    urllib so it adds no dependency to an image with a glibc history.
+    """
+    if not TEAMS_ALERT_WEBHOOK_URL:
+        return
+    _, cycle_date = current_cycle_start()
+    tier = {"increase_minor": "léger", "increase_medium": "modéré",
+            "increase_major": "majeur"}.get(instruction)
+    facts = [
+        {"title": "Cycle", "value": str(cycle_date or "—")},
+        {"title": "Dernière instruction", "value": "AUGMENTER" + (f" ({tier})" if tier else "")},
+        {"title": "ME% estimé", "value": f"{estimate_pct:.1f} %" if estimate_pct is not None else "—"},
+    ]
+    if lot_text:
+        facts.append({"title": "Lot", "value": lot_text})
+    card = {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "color": "Attention", "wrap": True,
+                     "text": f"⚠ Destoner : {n} AUGMENTER consécutifs"},
+                    {"type": "TextBlock", "wrap": True,
+                     "text": "L'échantillon de vérification demande encore AUGMENTER — l'ajustement ne suffit pas. "
+                             "Le destoner est peut-être à sa limite, ou quelque chose a changé en amont."},
+                    {"type": "FactSet", "facts": facts},
+                ],
+            },
+        }],
+    }
+
+    def send():
+        import urllib.request
+        try:
+            req = urllib.request.Request(
+                TEAMS_ALERT_WEBHOOK_URL, data=json.dumps(card).encode("utf-8"),
+                headers={"Content-Type": "application/json"}, method="POST")
+            urllib.request.urlopen(req, timeout=15).read()
+        except Exception as e:
+            print(f"[teams streak alert failed] {type(e).__name__}: {e}")
+
+    import threading
+    threading.Thread(target=send, daemon=True).start()
 
 
 def operator_prompt_pair(settings):
@@ -2972,7 +3045,7 @@ async def azure_band_test(
     decider = None
     if is_operator and pair and len(parsed_results) == 2:
         rule_instruction, rule_alert, decider = combined_instruction(parsed_results[0], parsed_results[1], settings)
-        rule_alert, rule_reason = _apply_streak(rule_instruction, rule_alert, settings)
+        rule_alert, rule_reason, rule_notify = _apply_streak(rule_instruction, rule_alert, settings)
 
     # Recording is per-variant and best-effort -- one variant's insert
     # failing shouldn't hide the others' results.
@@ -2985,9 +3058,10 @@ async def azure_band_test(
             if parsed is decider:
                 parsed["alert_reason"] = rule_reason
                 parsed["alert_streak"] = settings["alert_consecutive_increase"]
+                parsed["_notify"] = rule_notify
         elif is_operator:
             instruction, alert = operator_instruction(parsed.get("estimate_pct"), settings)
-            alert, reason = _apply_streak(instruction, alert, settings)
+            alert, reason, parsed["_notify"] = _apply_streak(instruction, alert, settings)
             parsed["instruction"] = instruction
             parsed["instruction_alert"] = alert
             parsed["alert_reason"] = reason
@@ -3090,6 +3164,15 @@ async def azure_band_test(
         except Exception as e:
             parsed["recording_error"] = f"{type(e).__name__}: {e}"
             print(f"[vision_band_estimates recording failed] {type(e).__name__}: {e}")
+
+    # One Teams message per capture at most, and only for a run that was
+    # actually recorded -- an unrecorded one never enters the next capture's
+    # count, so announcing it would describe a run the database does not have.
+    to_notify = [p for p in parsed_results if p.pop("_notify", False) and p.get("recorded_id")]
+    if to_notify:
+        p = to_notify[0]
+        notify_increase_streak(settings["alert_consecutive_increase"], p.get("instruction"),
+                               p.get("estimate_pct"), lot_text)
 
     if decider is not None:
         parsed_results = [decider] + [r for r in parsed_results if r is not decider]
