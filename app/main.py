@@ -2234,7 +2234,7 @@ def _apply_streak(instruction, alert, settings):
 TEAMS_ALERT_WEBHOOK_URL = os.environ.get("TEAMS_ALERT_WEBHOOK_URL")
 
 
-def increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date):
+def increase_streak_card(n, instruction, estimate_pct, cycle_date):
     """The Teams adaptive card for a new run of n AUGMENTER. Pure -- no I/O --
     so every message it can produce can be reviewed without posting one."""
     tier = {"increase_minor": "léger", "increase_medium": "modéré",
@@ -2245,8 +2245,8 @@ def increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date):
         {"title": "ME% estimé",
          "value": f"{estimate_pct:.1f} %".replace(".", ",") if estimate_pct is not None else "—"},
     ]
-    if lot_text:
-        facts.append({"title": "Lot", "value": lot_text})
+    # No lot line: the operator samples the line before a batch number exists,
+    # so whatever lot_number the capture carries is not one AQ can act on.
     # n = 1 alerts on the first AUGMENTER of a run: there is no check sample
     # and no failed adjustment yet, so the n >= 2 wording would be false.
     if n == 1:
@@ -2276,7 +2276,7 @@ def increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date):
     }
 
 
-def notify_increase_streak(n, instruction, estimate_pct, lot_text):
+def notify_increase_streak(n, instruction, estimate_pct):
     """Tell AQ on Teams that the destoner adjustment is not working.
 
     Fire-and-forget on a thread: the operator is waiting on this response and
@@ -2286,7 +2286,7 @@ def notify_increase_streak(n, instruction, estimate_pct, lot_text):
     if not TEAMS_ALERT_WEBHOOK_URL:
         return
     _, cycle_date = current_cycle_start()
-    card = increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date)
+    card = increase_streak_card(n, instruction, estimate_pct, cycle_date)
 
     def send():
         import urllib.request
@@ -3187,7 +3187,7 @@ async def azure_band_test(
     if to_notify:
         p = to_notify[0]
         notify_increase_streak(settings["alert_consecutive_increase"], p.get("instruction"),
-                               p.get("estimate_pct"), lot_text)
+                               p.get("estimate_pct"))
 
     if decider is not None:
         parsed_results = [decider] + [r for r in parsed_results if r is not decider]
