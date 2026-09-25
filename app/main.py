@@ -2234,6 +2234,48 @@ def _apply_streak(instruction, alert, settings):
 TEAMS_ALERT_WEBHOOK_URL = os.environ.get("TEAMS_ALERT_WEBHOOK_URL")
 
 
+def increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date):
+    """The Teams adaptive card for a new run of n AUGMENTER. Pure -- no I/O --
+    so every message it can produce can be reviewed without posting one."""
+    tier = {"increase_minor": "léger", "increase_medium": "modéré",
+            "increase_major": "majeur"}.get(instruction)
+    facts = [
+        {"title": "Cycle", "value": str(cycle_date or "—")},
+        {"title": "Dernière instruction", "value": "AUGMENTER" + (f" ({tier})" if tier else "")},
+        {"title": "ME% estimé",
+         "value": f"{estimate_pct:.1f} %".replace(".", ",") if estimate_pct is not None else "—"},
+    ]
+    if lot_text:
+        facts.append({"title": "Lot", "value": lot_text})
+    # n = 1 alerts on the first AUGMENTER of a run: there is no check sample
+    # and no failed adjustment yet, so the n >= 2 wording would be false.
+    if n == 1:
+        title = "⚠ Destoner : AUGMENTER"
+        body = ("L'échantillon demande AUGMENTER l'agressivité du destoner. "
+                "(Alerte réglée sur « 1 AUGMENTER consécutif » : un message au début de chaque série.)")
+    else:
+        title = f"⚠ Destoner : {n} AUGMENTER consécutifs"
+        body = ("L'échantillon de vérification demande encore AUGMENTER — l'ajustement ne suffit pas. "
+                "Le destoner est peut-être à sa limite, ou quelque chose a changé en amont.")
+    return {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "color": "Attention", "wrap": True,
+                     "text": title},
+                    {"type": "TextBlock", "wrap": True, "text": body},
+                    {"type": "FactSet", "facts": facts},
+                ],
+            },
+        }],
+    }
+
+
 def notify_increase_streak(n, instruction, estimate_pct, lot_text):
     """Tell AQ on Teams that the destoner adjustment is not working.
 
@@ -2244,34 +2286,7 @@ def notify_increase_streak(n, instruction, estimate_pct, lot_text):
     if not TEAMS_ALERT_WEBHOOK_URL:
         return
     _, cycle_date = current_cycle_start()
-    tier = {"increase_minor": "léger", "increase_medium": "modéré",
-            "increase_major": "majeur"}.get(instruction)
-    facts = [
-        {"title": "Cycle", "value": str(cycle_date or "—")},
-        {"title": "Dernière instruction", "value": "AUGMENTER" + (f" ({tier})" if tier else "")},
-        {"title": "ME% estimé", "value": f"{estimate_pct:.1f} %" if estimate_pct is not None else "—"},
-    ]
-    if lot_text:
-        facts.append({"title": "Lot", "value": lot_text})
-    card = {
-        "type": "message",
-        "attachments": [{
-            "contentType": "application/vnd.microsoft.card.adaptive",
-            "content": {
-                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                "type": "AdaptiveCard",
-                "version": "1.4",
-                "body": [
-                    {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "color": "Attention", "wrap": True,
-                     "text": f"⚠ Destoner : {n} AUGMENTER consécutifs"},
-                    {"type": "TextBlock", "wrap": True,
-                     "text": "L'échantillon de vérification demande encore AUGMENTER — l'ajustement ne suffit pas. "
-                             "Le destoner est peut-être à sa limite, ou quelque chose a changé en amont."},
-                    {"type": "FactSet", "facts": facts},
-                ],
-            },
-        }],
-    }
+    card = increase_streak_card(n, instruction, estimate_pct, lot_text, cycle_date)
 
     def send():
         import urllib.request
