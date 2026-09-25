@@ -2178,20 +2178,22 @@ def increase_streak_alert(settings):
     destoner may be at its limit, or something upstream changed -- and that is
     for AQ to know about, not for the operator to keep turning a dial.
 
-    Returns (alert, new). new is True only for the capture that COMPLETES the
-    run -- the one before the window was not AUGMENTER, or there was none this
-    cycle. The flag itself stays up for the 3rd, 4th... AUGMENTER in a row (the
+    Returns (alert, prior). prior is set only for the capture that COMPLETES
+    the run -- the one before the window was not AUGMENTER, or there was none
+    this cycle -- and holds the run's earlier rows, oldest first, so the Teams
+    card can show whether it got worse (léger -> modéré) or is easing but
+    still too high. None otherwise. The flag itself stays up for the 3rd, 4th... AUGMENTER in a row (the
     banner should keep saying so), but the Teams message must go out once per
     run, not once per sample, or the channel gets muted within a shift.
     """
     n = settings.get("alert_consecutive_increase", 0)
     if n <= 0:
-        return False, False
+        return False, None
     try:
         cycle_start, _ = current_cycle_start()
         rows = (
             supabase.table("vision_band_estimates")
-            .select("operator_instruction")
+            .select("operator_instruction, estimate_pct")
             .eq("source", "operator")
             .not_.is_("operator_instruction", "null")
             .gte("created_at", cycle_start)
@@ -2202,29 +2204,31 @@ def increase_streak_alert(settings):
     except Exception as e:
         print(f"[increase_streak_alert lookup failed] {type(e).__name__}: {e}")
         # n == 1 needs no history to alert; it just cannot tell a new run.
-        return n == 1, False
+        return n == 1, None
     inc = [(r.get("operator_instruction") or "").startswith("increase") for r in rows]
     alert = len(inc) >= n - 1 and all(inc[: n - 1])
-    return alert, alert and (len(inc) < n or not inc[n - 1])
+    new = alert and (len(inc) < n or not inc[n - 1])
+    return alert, (list(reversed(rows[: n - 1])) if new else None)
 
 
 def _apply_streak(instruction, alert, settings):
-    """(alert, reason, notify) after the consecutive-AUGMENTER rule. reason is
+    """(alert, reason, prior) after the consecutive-AUGMENTER rule. reason is
     'threshold' when the single-sample alert fired, 'streak' when the run did,
-    None otherwise. notify is True when this capture starts a new run and AQ
-    should hear about it on Teams (notify_increase_streak).
+    None otherwise. prior is not None when this capture completes a new run and
+    AQ should hear about it on Teams (notify_increase_streak); it holds the
+    run's earlier rows.
 
     The run is checked even when the single-sample alert already fired: the
     second AUGMENTER of a run is quite likely to be a major one over alert_at,
     and that is exactly the case AQ most needs to hear about."""
-    streak, new = False, False
+    streak, prior = False, None
     if (instruction or "").startswith("increase"):
-        streak, new = increase_streak_alert(settings)
+        streak, prior = increase_streak_alert(settings)
     if alert:
-        return True, "threshold", new
+        return True, "threshold", prior
     if streak:
-        return True, "streak", new
-    return False, None, False
+        return True, "streak", prior
+    return False, None, None
 
 
 # Workflows "When a Teams webhook request is received" URL for the AQ channel.
@@ -2234,16 +2238,28 @@ def _apply_streak(instruction, alert, settings):
 TEAMS_ALERT_WEBHOOK_URL = os.environ.get("TEAMS_ALERT_WEBHOOK_URL")
 
 
-def increase_streak_card(n, instruction, estimate_pct, cycle_date):
-    """The Teams adaptive card for a new run of n AUGMENTER. Pure -- no I/O --
-    so every message it can produce can be reviewed without posting one."""
-    tier = {"increase_minor": "léger", "increase_medium": "modéré",
-            "increase_major": "majeur"}.get(instruction)
+def increase_streak_card(n, series, cycle_date):
+    """The Teams adaptive card for a new run of n AUGMENTER. series is the
+    run's rows oldest first, the capture that completed it last. Pure -- no
+    I/O -- so every message it can produce can be reviewed without posting one.
+
+    The whole run is shown, not just the last sample: léger -> modéré (getting
+    worse) and modéré -> léger (easing, still too high) both alert, and AQ
+    should not have to open the app to tell which it is."""
+    tiers = {"increase_minor": "léger", "increase_medium": "modéré", "increase_major": "majeur"}
+
+    def label(r):
+        tier = tiers.get(r.get("operator_instruction"))
+        return "AUGMENTER" + (f" ({tier})" if tier else "")
+
+    def pct(r):
+        v = r.get("estimate_pct")
+        return f"{float(v):.1f} %".replace(".", ",") if v is not None else "—"
+
     facts = [
         {"title": "Cycle", "value": str(cycle_date or "—")},
-        {"title": "Dernière instruction", "value": "AUGMENTER" + (f" ({tier})" if tier else "")},
-        {"title": "ME% estimé",
-         "value": f"{estimate_pct:.1f} %".replace(".", ",") if estimate_pct is not None else "—"},
+        {"title": "Série", "value": " → ".join(label(r) for r in series)},
+        {"title": "ME% estimé", "value": " → ".join(pct(r) for r in series)},
     ]
     # No lot line: the operator samples the line before a batch number exists,
     # so whatever lot_number the capture carries is not one AQ can act on.
@@ -2276,7 +2292,7 @@ def increase_streak_card(n, instruction, estimate_pct, cycle_date):
     }
 
 
-def notify_increase_streak(n, instruction, estimate_pct):
+def notify_increase_streak(n, series):
     """Tell AQ on Teams that the destoner adjustment is not working.
 
     Fire-and-forget on a thread: the operator is waiting on this response and
@@ -2286,7 +2302,7 @@ def notify_increase_streak(n, instruction, estimate_pct):
     if not TEAMS_ALERT_WEBHOOK_URL:
         return
     _, cycle_date = current_cycle_start()
-    card = increase_streak_card(n, instruction, estimate_pct, cycle_date)
+    card = increase_streak_card(n, series, cycle_date)
 
     def send():
         import urllib.request
@@ -3183,11 +3199,15 @@ async def azure_band_test(
     # One Teams message per capture at most, and only for a run that was
     # actually recorded -- an unrecorded one never enters the next capture's
     # count, so announcing it would describe a run the database does not have.
-    to_notify = [p for p in parsed_results if p.pop("_notify", False) and p.get("recorded_id")]
+    # "is not None", not truthiness: at n = 1 the earlier part of the run is
+    # an empty list and still means "notify".
+    to_notify = [(p, prior) for p in parsed_results
+                 for prior in [p.pop("_notify", None)]
+                 if prior is not None and p.get("recorded_id")]
     if to_notify:
-        p = to_notify[0]
-        notify_increase_streak(settings["alert_consecutive_increase"], p.get("instruction"),
-                               p.get("estimate_pct"))
+        p, prior = to_notify[0]
+        notify_increase_streak(settings["alert_consecutive_increase"], prior + [
+            {"operator_instruction": p.get("instruction"), "estimate_pct": p.get("estimate_pct")}])
 
     if decider is not None:
         parsed_results = [decider] + [r for r in parsed_results if r is not decider]
