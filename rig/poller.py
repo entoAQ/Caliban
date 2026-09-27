@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bench rig poller -- turns a queued command into a photograph.
 
-Asks Caliban for work every few seconds, and when a command appears, shoots
-the dish and uploads the result. Runs as a systemd service so the rig is
+Waits on Caliban for work, and when a command appears, shoots the dish and
+uploads the result. Runs as a systemd service so the rig is
 ready whenever someone clicks the button, including after a power cut.
 
 The direction of travel is the point. Nothing reaches into the plant: not
@@ -34,6 +34,17 @@ RIG_API_KEY = os.environ.get("RIG_API_KEY", "")
 
 POLL_SECONDS = 3.0
 REQUEST_TIMEOUT = 30
+
+# Each ask for work is a long-poll: Caliban holds it open for up to this long
+# and answers the moment a command is queued. Asking every POLL_SECONDS
+# instead cost a Supabase call each time, ~28,800 a day, which filled the
+# free tier's log quota (2026-09-27). POLL_SECONDS is now only the fallback
+# for when Caliban answers without holding (see claim()).
+LONG_POLL_SECONDS = 50
+
+# The full-resolution originals in ~/captures are the only copy: Caliban
+# keeps just a 2048 px review copy in Supabase. Nothing here deletes them;
+# they are moved to SharePoint by hand for now (monthly reminder issue).
 
 # How long to wait after switching the lamp before shooting the IR frame.
 # The IR LEDs are not under software control: a photoresistor on the LED
@@ -134,14 +145,20 @@ def headers():
 
 
 def claim():
-    """Ask for a command. Returns the command dict, or None if idle."""
+    """Ask for a command. Returns (command or None, waited).
+
+    `waited` is False when Caliban answered without holding the request --
+    its listener is down, or it predates the long-poll -- and the caller must
+    then sleep before asking again, or it would spin."""
     resp = requests.get(
         f"{CALIBAN_URL}/capture-commands/next",
+        params={"wait": LONG_POLL_SECONDS},
         headers=headers(),
-        timeout=REQUEST_TIMEOUT,
+        timeout=LONG_POLL_SECONDS + REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
-    return resp.json().get("command")
+    body = resp.json()
+    return body.get("command"), bool(body.get("waited"))
 
 
 def shoot(lot_number):
@@ -249,25 +266,24 @@ def main():
     if not CALIBAN_URL or not RIG_API_KEY:
         sys.exit("CALIBAN_URL and RIG_API_KEY must both be set.")
 
-    log(f"polling {CALIBAN_URL} every {POLL_SECONDS}s")
-    idle_since_log = 0
+    log(f"waiting on {CALIBAN_URL} for commands")
+    idle_logged = time.monotonic()
 
     while True:
         try:
-            command = claim()
+            command, waited = claim()
 
             if not command:
-                # Quiet by default. A line every three seconds saying nothing
-                # happened would make the journal useless for finding the
-                # times something did.
-                idle_since_log += 1
-                if idle_since_log >= 200:
+                # Quiet by default. A line for every empty answer would make
+                # the journal useless for finding the times something happened.
+                if time.monotonic() - idle_logged >= 600:
                     log("idle")
-                    idle_since_log = 0
-                time.sleep(POLL_SECONDS)
+                    idle_logged = time.monotonic()
+                if not waited:
+                    time.sleep(POLL_SECONDS)
                 continue
 
-            idle_since_log = 0
+            idle_logged = time.monotonic()
             kind = command.get("kind") or "capture"
             log(f"claimed {command['id']} ({kind}) "
                 f"for lot {command.get('lot_number') or '-'}")

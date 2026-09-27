@@ -35,10 +35,12 @@ STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 
 from app.supabase_client import supabase, get_current_operator
 from app import sharepoint_client
+from app import command_wakeup
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "contamination_v1")
 MODEL_PATH = os.environ.get("MODEL_PATH", "models/best.pt")
@@ -55,6 +57,12 @@ POWER_AUTOMATE_API_KEY = os.environ.get("POWER_AUTOMATE_API_KEY")
 RIG_API_KEY = os.environ.get("RIG_API_KEY")
 
 app = FastAPI(title="Contamination Screening Inference API")
+
+
+@app.on_event("startup")
+async def _start_command_wakeup():
+    # Held on app.state so the task is not garbage-collected mid-run.
+    app.state.command_wakeup = asyncio.create_task(command_wakeup.run())
 
 # Allowed browser origins, comma-separated. A single fixed origin was fragile
 # by design: Vercel issues a fresh URL for every preview deployment, and a
@@ -1269,6 +1277,34 @@ OUTLIER_THRESHOLD_PTS = 3.0
 # discarded rather than used -- resizing here is free in accuracy and saves the
 # memory, bandwidth and latency of carrying them to Azure to be thrown away.
 MODEL_MAX_EDGE = 2048
+
+# JPEG quality for the review copy kept in Supabase Storage.
+STORED_CAPTURE_QUALITY = 90
+
+
+def review_copy(contents):
+    """The copy of a capture kept in Supabase Storage: MODEL_MAX_EDGE on the
+    long side, re-encoded at STORED_CAPTURE_QUALITY.
+
+    The rig's 12MP originals were 3-5 MB each and put the project over the
+    free tier's 1 GB Storage Size and most of its 5 GB egress (2026-09-27),
+    while the model never sees past MODEL_MAX_EDGE anyway. Supabase holds a
+    few days of these for review; the full-resolution original stays on the
+    rig in ~/captures, named in capture_commands.original_filename. Anything
+    that is not a readable image is kept as it came rather than failing the
+    capture over it."""
+    from PIL import Image
+
+    try:
+        img = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as e:
+        print(f"[review copy skipped, stored as received] {type(e).__name__}: {e}")
+        return contents
+    if max(img.size) > MODEL_MAX_EDGE:
+        img.thumbnail((MODEL_MAX_EDGE, MODEL_MAX_EDGE), Image.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=STORED_CAPTURE_QUALITY)
+    return buf.getvalue()
 
 
 def band_for_pct(pct, scale="standard"):
@@ -2751,7 +2787,7 @@ async def azure_band_test(
             ext = os.path.splitext(upload_name)[1] or ".jpg"
             capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
             upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
-                capture_storage_path, contents, file_options={"content-type": media_type}
+                capture_storage_path, review_copy(contents), file_options={"content-type": "image/jpeg"}
             )
             if not upload_resp:
                 capture_storage_path = None
@@ -3780,14 +3816,19 @@ def band_estimates_backfill(
         raise HTTPException(status_code=500, detail=f"Échec du rattrapage : {type(e).__name__}")
 
 
-@app.get("/capture-commands/next")
-def capture_commands_next(_: bool = Depends(verify_rig_key)):
-    """Claim the oldest pending capture command, or report there is none.
+# Longest the rig's request is held open. Well under App Service's 230 s idle
+# cutoff, which drops the connection without a response.
+LONG_POLL_MAX_SECONDS = 55
 
-    Returns {"command": null} rather than 404 when the queue is empty: the
-    poller hits this every few seconds forever, and an empty queue is the
-    normal case, not an error. Logging it as one would bury any real failure
-    in noise."""
+# Claim at least this often even with nothing announced: it covers an INSERT
+# the listener missed, and it is the only thing that runs the queue's
+# stale-claim reclaim (claim_capture_command's stale_after, also 2 minutes).
+SAFETY_CLAIM_SECONDS = 120
+
+_last_claim = 0.0
+
+
+def _claim_next_command():
     try:
         resp = supabase.rpc("claim_capture_command", {}).execute()
     except Exception as e:
@@ -3798,18 +3839,46 @@ def capture_commands_next(_: bool = Depends(verify_rig_key)):
     if isinstance(data, list):
         data = data[0] if data else None
     if not data or not data.get("id"):
-        return {"command": None}
+        return None
 
     return {
-        "command": {
-            "id": data["id"],
-            "lot_id": data.get("lot_id"),
-            "lot_number": data.get("lot_number"),
-            # Older rows predate the column and are all plain captures, so an
-            # absent kind means capture rather than an error.
-            "kind": data.get("kind") or "capture",
-        }
+        "id": data["id"],
+        "lot_id": data.get("lot_id"),
+        "lot_number": data.get("lot_number"),
+        # Older rows predate the column and are all plain captures, so an
+        # absent kind means capture rather than an error.
+        "kind": data.get("kind") or "capture",
     }
+
+
+@app.get("/capture-commands/next")
+async def capture_commands_next(wait: float = 0, _: bool = Depends(verify_rig_key)):
+    """Claim the oldest pending capture command, or report there is none.
+
+    Returns {"command": null} rather than 404 when the queue is empty: an
+    empty queue is the normal case, not an error. Logging it as one would
+    bury any real failure in noise.
+
+    With ?wait=N the request is a long-poll: it is held for up to N seconds
+    and only touches Supabase once command_wakeup hears an INSERT, or the
+    safety claim is due. That replaced a Supabase RPC every 3 s, which filled
+    the free tier's log quota by itself (2026-09-27). "waited" tells the rig
+    whether it was held; when it was not (listener down, or an older rig),
+    the rig sleeps between polls exactly as before."""
+    global _last_claim
+    wait = min(max(wait, 0), LONG_POLL_MAX_SECONDS)
+    held = bool(wait) and command_wakeup.healthy()
+
+    if held:
+        due = time.monotonic() - _last_claim > SAFETY_CLAIM_SECONDS
+        if not due and not command_wakeup.pending():
+            if not await command_wakeup.wait(wait):
+                return {"command": None, "waited": True}
+        command_wakeup.consume()
+
+    _last_claim = time.monotonic()
+    command = await run_in_threadpool(_claim_next_command)
+    return {"command": command, "waited": held}
 
 
 def _run_density_vision(row_id, contents, media_type, tof_reading, height_only_est=None):
@@ -3905,8 +3974,14 @@ async def capture_commands_complete(
         # Read once, kept around: the visible photo's bytes are needed again
         # below for the density-vision call, and an UploadFile's stream can
         # only be consumed once.
-        visible_contents = await file.read()
-        ir_contents = await ir_file.read() if ir_file is not None else None
+        #
+        # Only the review copy is kept from here on: stored, cached for the
+        # analysis that follows, and handed to the vision calls, so a later
+        # re-score reads exactly the image the live one did.
+        # Off the event loop: decoding a 12MP frame would stall every other
+        # request on this worker, the rig's long-poll listener included.
+        visible_contents = await run_in_threadpool(review_copy, await file.read())
+        ir_contents = await run_in_threadpool(review_copy, await ir_file.read()) if ir_file is not None else None
 
         image_path = _store(visible_contents, file.filename, file.content_type, "visible")
         ir_path = _store(ir_contents, ir_file.filename, ir_file.content_type, "ir") if ir_contents is not None else None
@@ -3941,6 +4016,18 @@ async def capture_commands_complete(
 
         if not update_resp.data:
             raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
+
+        # Where the full-resolution originals are on the rig (~/captures), since
+        # Storage only keeps the review copy. Separate and best-effort: a
+        # missing column (rig/original_filenames.sql not yet run) must not fail
+        # a capture the operator is waiting on.
+        try:
+            supabase.table("capture_commands").update({
+                "original_filename": file.filename,
+                "ir_original_filename": ir_file.filename if ir_file is not None else None,
+            }).eq("id", command_id).execute()
+        except Exception as e:
+            print(f"[original filename not recorded] {command_id}: {type(e).__name__}: {e}")
 
         # Scheduled after the response below so a multi-second vision call
         # never sits on top of the rig's own request timeout, same reasoning

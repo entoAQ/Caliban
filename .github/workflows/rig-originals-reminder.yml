@@ -1,0 +1,41 @@
+name: Reminder - move rig originals to SharePoint
+
+# Since 2026-09-27 Supabase keeps only a 2048 px review copy of each capture,
+# for a few days. The full-resolution originals exist in one place, the rig's
+# SD card (~/captures), and nothing prunes them: at ~150-300 MB a day the card
+# fills in a few months, and a full card stops captures. Until the rig backs
+# them up by itself, this opens an issue on the 1st of each month to do it by
+# hand. Skipped while last month's is still open, so they never pile up.
+
+on:
+  schedule:
+    - cron: '0 12 1 * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open the reminder issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TITLE="Move rig originals to SharePoint ($(date -u +%Y-%m))"
+          if gh issue list --state open --search "Move rig originals to SharePoint in:title" --json number --jq 'length' | grep -qv '^0$'; then
+            echo "A reminder is still open - not opening another."
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body-file - <<'EOF'
+          The rig's SD card holds the only full-resolution copy of every capture. Supabase keeps a 2048 px review copy for a few days; `capture_commands.original_filename` names each original.
+
+          - [ ] Check space on the rig: `ssh ttownshend@172.20.202.99 'df -h ~ && du -sh ~/captures'`
+          - [ ] Pull the originals down: `scp ttownshend@172.20.202.99:~/captures/*.jpg <local dir>`
+          - [ ] Upload them to SharePoint and check the file count matches
+          - [ ] Only then free the rig: delete the uploaded files from `~/captures`
+
+          Close this issue when done. The next one opens on the 1st of next month.
+          EOF
