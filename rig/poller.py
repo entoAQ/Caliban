@@ -144,17 +144,17 @@ def headers():
     return {"X-API-Key": RIG_API_KEY}
 
 
-def claim():
+def claim(wait=LONG_POLL_SECONDS):
     """Ask for a command. Returns (command or None, waited).
 
     `waited` is False when Caliban answered without holding the request --
-    its listener is down, or it predates the long-poll -- and the caller must
-    then sleep before asking again, or it would spin."""
+    its listener is down, it predates the long-poll, or wait was 0 -- and
+    the caller must then sleep before asking again, or it would spin."""
     resp = requests.get(
         f"{CALIBAN_URL}/capture-commands/next",
-        params={"wait": LONG_POLL_SECONDS},
+        params={"wait": wait},
         headers=headers(),
-        timeout=LONG_POLL_SECONDS + REQUEST_TIMEOUT,
+        timeout=wait + REQUEST_TIMEOUT,
     )
     resp.raise_for_status()
     body = resp.json()
@@ -268,10 +268,18 @@ def main():
 
     log(f"waiting on {CALIBAN_URL} for commands")
     idle_logged = time.monotonic()
+    # After handling a command, ask again at once rather than long-polling.
+    # Caliban only claims when it hears an INSERT (or every 2 min as a safety
+    # net), so a held request after a command would leave anything else
+    # already queued waiting for the *next* insert -- which then claims the
+    # oldest row, not its own. On 2026-09-30 that kept every operator's
+    # request one behind a post-outage backlog until SGSC timed out.
+    drain = False
 
     while True:
         try:
-            command, waited = claim()
+            command, waited = claim(0 if drain else LONG_POLL_SECONDS)
+            drain = bool(command)
 
             if not command:
                 # Quiet by default. A line for every empty answer would make

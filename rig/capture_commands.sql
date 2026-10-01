@@ -58,6 +58,9 @@ create index if not exists capture_commands_lot_idx
 -- mid-capture, the row would otherwise sit claimed forever and the operator
 -- would wait for a photo that is never coming. Anything held longer than
 -- the timeout is assumed abandoned and offered again.
+--
+-- Superseded by rig/expire_stale_commands.sql, which adds expiry. Re-running
+-- this file would quietly remove it again -- run that one after this.
 create or replace function claim_capture_command(stale_after interval default '2 minutes')
 returns capture_commands
 language plpgsql
