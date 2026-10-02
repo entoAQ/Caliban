@@ -150,6 +150,27 @@ person at the bench could not already do by typing their password, it just
 removes a prompt from a timer that has nobody to answer it. It also stops
 `calibrate.sh` asking for a password halfway through.
 
+Then the network watchdog, so a Wi-Fi drop does not need someone on site:
+
+```bash
+sudo install -m 755 ~/caliban/rig/netwatch.sh /usr/local/sbin/caliban-netwatch
+sudo cp ~/caliban/rig/caliban-rig-netwatch.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now caliban-rig-netwatch.timer
+journalctl -u caliban-rig-netwatch -f     # silent while online
+```
+
+Every minute it checks whether Caliban (or failing that, the internet)
+answers. Offline for 5 minutes, it cycles the Wi-Fi radio once; offline for
+15, it reboots, at most once an hour. Added after 2026-09-30, when the Pi
+stayed off the network for over an hour after the plant Wi-Fi came back and
+only a reboot on site fixed it.
+
+It runs as root, so it is an installed **copy**, not the checkout: the
+auto-updater does not reach it, and after changing `netwatch.sh` you rerun
+the `install` line above by hand. To keep it from rebooting a rig that is
+offline on purpose, `touch ~/.caliban-netwatch-off`.
+
 `~/rig_settings.json` and `~/captures/` deliberately stay outside the checkout.
 The calibration is this rig's measurement of this bench — it belongs to the
 machine, not to the branch, and it must survive every pull untouched.

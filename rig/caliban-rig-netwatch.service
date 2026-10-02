@@ -1,0 +1,13 @@
+[Unit]
+Description=Recover the bench rig's network connection (Wi-Fi cycle, then reboot)
+
+[Service]
+Type=oneshot
+
+# Root, unlike the poller and the updater: cycling the radio and rebooting
+# both need it. Which is also why ExecStart is an installed copy rather than
+# the checkout -- see the header of rig/netwatch.sh.
+ExecStart=/usr/local/sbin/caliban-netwatch
+
+StandardOutput=journal
+StandardError=journal
