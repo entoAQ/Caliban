@@ -1,0 +1,25 @@
+[Unit]
+Description=Caliban inline rig -- destoner screen (localhost:8090)
+# No network dependency: the screen is served to this Pi's own display and
+# must come up, and say so, when the plant network is down.
+
+[Service]
+Type=simple
+User=ttownshend
+WorkingDirectory=/home/ttownshend/caliban/rig/inline
+ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/screen.py
+
+# Until the inline capture loop exists, run the demo instead by overriding:
+#     sudo systemctl edit caliban-inline-screen
+#     [Service]
+#     ExecStart=
+#     ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/screen.py --demo
+
+Restart=always
+RestartSec=3
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

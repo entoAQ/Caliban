@@ -68,3 +68,13 @@ if systemctl list-unit-files caliban-rig.service >/dev/null 2>&1; then
     echo
     systemctl --no-pager --lines=0 status caliban-rig
 fi
+
+# The inline rig's destoner screen (inline/). screen.html is re-read on every
+# request and the open page reloads itself when it changes, so this restart is
+# only for screen.py -- but restarting costs the display a few seconds of
+# "Écran en redémarrage", which is cheaper than reasoning about which file moved.
+if systemctl list-unit-files caliban-inline-screen.service >/dev/null 2>&1; then
+    sudo systemctl restart caliban-inline-screen
+    echo
+    systemctl --no-pager --lines=0 status caliban-inline-screen
+fi

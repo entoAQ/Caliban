@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Destoner</title>
+<!--
+  The destoner screen: Raspberry Pi Touch Display 2, portrait, 720x1280, no
+  keyboard. Served by screen.py from localhost; see its docstring for why.
+
+  Instruction wording and colours follow the tray operator screen
+  (sgsc-app/operator-capture.js, OP_INSTRUCTIONS) so an operator who moves
+  between the two never has to re-learn what a colour means.
+
+  Everything here is a pure function of /state, polled every two seconds.
+  Nothing is kept in the browser that the next poll would not restore, so a
+  crashed or reloaded page loses nothing.
+-->
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --text: #f8fafc; --muted: #94a3b8;
+    --ok: #10b981; --warn: #f59e0b; --bad: #ef4444; --line: #334155;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+    touch-action: manipulation; overflow: hidden; }
+  body { display: flex; flex-direction: column; padding: 16px; gap: 14px; }
+
+  header { display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 22px; margin: 0; flex: 1; font-weight: 700; }
+  #clock { font-size: 22px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chip { font-size: 15px; font-weight: 700; padding: 6px 12px; border-radius: 999px;
+    background: var(--panel); border: 2px solid var(--ok); }
+  .chip.low { border-color: var(--warn); color: var(--warn); }
+  .chip.bad { border-color: var(--bad); color: var(--bad); }
+  #health-msg { font-size: 18px; font-weight: 700; color: var(--warn); min-height: 0; }
+  #health-msg:empty { display: none; }
+
+  #card { border-radius: 18px; border: 4px solid; padding: 24px 22px; text-align: center; }
+  #title { font-size: 64px; font-weight: 900; line-height: 1.05; letter-spacing: .01em; }
+  #sub { font-size: 24px; font-weight: 600; margin-top: 10px; }
+  #steps { text-align: left; font-size: 22px; font-weight: 600; line-height: 1.45;
+    margin: 14px 0 0; padding-left: 30px; }
+  #reading { display: flex; justify-content: center; gap: 18px; margin-top: 18px;
+    font-size: 20px; font-weight: 600; opacity: .85; }
+  #band { font-size: 26px; font-weight: 800; }
+
+  #alert { background: var(--bad); color: #fff; border-radius: 14px; padding: 18px;
+    text-align: center; font-size: 28px; font-weight: 900; }
+  #alert small { display: block; font-size: 18px; font-weight: 600; margin-top: 4px; }
+
+  #target { background: var(--panel); border-radius: 14px; padding: 16px 20px; }
+  #target .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 22px; }
+  #target .big { font-size: 40px; font-weight: 900; font-variant-numeric: tabular-nums; }
+  #gauge { position: relative; height: 18px; border-radius: 9px; background: var(--line); margin-top: 12px; }
+  #gauge-band { position: absolute; top: 0; bottom: 0; background: rgba(16,185,129,.45); border-radius: 9px; }
+  #gauge-needle { position: absolute; top: -5px; bottom: -5px; width: 6px; margin-left: -3px;
+    background: #fff; border-radius: 3px; transition: left .4s; }
+  #target-status { font-size: 18px; font-weight: 700; margin-top: 10px; color: var(--muted); }
+
+  #actions { display: flex; flex-direction: column; gap: 12px; }
+  #actions button { font: inherit; font-size: 28px; font-weight: 800; padding: 26px 16px;
+    border-radius: 16px; border: none; background: #e2e8f0; color: #0f172a; }
+  #actions button.primary { background: var(--ok); color: #fff; }
+  #actions button:disabled { background: var(--panel); color: var(--muted); }
+  #actions button:active:not(:disabled) { transform: scale(.98); }
+  #done { background: var(--panel); border-left: 8px solid var(--ok); border-radius: 12px;
+    padding: 16px 20px; font-size: 24px; font-weight: 800; }
+  #done small { display: block; font-size: 17px; font-weight: 600; color: var(--muted); margin-top: 4px; }
+  #ack-error { color: var(--bad); font-size: 18px; font-weight: 700; text-align: center; }
+  #ack-error:empty { display: none; }
+
+  #trend-box { background: var(--panel); border-radius: 14px; padding: 12px 14px;
+    flex: 1; min-height: 180px; display: flex; flex-direction: column; }
+  #trend-box h2, #bottom h2 { font-size: 16px; margin: 0 0 6px; color: var(--muted); font-weight: 700;
+    text-transform: uppercase; letter-spacing: .06em; }
+  #trend { width: 100%; flex: 1; min-height: 140px; display: block; }
+
+  #bottom { display: flex; gap: 14px; align-items: stretch; }
+  #photo-box { flex: 0 0 46%; background: var(--panel); border-radius: 14px; padding: 10px;
+    display: flex; flex-direction: column; }
+  #photo { width: 100%; flex: 1; object-fit: cover; border-radius: 8px; background: #000; min-height: 120px; }
+  #photo-none { flex: 1; display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 16px; min-height: 120px; }
+  #next-box { flex: 1; background: var(--panel); border-radius: 14px; padding: 14px;
+    display: flex; flex-direction: column; justify-content: center; }
+  #next { font-size: 44px; font-weight: 900; font-variant-numeric: tabular-nums; }
+  #last { font-size: 18px; color: var(--muted); margin-top: 6px; }
+
+  #overlay { position: fixed; inset: 0; background: rgba(15,23,42,.94); display: flex;
+    flex-direction: column; align-items: center; justify-content: center; text-align: center;
+    padding: 40px; gap: 16px; z-index: 10; }
+  #overlay b { font-size: 40px; }
+  #overlay span { font-size: 22px; color: var(--muted); }
+  #demo-tag { position: fixed; right: 10px; bottom: 6px; font-size: 13px; color: var(--warn); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Destoner</h1>
+    <div id="clock">--:--</div>
+  </header>
+  <div class="chips">
+    <span class="chip" id="chip-camera">Caméra</span>
+    <span class="chip" id="chip-flash">Flash</span>
+    <span class="chip" id="chip-network">Réseau</span>
+  </div>
+  <div id="health-msg"></div>
+
+  <div id="card">
+    <div id="title">—</div>
+    <div id="sub"></div>
+    <ol id="steps" hidden></ol>
+    <div id="reading"><span>Lecture <span id="band">—</span></span><span id="age"></span></div>
+  </div>
+
+  <div id="alert" hidden></div>
+
+  <div id="target" hidden>
+    <div class="row"><span>Cible</span><span class="big" id="target-value">—</span></div>
+    <div class="row"><span>Actuel</span><span class="big" id="pressure-value">—</span></div>
+    <div id="gauge"><div id="gauge-band"></div><div id="gauge-needle"></div></div>
+    <div id="target-status"></div>
+  </div>
+
+  <div id="actions"></div>
+  <div id="done" hidden></div>
+  <div id="ack-error"></div>
+
+  <div id="trend-box">
+    <h2>Dernières lectures</h2>
+    <svg id="trend"></svg>
+  </div>
+
+  <div id="bottom">
+    <div id="photo-box">
+      <h2>Dernière photo</h2>
+      <img id="photo" alt="" hidden>
+      <div id="photo-none">Aucune photo</div>
+    </div>
+    <div id="next-box">
+      <h2>Prochaine lecture</h2>
+      <div id="next">—</div>
+      <div id="last"></div>
+    </div>
+  </div>
+
+  <div id="overlay" hidden><b id="overlay-title"></b><span id="overlay-text"></span></div>
+  <div id="demo-tag" hidden>DÉMO</div>
+
+<script>
+// Same keys and colours as OP_INSTRUCTIONS in sgsc-app/operator-capture.js.
+const INSTRUCTIONS = {
+  increase_minor:  { title: 'AUGMENTER', sev: 'léger',  bg: '#fef3c7', border: '#f59e0b', fg: '#78350f' },
+  increase_medium: { title: 'AUGMENTER', sev: 'modéré', bg: '#fde68a', border: '#d97706', fg: '#78350f' },
+  increase_major:  { title: 'AUGMENTER', sev: 'majeur', bg: '#fecaca', border: '#dc2626', fg: '#7f1d1d' },
+  increase:        { title: 'AUGMENTER', sev: '',       bg: '#fef3c7', border: '#f59e0b', fg: '#78350f' },
+  hold:            { title: 'AUCUN CHANGEMENT', sev: '', bg: '#ecfdf5', border: '#10b981', fg: '#064e3b' },
+  decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a' },
+};
+const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748b', fg: '#f8fafc' };
+
+// A reading older than this no longer describes the product going past, so its
+// instruction is withdrawn rather than left on screen looking current.
+const STALE_MIN = 15;
+// A pressure value older than this is not live; the target cannot be verified on it.
+const PRESSURE_FRESH_S = 30;
+const POLL_MS = 2000;
+const ACK_LABELS = {
+  adjusted: 'Réglage fait',
+  clean_rejects: 'Rejets propres — aucun réglage',
+  confirmed: 'Pression réglée — confirmé',
+};
+
+let version = null;
+let failures = 0;
+let state = null;
+let ackError = '';
+let sending = false;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const num = (v, d = 1) => Number(v).toFixed(d).replace('.', ',');
+const hhmm = iso => new Date(iso).toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' });
+const minsAgo = iso => (Date.now() - new Date(iso).getTime()) / 60000;
+function agoText(iso) {
+  const m = Math.floor(minsAgo(iso));
+  return m < 1 ? "à l'instant" : `il y a ${m} min`;
+}
+const isIncrease = i => typeof i === 'string' && i.startsWith('increase');
+
+// The local page has no business being dragged, zoomed or long-pressed.
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('gesturestart', e => e.preventDefault());
+
+async function poll() {
+  try {
+    const r = await fetch('/state', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const s = await r.json();
+    failures = 0;
+    // screen.py serves a new screen.html after an update; pick it up.
+    if (version && s.server && s.server.version !== version) { location.reload(); return; }
+    version = s.server && s.server.version;
+    state = s;
+    render();
+  } catch (e) {
+    failures++;
+    if (failures >= 3) overlay('Écran en redémarrage', 'Le service local ne répond pas. Il redémarre seul — patientez.');
+  }
+}
+
+function overlay(title, text) {
+  $('overlay').hidden = !title;
+  $('overlay-title').textContent = title || '';
+  $('overlay-text').textContent = text || '';
+}
+
+function chip(id, label, status) {
+  const el = $(id);
+  el.className = 'chip' + (status === 'low' ? ' low' : status && status !== 'ok' ? ' bad' : '');
+  el.textContent = label + (status === 'low' ? ' faible' : status && status !== 'ok' ? ' ✕' : ' ✓');
+}
+
+function render() {
+  const s = state || {};
+  $('demo-tag').hidden = !s.demo;
+  const h = s.health || {};
+  chip('chip-camera', 'Caméra', h.camera || 'ok');
+  chip('chip-flash', 'Flash', h.flash || 'ok');
+  chip('chip-network', 'Réseau', h.network || 'ok');
+  $('health-msg').textContent = s.state_error ? `État illisible : ${s.state_error}` : (h.message || '');
+
+  const r = s.reading;
+  if (!r || !r.at) {
+    overlay('En attente de la première lecture', "Le banc n'a encore rien photographié.");
+    return;
+  }
+  overlay(null);
+
+  const stale = minsAgo(r.at) > STALE_MIN;
+  const ins = stale ? STALE : (INSTRUCTIONS[r.instruction] || STALE);
+  const card = $('card');
+  card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
+  $('title').textContent = ins.title;
+  $('band').textContent = r.band ? `${String(r.band).replace(/\./g, ',')} %` : '—';
+  $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
+
+  let sub = '', steps = [];
+  if (stale) {
+    sub = `Dernière lecture ${agoText(r.at)} — ne pas régler le destoner sur cette base.`;
+  } else if (r.instruction === 'hold') {
+    sub = 'Garder le réglage actuel du destoner';
+  } else if (r.instruction === 'decrease') {
+    steps = ['Vérifier visuellement les rejets du destoner',
+             'Peu ou pas de larves dans les rejets : aucun réglage',
+             r.target ? `Sinon : régler à ${num(r.target.value)} ${esc(r.target.unit)}` : "Sinon : diminuer l'agressivité du destoner"];
+  } else if (isIncrease(r.instruction)) {
+    sub = (r.target
+      ? `Régler le destoner à ${num(r.target.value)} ${r.target.unit || ''}`
+      : "l'agressivité du destoner") + (ins.sev ? ` — ${ins.sev}` : '');
+  }
+  $('sub').textContent = sub;
+  $('sub').hidden = !sub;
+  $('steps').hidden = !steps.length;
+  $('steps').innerHTML = steps.map(t => `<li>${esc(t)}</li>`).join('');
+
+  // AQ is told by Caliban, not by this screen; this only says that it was.
+  const alert = !stale && r.alert;
+  $('alert').hidden = !alert;
+  if (alert) {
+    $('alert').innerHTML = "⚠ Aviser l'AQ immédiatement" + (r.alert_reason === 'streak'
+      ? `<small>${esc(r.alert_streak || 2)} AUGMENTER de suite — l'ajustement n'a pas suffi</small>` : '');
+  }
+
+  const actionable = !stale && (isIncrease(r.instruction) || r.instruction === 'decrease');
+  const verify = renderTarget(actionable ? r.target : null, s.pressure);
+  renderActions(actionable, r, s.ack, verify);
+  renderTrend(s.history || []);
+  renderBottom(s, r);
+}
+
+// Returns null when there is no target, otherwise whether the live pressure
+// currently satisfies it. With a target, the operator's confirmation only
+// unlocks once the sensor agrees -- the point is a setting that was verified,
+// not one that was said to have been made.
+function renderTarget(target, pressure) {
+  $('target').hidden = !target;
+  if (!target) return null;
+  const tol = target.tolerance ?? 0.2;
+  $('target-value').textContent = `${num(target.value)} ${target.unit || ''}`;
+  const fresh = pressure && pressure.value != null && pressure.at &&
+    (Date.now() - new Date(pressure.at).getTime()) / 1000 <= PRESSURE_FRESH_S;
+  $('pressure-value').textContent = fresh ? `${num(pressure.value)} ${pressure.unit || ''}` : '—';
+
+  // Gauge spans the target +/- four tolerances, clamped.
+  const lo = target.value - 4 * tol, hi = target.value + 4 * tol;
+  const pct = v => Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
+  $('gauge-band').style.left = pct(target.value - tol) + '%';
+  $('gauge-band').style.width = (pct(target.value + tol) - pct(target.value - tol)) + '%';
+  $('gauge-needle').hidden = !fresh;
+  if (fresh) $('gauge-needle').style.left = pct(pressure.value) + '%';
+
+  let ok = false, text;
+  if (!fresh) text = 'Capteur de pression : aucune valeur récente';
+  else if (Math.abs(pressure.value - target.value) <= tol) { ok = true; text = 'Pression dans la cible ✓'; }
+  else text = pressure.value < target.value ? 'Monter la pression' : 'Baisser la pression';
+  $('target-status').textContent = text;
+  $('target-status').style.color = ok ? 'var(--ok)' : 'var(--muted)';
+  return ok;
+}
+
+function renderActions(actionable, r, ack, verify) {
+  const box = $('actions');
+  $('ack-error').textContent = ackError;
+  if (!actionable) { box.innerHTML = ''; box.dataset.sig = ''; $('done').hidden = true; return; }
+  if (ack) {
+    box.innerHTML = '';
+    box.dataset.sig = '';
+    $('done').hidden = false;
+    $('done').innerHTML = `✓ ${esc(ACK_LABELS[ack.choice] || ack.choice)}<small>${hhmm(ack.at)}${
+      ack.pressure != null ? ` · ${num(ack.pressure)} ${esc(ack.pressure_unit || '')}` : ''}</small>`;
+    return;
+  }
+  $('done').hidden = true;
+
+  const buttons = [];
+  if (r.instruction === 'decrease') buttons.push({ choice: 'clean_rejects', label: ACK_LABELS.clean_rejects });
+  if (verify === null) {
+    buttons.push({ choice: 'adjusted', label: 'Réglage fait', primary: true });
+  } else {
+    buttons.push({ choice: 'confirmed', primary: true, disabled: !verify,
+                   label: verify ? 'Pression réglée — confirmer' : 'En attente de la pression cible…' });
+  }
+  // Rebuilt only when the set of buttons changes, so a button is never
+  // replaced under a finger that is pressing it.
+  const sig = r.id + '|' + buttons.map(b => b.choice + (b.disabled ? '0' : '1')).join(',');
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = buttons.map(b =>
+    `<button type="button" class="${b.primary ? 'primary' : ''}" ${b.disabled ? 'disabled' : ''}
+       data-choice="${b.choice}">${esc(b.label)}</button>`).join('');
+  box.querySelectorAll('button').forEach(btn =>
+    btn.addEventListener('click', () => sendAck(r.id, btn.dataset.choice)));
+}
+
+async function sendAck(readingId, choice) {
+  if (sending) return;
+  sending = true;
+  ackError = '';
+  try {
+    const r = await fetch('/ack', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reading_id: readingId, choice }) });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) ackError = body.error || `Échec de l'enregistrement (${r.status})`;
+  } catch (e) {
+    ackError = "Échec de l'enregistrement — réessayez";
+  } finally {
+    sending = false;
+    $('actions').dataset.sig = '';
+    poll();
+  }
+}
+
+// Recent readings against the two lines the instruction is decided on:
+// below 3 % the destoner comes down, from 8 % it goes up. Values, not bands,
+// so a drift towards a line shows before it crosses it.
+function renderTrend(history) {
+  const svg = $('trend');
+  // Drawn in the box's own pixels, so the dots stay round however tall the
+  // layout leaves it.
+  const W = Math.round(svg.clientWidth) || 680, H = Math.round(svg.clientHeight) || 150, TOP = 16;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const y = v => H - 6 - Math.min(v, TOP) / TOP * (H - 12);
+  let out = '';
+  for (const [v, label] of [[3, '3 %'], [8, '8 %']]) {
+    out += `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#475569" stroke-dasharray="6 6"/>`;
+    out += `<text x="${W - 4}" y="${y(v) - 5}" fill="#94a3b8" font-size="15" text-anchor="end">${label}</text>`;
+  }
+  const pts = history.filter(p => p.estimate_pct != null).slice(-36);
+  if (pts.length) {
+    const x = i => pts.length === 1 ? W / 2 : 12 + i * (W - 60) / (pts.length - 1);
+    out += `<polyline fill="none" stroke="#e2e8f0" stroke-width="3" points="${
+      pts.map((p, i) => `${x(i)},${y(p.estimate_pct)}`).join(' ')}"/>`;
+    pts.forEach((p, i) => {
+      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
+      out += `<circle cx="${x(i)}" cy="${y(p.estimate_pct)}" r="6" fill="${c}"/>`;
+    });
+  } else {
+    out += `<text x="${W / 2}" y="${H / 2}" fill="#94a3b8" font-size="18" text-anchor="middle">Aucun historique</text>`;
+  }
+  svg.innerHTML = out;
+}
+
+let photoFor = null;
+function renderBottom(s, r) {
+  const img = $('photo');
+  if (r.photo && photoFor !== r.id) {
+    photoFor = r.id;
+    img.src = '/photo?id=' + encodeURIComponent(r.id);
+  }
+  img.hidden = !r.photo;
+  $('photo-none').hidden = !!r.photo;
+  $('last').textContent = `Dernière : ${hhmm(r.at)}`;
+  tickNext();
+}
+
+function tickNext() {
+  const at = state && state.next_at;
+  if (!at) { $('next').textContent = '—'; return; }
+  const s = Math.round((new Date(at).getTime() - Date.now()) / 1000);
+  $('next').textContent = s <= 0 ? 'en cours…' : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+setInterval(() => {
+  $('clock').textContent = new Date().toLocaleTimeString('fr-CA', { hour: '2-digit', minute: '2-digit' });
+  tickNext();
+}, 1000);
+setInterval(poll, POLL_MS);
+poll();
+</script>
+</body>
+</html>
