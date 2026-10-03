@@ -25,15 +25,16 @@ account to log into, nothing to log out of, and it still says something useful
 when the network is down. `screen.py`'s docstring has the full reasoning.
 
 It shows the current instruction (same wording and colours as the tray
-operator screen), the pressure target and the live value once there is a
-sensor, recent readings against the 3 % and 8 % lines, the last photo, and the
-health of camera, flash and network. A reading older than 15 minutes has its
-instruction withdrawn.
+operator screen), recent readings against the 3 % and 8 % lines, the last
+photo, and the health of camera, flash and network. A reading older than 15
+minutes has its instruction withdrawn.
 
-AUGMENTER and DIMINUER ask the operator to confirm. With a pressure target, the
-confirm button only unlocks once the sensor reads within tolerance: the
-confirmation records a setting that was verified, with the value at that
-moment.
+AUGMENTER and DIMINUER ask the operator to confirm. When the instruction names
+a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
+destoner's own gauge and confirms; that value then stays in the "Réglage
+destoner" bar at the top until the next one, so anyone passing can check the
+gauge still agrees. The destoner has a physical gauge only -- nothing reads it
+automatically.
 
 ### Files
 
@@ -53,11 +54,10 @@ moment.
     "estimate_pct": 8.9,
     "instruction": "increase_minor",
     "alert": false,
-    "target": {"value": 4.2, "unit": "psi", "tolerance": 0.2},
+    "target": {"value": 4.2, "unit": "psi"},
     "photo": "/home/ttownshend/captures/IL-20261003-140500.jpg"
   },
   "history": [{"at": "...", "estimate_pct": 7.9, "instruction": "hold"}],
-  "pressure": {"value": 4.1, "unit": "psi", "at": "..."},
   "health": {"camera": "ok", "flash": "low", "network": "ok",
              "message": "Piles du flash faibles — changer les piles"},
   "next_at": "2026-10-03T18:10:00+00:00"
@@ -65,8 +65,10 @@ moment.
 ```
 
 `instruction` uses the tray screen's keys: `hold`, `decrease`, `increase`,
-`increase_minor`, `increase_medium`, `increase_major`. `target` and `pressure`
-are optional; without a target the confirm button is the plain "Réglage fait".
+`increase_minor`, `increase_medium`, `increase_major`. `target` is optional;
+without one the confirm button is the plain "Réglage fait". The setting bar
+is not part of this file: `screen.py` takes it from the last `set` line in
+`~/inline_acks.jsonl`, so it survives restarts.
 Health values are `ok`, `low` or anything else for a fault. Write the file
 atomically (write a temp file, then rename) so the screen never reads half of
 one.

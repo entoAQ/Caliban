@@ -52,14 +52,15 @@
     text-align: center; font-size: 28px; font-weight: 900; }
   #alert small { display: block; font-size: 18px; font-weight: 600; margin-top: 4px; }
 
-  #target { background: var(--panel); border-radius: 14px; padding: 16px 20px; }
-  #target .row { display: flex; justify-content: space-between; align-items: baseline; font-size: 22px; }
-  #target .big { font-size: 40px; font-weight: 900; font-variant-numeric: tabular-nums; }
-  #gauge { position: relative; height: 18px; border-radius: 9px; background: var(--line); margin-top: 12px; }
-  #gauge-band { position: absolute; top: 0; bottom: 0; background: rgba(16,185,129,.45); border-radius: 9px; }
-  #gauge-needle { position: absolute; top: -5px; bottom: -5px; width: 6px; margin-left: -3px;
-    background: #fff; border-radius: 3px; transition: left .4s; }
-  #target-status { font-size: 18px; font-weight: 700; margin-top: 10px; color: var(--muted); }
+  #setting { display: flex; align-items: baseline; gap: 12px; background: var(--panel);
+    border-radius: 12px; padding: 10px 16px; font-size: 18px; color: var(--muted); }
+  #setting b { font-size: 30px; color: var(--text); font-variant-numeric: tabular-nums; }
+  #setting.none b { font-size: 20px; color: var(--muted); }
+  #target { background: var(--panel); border: 3px solid #e2e8f0; border-radius: 14px; padding: 16px 20px;
+    text-align: center; }
+  #target .label { font-size: 22px; font-weight: 700; color: var(--muted); }
+  #target .big { font-size: 64px; font-weight: 900; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  #target .from { font-size: 20px; color: var(--muted); margin-top: 4px; }
 
   #actions { display: flex; flex-direction: column; gap: 12px; }
   #actions button { font: inherit; font-size: 28px; font-weight: 800; padding: 26px 16px;
@@ -110,6 +111,10 @@
     <span class="chip" id="chip-network">Réseau</span>
   </div>
   <div id="health-msg"></div>
+  <!-- The destoner's last confirmed setting, always shown: the gauge on the
+       machine should read this, and anyone passing can check that it does. -->
+  <div id="setting" class="none"><span>Réglage destoner</span><b id="setting-value">non enregistré</b>
+    <span id="setting-at"></span></div>
 
   <div id="card">
     <div id="title">—</div>
@@ -121,10 +126,9 @@
   <div id="alert" hidden></div>
 
   <div id="target" hidden>
-    <div class="row"><span>Cible</span><span class="big" id="target-value">—</span></div>
-    <div class="row"><span>Actuel</span><span class="big" id="pressure-value">—</span></div>
-    <div id="gauge"><div id="gauge-band"></div><div id="gauge-needle"></div></div>
-    <div id="target-status"></div>
+    <div class="label">Régler le destoner à</div>
+    <div class="big" id="target-value">—</div>
+    <div class="from" id="target-from"></div>
   </div>
 
   <div id="actions"></div>
@@ -167,14 +171,13 @@ const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748
 // A reading older than this no longer describes the product going past, so its
 // instruction is withdrawn rather than left on screen looking current.
 const STALE_MIN = 15;
-// A pressure value older than this is not live; the target cannot be verified on it.
-const PRESSURE_FRESH_S = 30;
 const POLL_MS = 2000;
 const ACK_LABELS = {
   adjusted: 'Réglage fait',
   clean_rejects: 'Rejets propres — aucun réglage',
-  confirmed: 'Pression réglée — confirmé',
+  set: 'Réglé',
 };
+const valueText = (v, unit) => `${num(v)}${unit ? ' ' + unit : ''}`;
 
 let version = null;
 let failures = 0;
@@ -234,6 +237,7 @@ function render() {
   chip('chip-flash', 'Flash', h.flash || 'ok');
   chip('chip-network', 'Réseau', h.network || 'ok');
   $('health-msg').textContent = s.state_error ? `État illisible : ${s.state_error}` : (h.message || '');
+  renderSetting(s.setting);
 
   const r = s.reading;
   if (!r || !r.at) {
@@ -258,11 +262,12 @@ function render() {
   } else if (r.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
              'Peu ou pas de larves dans les rejets : aucun réglage',
-             r.target ? `Sinon : régler à ${num(r.target.value)} ${esc(r.target.unit)}` : "Sinon : diminuer l'agressivité du destoner"];
+             r.target ? `Sinon : régler à la valeur ci-dessous` : "Sinon : diminuer l'agressivité du destoner"];
   } else if (isIncrease(r.instruction)) {
-    sub = (r.target
-      ? `Régler le destoner à ${num(r.target.value)} ${r.target.unit || ''}`
-      : "l'agressivité du destoner") + (ins.sev ? ` — ${ins.sev}` : '');
+    // With a value to set, the value box below says what to do; the card
+    // keeps only how far out the reading is.
+    sub = r.target ? (ins.sev ? `Écart ${ins.sev}` : '')
+                   : "l'agressivité du destoner" + (ins.sev ? ` — ${ins.sev}` : '');
   }
   $('sub').textContent = sub;
   $('sub').hidden = !sub;
@@ -278,43 +283,32 @@ function render() {
   }
 
   const actionable = !stale && (isIncrease(r.instruction) || r.instruction === 'decrease');
-  const verify = renderTarget(actionable ? r.target : null, s.pressure);
-  renderActions(actionable, r, s.ack, verify);
+  // Once confirmed, the value lives in the setting bar at the top; the box
+  // asking for it would only repeat it.
+  renderTarget(actionable && !s.ack ? r.target : null, s.setting);
+  renderActions(actionable, r, s.ack);
   renderTrend(s.history || []);
   renderBottom(s, r);
 }
 
-// Returns null when there is no target, otherwise whether the live pressure
-// currently satisfies it. With a target, the operator's confirmation only
-// unlocks once the sensor agrees -- the point is a setting that was verified,
-// not one that was said to have been made.
-function renderTarget(target, pressure) {
-  $('target').hidden = !target;
-  if (!target) return null;
-  const tol = target.tolerance ?? 0.2;
-  $('target-value').textContent = `${num(target.value)} ${target.unit || ''}`;
-  const fresh = pressure && pressure.value != null && pressure.at &&
-    (Date.now() - new Date(pressure.at).getTime()) / 1000 <= PRESSURE_FRESH_S;
-  $('pressure-value').textContent = fresh ? `${num(pressure.value)} ${pressure.unit || ''}` : '—';
-
-  // Gauge spans the target +/- four tolerances, clamped.
-  const lo = target.value - 4 * tol, hi = target.value + 4 * tol;
-  const pct = v => Math.max(0, Math.min(100, (v - lo) / (hi - lo) * 100));
-  $('gauge-band').style.left = pct(target.value - tol) + '%';
-  $('gauge-band').style.width = (pct(target.value + tol) - pct(target.value - tol)) + '%';
-  $('gauge-needle').hidden = !fresh;
-  if (fresh) $('gauge-needle').style.left = pct(pressure.value) + '%';
-
-  let ok = false, text;
-  if (!fresh) text = 'Capteur de pression : aucune valeur récente';
-  else if (Math.abs(pressure.value - target.value) <= tol) { ok = true; text = 'Pression dans la cible ✓'; }
-  else text = pressure.value < target.value ? 'Monter la pression' : 'Baisser la pression';
-  $('target-status').textContent = text;
-  $('target-status').style.color = ok ? 'var(--ok)' : 'var(--muted)';
-  return ok;
+function renderSetting(setting) {
+  $('setting').className = setting ? '' : 'none';
+  $('setting-value').textContent = setting ? valueText(setting.setting, setting.unit) : 'non enregistré';
+  $('setting-at').textContent = setting ? `confirmé à ${hhmm(setting.at)}` : '';
 }
 
-function renderActions(actionable, r, ack, verify) {
+// The value to set, beside the one it replaces so the direction of the change
+// is obvious at a glance. The destoner has a physical gauge and nothing reads
+// it automatically, so the operator sets it by eye and confirms; that number
+// then becomes the setting shown at the top until the next one.
+function renderTarget(target, setting) {
+  $('target').hidden = !target;
+  if (!target) return;
+  $('target-value').textContent = valueText(target.value, target.unit);
+  $('target-from').textContent = setting ? `Réglage actuel : ${valueText(setting.setting, setting.unit)}` : '';
+}
+
+function renderActions(actionable, r, ack) {
   const box = $('actions');
   $('ack-error').textContent = ackError;
   if (!actionable) { box.innerHTML = ''; box.dataset.sig = ''; $('done').hidden = true; return; }
@@ -322,19 +316,19 @@ function renderActions(actionable, r, ack, verify) {
     box.innerHTML = '';
     box.dataset.sig = '';
     $('done').hidden = false;
-    $('done').innerHTML = `✓ ${esc(ACK_LABELS[ack.choice] || ack.choice)}<small>${hhmm(ack.at)}${
-      ack.pressure != null ? ` · ${num(ack.pressure)} ${esc(ack.pressure_unit || '')}` : ''}</small>`;
+    const what = ack.choice === 'set' ? `Réglé à ${valueText(ack.setting, ack.unit)}` : (ACK_LABELS[ack.choice] || ack.choice);
+    $('done').innerHTML = `✓ ${esc(what)}<small>${hhmm(ack.at)}</small>`;
     return;
   }
   $('done').hidden = true;
 
   const buttons = [];
   if (r.instruction === 'decrease') buttons.push({ choice: 'clean_rejects', label: ACK_LABELS.clean_rejects });
-  if (verify === null) {
-    buttons.push({ choice: 'adjusted', label: 'Réglage fait', primary: true });
+  if (r.target) {
+    buttons.push({ choice: 'set', primary: true,
+                   label: `Réglé à ${valueText(r.target.value, r.target.unit)} — confirmer` });
   } else {
-    buttons.push({ choice: 'confirmed', primary: true, disabled: !verify,
-                   label: verify ? 'Pression réglée — confirmer' : 'En attente de la pression cible…' });
+    buttons.push({ choice: 'adjusted', label: 'Réglage fait', primary: true });
   }
   // Rebuilt only when the set of buttons changes, so a button is never
   // replaced under a finger that is pressing it.

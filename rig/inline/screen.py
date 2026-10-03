@@ -17,8 +17,8 @@ The contract with the rest of the rig is two files in the home directory:
 
     ~/inline_state.json   written by the capture loop, read here. What the
                           screen shows: the latest reading and its instruction,
-                          recent history, the pressure target and live value
-                          when there is one, and the health of each part.
+                          the destoner setting to make when there is one,
+                          recent history, and the health of each part.
     ~/inline_acks.jsonl   appended here, one line per confirmation. The capture
                           loop forwards these to Caliban, so a confirmation is a
                           record against the reading it answers, not just a
@@ -57,9 +57,13 @@ PAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screen.htm
 
 # What an operator can answer. 'adjusted' and 'clean_rejects' are the two
 # outcomes the tray operator screen already offers after DIMINUER; 'adjusted'
-# also answers AUGMENTER. 'confirmed' is for a target the pressure sensor has
-# verified -- the operator acknowledges, the sensor vouches for the value.
-ACK_CHOICES = ("adjusted", "clean_rejects", "confirmed")
+# also answers AUGMENTER. 'set' answers an instruction that names a value
+# ("Régler à 4,2"): the operator sets the destoner by its own gauge and says
+# so, and that value becomes the setting the screen shows until the next one.
+# The destoner has a physical gauge, not a sensor, so this is the record of
+# what it was set to -- shown permanently so anyone passing can check the
+# gauge still agrees.
+ACK_CHOICES = ("adjusted", "clean_rejects", "set")
 
 ack_lock = threading.Lock()
 
@@ -96,19 +100,31 @@ def read_state():
 
 
 def read_acks():
-    """reading_id -> the most recent ack for it."""
-    acks = {}
+    """Every ack in file order. The file grows by one line per confirmation --
+    a few hundred a week -- so reading it whole each poll is cheap."""
+    acks = []
     try:
         with open(ACK_FILE) as f:
             for line in f:
                 try:
                     a = json.loads(line)
-                    acks[a["reading_id"]] = a
-                except (ValueError, KeyError):
+                    if a.get("reading_id"):
+                        acks.append(a)
+                except ValueError:
                     continue
     except FileNotFoundError:
         pass
     return acks
+
+
+def summarise_acks(acks):
+    """(reading_id -> latest ack, latest setting ack or None)."""
+    by_reading, setting = {}, None
+    for a in acks:
+        by_reading[a["reading_id"]] = a
+        if a.get("setting") is not None:
+            setting = a
+    return by_reading, setting
 
 
 def append_ack(ack):
@@ -124,7 +140,7 @@ def append_ack(ack):
 # and forgotten on restart; nothing is written.
 
 DEMO_SECONDS = 15
-demo_acks = {}
+demo_acks = []
 
 
 def _ago(minutes):
@@ -144,8 +160,10 @@ def demo_state():
         ("hold", dict(band="3-8", estimate_pct=4.6, instruction="hold")),
         ("increase", dict(band="8-10", estimate_pct=8.9, instruction="increase_minor")),
         ("increase_target", dict(band="10-13", estimate_pct=11.2, instruction="increase_medium",
-                                 target={"value": 4.2, "unit": "psi", "tolerance": 0.2})),
+                                 target={"value": 4.2, "unit": "psi"})),
         ("decrease", dict(band="<3", estimate_pct=1.8, instruction="decrease")),
+        ("decrease_target", dict(band="<3", estimate_pct=1.6, instruction="decrease",
+                                 target={"value": 3.6, "unit": "psi"})),
         ("alert", dict(band=">13", estimate_pct=14.5, instruction="increase_major",
                        alert=True, alert_reason="streak", alert_streak=2)),
         ("stale", None),
@@ -155,7 +173,6 @@ def demo_state():
     name, reading = scenes[tick % len(scenes)]
     health = {"camera": "ok", "flash": "ok", "network": "ok"}
     history = _history([3.2, 4.1, 5.0, 6.4, 7.2, 7.9, 8.6, 9.1, 6.0, 4.8, 3.9, 4.6])
-    pressure = None
 
     if name == "stale":
         reading = dict(band="3-8", estimate_pct=5.0, instruction="hold")
@@ -167,18 +184,12 @@ def demo_state():
     if name == "flash_low":
         health["flash"] = "low"
         health["message"] = "Piles du flash faibles — changer les piles"
-    if reading.get("target"):
-        # A live value creeping up to the target, so the button can be seen
-        # going from waiting to ready within one scene.
-        phase = (time.time() % DEMO_SECONDS) / DEMO_SECONDS
-        pressure = {"value": round(3.5 + 0.8 * min(1.0, phase * 1.6), 2), "unit": "psi", "at": now_iso()}
 
     reading["id"] = f"DEMO-{tick}-{name}"
     return {
         "reading": reading,
         "history": history,
         "health": health,
-        "pressure": pressure,
         "next_at": (datetime.now(timezone.utc) + timedelta(seconds=DEMO_SECONDS - time.time() % DEMO_SECONDS)).isoformat(timespec="seconds"),
         "updated_at": now_iso(),
         "demo": True,
@@ -213,8 +224,9 @@ class Handler(server.BaseHTTPRequestHandler):
         elif path == "/state":
             state = demo_state() if self.demo else read_state()
             reading = state.get("reading") or {}
-            acks = demo_acks if self.demo else read_acks()
-            state["ack"] = acks.get(reading.get("id")) if reading.get("id") else None
+            by_reading, setting = summarise_acks(demo_acks if self.demo else read_acks())
+            state["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
+            state["setting"] = setting
             state["server"] = {"version": page_version(), "now": now_iso()}
             self._json(200, state)
         elif path == "/photo":
@@ -258,15 +270,17 @@ class Handler(server.BaseHTTPRequestHandler):
             return self._json(409, {"error": "Lecture remplacée — vérifiez l'écran."})
 
         ack = {"reading_id": reading_id, "choice": choice, "at": now_iso()}
-        # What the sensor read at the moment of confirmation, when there is
-        # one. This is the setting the next reading should be judged against.
-        pressure = state.get("pressure")
-        if pressure and pressure.get("value") is not None:
-            ack["pressure"] = pressure.get("value")
-            ack["pressure_unit"] = pressure.get("unit")
+        if choice == "set":
+            # The value comes from the instruction on screen, never from the
+            # request: the operator confirms the number they were shown.
+            target = (state.get("reading") or {}).get("target") or {}
+            if target.get("value") is None:
+                return self._json(409, {"error": "Aucune valeur à régler pour cette lecture."})
+            ack["setting"] = target["value"]
+            ack["unit"] = target.get("unit") or ""
 
         if self.demo:
-            demo_acks[reading_id] = ack
+            demo_acks.append(ack)
         else:
             append_ack(ack)
         log(f"ack {choice} for {reading_id}")
