@@ -55,6 +55,12 @@ POWER_AUTOMATE_API_KEY = os.environ.get("POWER_AUTOMATE_API_KEY")
 # Power Automate integration, which is exactly the coupling you do not want
 # during an incident.
 RIG_API_KEY = os.environ.get("RIG_API_KEY")
+# The inline rig's key (rig/inline). Separate from RIG_API_KEY on purpose: the
+# tray rig's key can claim and complete capture commands and nothing else,
+# while the inline rig must be able to request an analysis -- which spends
+# Azure calls. Each device gets exactly the reach it needs. Unset = the
+# /inline endpoints refuse everything.
+INLINE_API_KEY = os.environ.get("INLINE_API_KEY")
 
 app = FastAPI(title="Contamination Screening Inference API")
 
@@ -168,6 +174,13 @@ def verify_rig_key(x_api_key: str = Header(None)):
     lot, or reach any of the operator-facing endpoints. A camera should be
     able to act as a camera."""
     if not RIG_API_KEY or x_api_key != RIG_API_KEY:
+        raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
+    return True
+
+
+def verify_inline_key(x_api_key: str = Header(None)):
+    """Auth for the inline rig. See INLINE_API_KEY for why it is not RIG_API_KEY."""
+    if not INLINE_API_KEY or x_api_key != INLINE_API_KEY:
         raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
     return True
 
@@ -2200,7 +2213,7 @@ def current_cycle_start():
     return (now - datetime.timedelta(hours=24)).isoformat(), None
 
 
-def increase_streak_alert(settings):
+def increase_streak_alert(settings, source="operator"):
     """Whether this AUGMENTER completes a run of alert_consecutive_increase.
 
     Called only for a capture that has just been decided AUGMENTER, before its
@@ -2230,7 +2243,7 @@ def increase_streak_alert(settings):
         rows = (
             supabase.table("vision_band_estimates")
             .select("operator_instruction, estimate_pct")
-            .eq("source", "operator")
+            .eq("source", source)
             .not_.is_("operator_instruction", "null")
             .gte("created_at", cycle_start)
             .order("created_at", desc=True)
@@ -2247,7 +2260,7 @@ def increase_streak_alert(settings):
     return alert, (list(reversed(rows[: n - 1])) if new else None)
 
 
-def _apply_streak(instruction, alert, settings):
+def _apply_streak(instruction, alert, settings, source="operator"):
     """(alert, reason, prior) after the consecutive-AUGMENTER rule. reason is
     'threshold' when the single-sample alert fired, 'streak' when the run did,
     None otherwise. prior is not None when this capture completes a new run and
@@ -2259,7 +2272,9 @@ def _apply_streak(instruction, alert, settings):
     and that is exactly the case AQ most needs to hear about."""
     streak, prior = False, None
     if (instruction or "").startswith("increase"):
-        streak, prior = increase_streak_alert(settings)
+        # Counted per source: the inline rig samples every few minutes and the
+        # tray every half hour, so one run mixing the two would mean nothing.
+        streak, prior = increase_streak_alert(settings, source)
     if alert:
         return True, "threshold", prior
     if streak:
@@ -2274,7 +2289,7 @@ def _apply_streak(instruction, alert, settings):
 TEAMS_ALERT_WEBHOOK_URL = os.environ.get("TEAMS_ALERT_WEBHOOK_URL")
 
 
-def increase_streak_card(n, series, cycle_date):
+def increase_streak_card(n, series, cycle_date, source="operator"):
     """The Teams adaptive card for a new run of n AUGMENTER. series is the
     run's rows oldest first, the capture that completed it last. Pure -- no
     I/O -- so every message it can produce can be reviewed without posting one.
@@ -2301,7 +2316,14 @@ def increase_streak_card(n, series, cycle_date):
     # so whatever lot_number the capture carries is not one AQ can act on.
     # n = 1 alerts on the first AUGMENTER of a run: there is no check sample
     # and no failed adjustment yet, so the n >= 2 wording would be false.
-    if n == 1:
+    if source == "inline":
+        # The inline rig reads on its own every few minutes, so there is no
+        # operator's check sample to speak of -- just consecutive readings.
+        title = f"⚠ Destoner (banc en ligne) : {n} AUGMENTER consécutifs" if n > 1 else "⚠ Destoner (banc en ligne) : AUGMENTER"
+        body = (f"Le banc en ligne lit AUGMENTER {n} fois de suite — si un réglage a été fait, il ne suffit pas. "
+                "Le destoner est peut-être à sa limite, ou quelque chose a changé en amont."
+                if n > 1 else "Le banc en ligne demande AUGMENTER l'agressivité du destoner.")
+    elif n == 1:
         title = "⚠ Destoner : AUGMENTER"
         body = ("L'échantillon demande AUGMENTER l'agressivité du destoner. "
                 "(Alerte réglée sur « 1 AUGMENTER consécutif » : un message au début de chaque série.)")
@@ -2328,7 +2350,7 @@ def increase_streak_card(n, series, cycle_date):
     }
 
 
-def notify_increase_streak(n, series):
+def notify_increase_streak(n, series, source="operator"):
     """Tell AQ on Teams that the destoner adjustment is not working.
 
     Fire-and-forget on a thread: the operator is waiting on this response and
@@ -2338,7 +2360,7 @@ def notify_increase_streak(n, series):
     if not TEAMS_ALERT_WEBHOOK_URL:
         return
     _, cycle_date = current_cycle_start()
-    card = increase_streak_card(n, series, cycle_date)
+    card = increase_streak_card(n, series, cycle_date, source)
 
     def send():
         import urllib.request
@@ -2588,100 +2610,25 @@ def get_reference_images(category="meo_density"):
     return _reference_cache.get(category, [])
 
 
-@app.post("/azure-band-test")
-async def azure_band_test(
-    file: UploadFile = File(None),
-    lot_number: str = Form(""),
-    real_pct: str = Form(""),
-    is_training: bool = Form(False),
-    variants: str = Form(""),
-    repeats: int = Form(1),
-    command_id: str = Form(""),
-    # False for a re-score: analyse and return, record nothing. The caller files
-    # the result elsewhere (vision_rescores), so the same photo never appears
-    # twice in the estimate corpus.
-    record: bool = Form(True),
-    # A label from VISION_MODELS, for re-scores only. Empty is the default model.
-    model: str = Form(""),
-    operator: dict = Depends(require_capture_role()),
-):
-    # An operator gets no say in how the analysis runs. Whatever the browser
-    # sent for variants, repeats, training or a real value is replaced by what
-    # AQ configured, and the photo must be a rig capture they took themselves --
-    # an operator cannot upload an arbitrary file and have it recorded.
-    is_operator = operator.get("role") == "operator"
-    settings = operator_settings() if is_operator else None
-    pair = None
-    if is_operator:
-        if not command_id:
-            raise HTTPException(status_code=403, detail="Un opérateur ne peut analyser qu'une capture du banc.")
-        pair = operator_prompt_pair(settings)
-        # High first: escalation adds rotations to the first prompt only, and
-        # the extra rotations belong to the AUGMENTER decision.
-        variants = ",".join(pair) if pair else settings["variant"]
-        repeats = settings["repeats"]
-        is_training = False
-        real_pct = ""
-        record = True
+async def analyse_band_photo(contents, media_type, requested_variants, repeats, model_entry,
+                             escalate_settings=None, refuse_unusable_as=None):
+    """Run the band prompts over one photo. Returns (results, escalated,
+    photo_mean, photo_std), one aggregated result per requested variant, in
+    order.
 
-    # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
-    # empty/omitted keeps the old single-call behavior (DEFAULT_PROMPT_VARIANT
-    # only), so existing callers see no change in behavior or cost unless
-    # they actively opt into a comparison.
-    requested_variants = [v.strip() for v in variants.split(",") if v.strip()] or [DEFAULT_PROMPT_VARIANT]
-    registry = prompt_registry()
-    unknown = [v for v in requested_variants if v not in registry]
-    if unknown:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Variante(s) de prompt inconnue(s) : {', '.join(unknown)}. "
-                   f"Disponibles : {', '.join(sorted(registry))}.",
-        )
+    Shared by /azure-band-test and /inline/readings so a tray capture and an
+    inline capture are judged by literally the same code: the same rotations,
+    the same escalation, the same downscale. Two copies would drift, and the
+    drift would show up as the two rigs disagreeing for reasons that have
+    nothing to do with the product.
 
-    # Another model may only re-score. A real estimate is always the default
-    # model's, so the estimate corpus stays one model's work and every accuracy
-    # figure built on it keeps meaning what it says. Operators never choose.
-    model = (model or "").strip()
-    if is_operator or model in ("", "default"):
-        model_entry = DEFAULT_VISION_MODEL
-    else:
-        model_entry = vision_models().get(model)
-        if model_entry is None:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Modèle inconnu : {model}. Disponibles : "
-                       f"{', '.join(['default', *vision_models()])}.",
-            )
-        if record:
-            raise HTTPException(
-                status_code=400,
-                detail="Un autre modèle ne sert qu'à re-noter : envoyez record=false.",
-            )
-        if model_entry["provider"] == "anthropic" and any(prompt_uses_references(v) for v in requested_variants):
-            raise HTTPException(
-                status_code=400,
-                detail="Les variantes avec photos de référence ne sont pas prises en charge pour Claude.",
-            )
-
+    escalate_settings: operator-style settings to escalate with (extra
+    rotations when the first variant reads at or above increase_at), or None
+    for a fixed rotation count. refuse_unusable_as: a label for the log when a
+    black, blank or blown-out photo should be refused with a 422 before any
+    call is spent, or None to analyse whatever arrives (band-test uploads).
+    """
     client = get_azure_client()
-
-    # A rig capture arrives as a command id and is fetched here, so the browser
-    # never has to download a photo only to send it straight back. An upload
-    # from the band-test page still arrives as a file, exactly as before.
-    rig_image_path = None
-    source = "upload"
-    if command_id:
-        contents, lot_number, rig_image_path = _load_rig_capture(command_id, operator, is_operator)
-        media_type = "image/jpeg"
-        upload_name = rig_image_path
-        source = "operator" if is_operator else "rig"
-    elif file is not None:
-        contents = await file.read()
-        media_type = file.content_type or "image/jpeg"
-        upload_name = file.filename or ""
-    else:
-        raise HTTPException(status_code=400, detail="Aucune image fournie.")
-    b64_image = base64.b64encode(contents).decode("utf-8")
 
     # Repeats are ROTATIONS, not re-samples.
     #
@@ -2748,10 +2695,10 @@ async def azure_band_test(
     # Uploads from the band-test page are left alone -- a dark test image there
     # can be deliberate.
     photo_mean, photo_std = photo_stats(original)
-    if command_id:
+    if refuse_unusable_as:
         why = unusable_photo(original)
         if why:
-            print(f"[capture refused] {command_id}: {why}")
+            print(f"[capture refused] {refuse_unusable_as}: {why}")
             raise HTTPException(status_code=422, detail=why)
 
     def _encode(img):
@@ -2769,31 +2716,6 @@ async def azure_band_test(
             if mirror:
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
             rotated_b64[_key(angle, mirror)] = _encode(img)
-
-    # Save the actual captured photo, once per call (same photo for every
-    # variant being compared) -- best-effort, since a storage hiccup
-    # should never block the analysis the operator is waiting on. Without
-    # this, an outlier row is just a number and a sentence forever; with
-    # it, any flagged row can actually be looked at later to see what the
-    # model saw. Root motivation: "we need a concrete reason instead of
-    # guessing" for the recurring over-read investigation.
-    #
-    # A rig capture is already in storage -- the rig put it there -- so point at
-    # that copy rather than upload the same bytes a second time.
-    capture_storage_path = rig_image_path
-    # A re-score reads a photo that is already stored, so it uploads nothing.
-    if capture_storage_path is None and record:
-        try:
-            ext = os.path.splitext(upload_name)[1] or ".jpg"
-            capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
-            upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
-                capture_storage_path, review_copy(contents), file_options={"content-type": "image/jpeg"}
-            )
-            if not upload_resp:
-                capture_storage_path = None
-        except Exception as e:
-            capture_storage_path = None
-            print(f"[band-test capture upload failed] {type(e).__name__}: {e}")
 
     # Few-shot grounding: real reference photos with known values, judged
     # alongside the new photo rather than asked to reason about density
@@ -2997,13 +2919,13 @@ async def azure_band_test(
     # that only means something held still across a run of lots, and escalating
     # would quietly change it on exactly the samples the study needs most.
     escalated = False
-    if is_operator:
+    if escalate_settings:
         variant = requested_variants[0]
         actionable = any(
-            BAND_MIDPOINTS.get(r.get("band"), 0.0) >= settings["increase_at"]
+            BAND_MIDPOINTS.get(r.get("band"), 0.0) >= escalate_settings["increase_at"]
             for r in by_variant[variant]
         )
-        extra = TRANSFORMS[repeats:max(repeats, settings["escalate_repeats"])]
+        extra = TRANSFORMS[repeats:max(repeats, escalate_settings["escalate_repeats"])]
         if actionable and extra:
             for angle, mirror in extra:
                 k = _key(angle, mirror)
@@ -3021,6 +2943,137 @@ async def azure_band_test(
     parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
     for v, result in zip(requested_variants, parsed_results):
         _attach_plastic(result, by_variant[v])
+
+    return parsed_results, escalated, photo_mean, photo_std
+
+
+@app.post("/azure-band-test")
+async def azure_band_test(
+    file: UploadFile = File(None),
+    lot_number: str = Form(""),
+    real_pct: str = Form(""),
+    is_training: bool = Form(False),
+    variants: str = Form(""),
+    repeats: int = Form(1),
+    command_id: str = Form(""),
+    # False for a re-score: analyse and return, record nothing. The caller files
+    # the result elsewhere (vision_rescores), so the same photo never appears
+    # twice in the estimate corpus.
+    record: bool = Form(True),
+    # A label from VISION_MODELS, for re-scores only. Empty is the default model.
+    model: str = Form(""),
+    operator: dict = Depends(require_capture_role()),
+):
+    # An operator gets no say in how the analysis runs. Whatever the browser
+    # sent for variants, repeats, training or a real value is replaced by what
+    # AQ configured, and the photo must be a rig capture they took themselves --
+    # an operator cannot upload an arbitrary file and have it recorded.
+    is_operator = operator.get("role") == "operator"
+    settings = operator_settings() if is_operator else None
+    pair = None
+    if is_operator:
+        if not command_id:
+            raise HTTPException(status_code=403, detail="Un opérateur ne peut analyser qu'une capture du banc.")
+        pair = operator_prompt_pair(settings)
+        # High first: escalation adds rotations to the first prompt only, and
+        # the extra rotations belong to the AUGMENTER decision.
+        variants = ",".join(pair) if pair else settings["variant"]
+        repeats = settings["repeats"]
+        is_training = False
+        real_pct = ""
+        record = True
+
+    # Comma-separated BAND_PROMPT_VARIANTS keys, e.g. "1.3,1.4a,1.4b" --
+    # empty/omitted keeps the old single-call behavior (DEFAULT_PROMPT_VARIANT
+    # only), so existing callers see no change in behavior or cost unless
+    # they actively opt into a comparison.
+    requested_variants = [v.strip() for v in variants.split(",") if v.strip()] or [DEFAULT_PROMPT_VARIANT]
+    registry = prompt_registry()
+    unknown = [v for v in requested_variants if v not in registry]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Variante(s) de prompt inconnue(s) : {', '.join(unknown)}. "
+                   f"Disponibles : {', '.join(sorted(registry))}.",
+        )
+
+    # Another model may only re-score. A real estimate is always the default
+    # model's, so the estimate corpus stays one model's work and every accuracy
+    # figure built on it keeps meaning what it says. Operators never choose.
+    model = (model or "").strip()
+    if is_operator or model in ("", "default"):
+        model_entry = DEFAULT_VISION_MODEL
+    else:
+        model_entry = vision_models().get(model)
+        if model_entry is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Modèle inconnu : {model}. Disponibles : "
+                       f"{', '.join(['default', *vision_models()])}.",
+            )
+        if record:
+            raise HTTPException(
+                status_code=400,
+                detail="Un autre modèle ne sert qu'à re-noter : envoyez record=false.",
+            )
+        if model_entry["provider"] == "anthropic" and any(prompt_uses_references(v) for v in requested_variants):
+            raise HTTPException(
+                status_code=400,
+                detail="Les variantes avec photos de référence ne sont pas prises en charge pour Claude.",
+            )
+
+    # Fails fast with a readable 503 when Azure is not configured, before a
+    # capture is fetched or a photo stored. analyse_band_photo uses the client.
+    get_azure_client()
+
+    # A rig capture arrives as a command id and is fetched here, so the browser
+    # never has to download a photo only to send it straight back. An upload
+    # from the band-test page still arrives as a file, exactly as before.
+    rig_image_path = None
+    source = "upload"
+    if command_id:
+        contents, lot_number, rig_image_path = _load_rig_capture(command_id, operator, is_operator)
+        media_type = "image/jpeg"
+        upload_name = rig_image_path
+        source = "operator" if is_operator else "rig"
+    elif file is not None:
+        contents = await file.read()
+        media_type = file.content_type or "image/jpeg"
+        upload_name = file.filename or ""
+    else:
+        raise HTTPException(status_code=400, detail="Aucune image fournie.")
+    b64_image = base64.b64encode(contents).decode("utf-8")
+
+    parsed_results, escalated, photo_mean, photo_std = await analyse_band_photo(
+        contents, media_type, requested_variants, repeats, model_entry,
+        escalate_settings=settings if is_operator else None,
+        refuse_unusable_as=command_id or None,
+    )
+
+    # Save the actual captured photo, once per call (same photo for every
+    # variant being compared) -- best-effort, since a storage hiccup
+    # should never block the analysis the operator is waiting on. Without
+    # this, an outlier row is just a number and a sentence forever; with
+    # it, any flagged row can actually be looked at later to see what the
+    # model saw. Root motivation: "we need a concrete reason instead of
+    # guessing" for the recurring over-read investigation.
+    #
+    # A rig capture is already in storage -- the rig put it there -- so point at
+    # that copy rather than upload the same bytes a second time.
+    capture_storage_path = rig_image_path
+    # A re-score reads a photo that is already stored, so it uploads nothing.
+    if capture_storage_path is None and record:
+        try:
+            ext = os.path.splitext(upload_name)[1] or ".jpg"
+            capture_storage_path = f"captures/{uuid.uuid4().hex}{ext}"
+            upload_resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+                capture_storage_path, review_copy(contents), file_options={"content-type": "image/jpeg"}
+            )
+            if not upload_resp:
+                capture_storage_path = None
+        except Exception as e:
+            capture_storage_path = None
+            print(f"[band-test capture upload failed] {type(e).__name__}: {e}")
 
     # Lot/real-value lookup happens ONCE per photo, not once per variant --
     # every variant is being tested against the exact same physical sample,
@@ -3258,6 +3311,251 @@ async def azure_band_test(
         "model": model_entry["label"],
         "model_name": model_entry["name"],
     }
+
+
+# ── Inline rig ───────────────────────────────────────────────────────
+# A camera over the product chute after the destoner, photographing on its own
+# every few minutes, with a touchscreen beside the destoner (rig/inline). The
+# Pi sends each photo here and shows whatever comes back; the operator's
+# confirmations come back through /inline/acks.
+#
+# Judged by analyse_band_photo, the same code as a tray capture, with the
+# operator's thresholds and prompts unless system_config.inline_settings says
+# otherwise. Recorded in vision_band_estimates with source = 'inline' and the
+# Pi's reading id as lot_number_text, so every existing view that filters on
+# source = 'operator' is untouched by it.
+
+INLINE_READING_ID = re.compile(r"^IL-\d{8}-\d{6}$")
+
+# Over operator_settings(). Every key optional.
+#
+# mode            'shadow' (default) or 'live'. In shadow the reading is made,
+#                 recorded and shown -- but the screen says it is a trial and
+#                 offers no instruction to act on, and nothing goes to Teams.
+#                 The inline rig runs beside tray sampling until its readings
+#                 have been compared with the tray's and the lab's; until then
+#                 an instruction from it is a guess an operator might follow.
+# interval_min    minutes between readings. Sent back to the Pi with every
+#                 reading, so the cadence changes without touching the Pi.
+# variant, high_variant, low_variant, repeats, escalate_repeats
+#                 as in operator_settings(), for when the chute needs prompts of
+#                 its own -- it will: every current prompt describes a dish.
+# alert_consecutive_increase
+#                 the AUGMENTER run that alerts AQ. Defaults to 3, not the
+#                 tray's 2: readings five minutes apart reach two in a row far
+#                 more easily than samples half an hour apart.
+INLINE_DEFAULTS = {
+    "mode": "shadow",
+    "interval_min": 5,
+    "alert_consecutive_increase": 3,
+}
+
+
+def inline_settings():
+    """operator_settings() with system_config.inline_settings laid over it.
+    Read fresh per reading; any failure keeps the defaults."""
+    settings = operator_settings()
+    settings.update(INLINE_DEFAULTS)
+    try:
+        resp = supabase.table("system_config").select("value").eq("key", "inline_settings").execute()
+        raw = (resp.data or [{}])[0].get("value")
+        overrides = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception as e:
+        print(f"[inline_settings lookup failed] {type(e).__name__}: {e}")
+        overrides = None
+    if isinstance(overrides, dict):
+        for key in ("variant", "high_variant", "low_variant", "mode"):
+            if isinstance(overrides.get(key), str):
+                settings[key] = overrides[key].strip()
+        for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase"):
+            try:
+                settings[key] = int(overrides[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+    if settings["mode"] not in ("shadow", "live"):
+        settings["mode"] = "shadow"
+    settings["repeats"] = max(1, min(8, settings["repeats"]))
+    settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
+    settings["interval_min"] = max(1, min(60, settings["interval_min"]))
+    settings["alert_consecutive_increase"] = max(0, min(10, settings["alert_consecutive_increase"]))
+    return settings
+
+
+def _inline_response(reading_id, decider, settings, recorded_id=None):
+    """What the Pi needs to draw the screen. target is always None for now:
+    the screen can show "Régler à X", but nothing yet knows what X should be.
+    It comes once readings and confirmed settings have been recorded side by
+    side for long enough to fit one against the other."""
+    return {
+        "reading_id": reading_id,
+        "mode": settings["mode"],
+        "band": decider.get("band") or decider.get("predicted_band"),
+        "estimate_pct": decider.get("estimate_pct"),
+        "instruction": decider.get("instruction", decider.get("operator_instruction")),
+        "alert": bool(decider.get("instruction_alert")),
+        "alert_reason": decider.get("alert_reason"),
+        "alert_streak": settings["alert_consecutive_increase"],
+        "target": None,
+        "photo_mean": decider.get("photo_mean"),
+        "photo_std": decider.get("photo_std"),
+        "next_in_s": settings["interval_min"] * 60,
+        "recorded_id": recorded_id or decider.get("id"),
+    }
+
+
+@app.post("/inline/readings")
+async def inline_reading(
+    file: UploadFile = File(...),
+    reading_id: str = Form(...),
+    _: bool = Depends(verify_inline_key),
+):
+    """Judge one inline photo and say what the destoner screen should show.
+
+    reading_id is the Pi's, IL-YYYYMMDD-HHMMSS in plant local time. A retry
+    after a dropped connection sends the same id, and gets back the reading
+    already recorded under it rather than a second analysis and a second row.
+    """
+    reading_id = (reading_id or "").strip()
+    if not INLINE_READING_ID.match(reading_id):
+        raise HTTPException(status_code=400, detail="reading_id attendu : IL-AAAAMMJJ-HHMMSS.")
+    settings = inline_settings()
+
+    try:
+        done = (
+            supabase.table("vision_band_estimates")
+            .select("id, predicted_band, estimate_pct, operator_instruction, instruction_alert, photo_mean, photo_std")
+            .eq("source", "inline")
+            .eq("lot_number_text", reading_id)
+            .not_.is_("operator_instruction", "null")
+            .limit(1)
+            .execute()
+        ).data
+    except Exception as e:
+        print(f"[inline retry lookup failed] {type(e).__name__}: {e}")
+        done = None
+    if done:
+        return _inline_response(reading_id, done[0], settings)
+
+    contents = await file.read()
+    media_type = file.content_type or "image/jpeg"
+    pair = operator_prompt_pair(settings)
+    requested_variants = list(pair) if pair else [settings["variant"]]
+    registry = prompt_registry()
+    if any(v not in registry for v in requested_variants):
+        raise HTTPException(status_code=500, detail=f"Prompt inconnu : {requested_variants}.")
+
+    # A black, blank or blown-out frame is refused with a 422 before any call
+    # is spent -- on this rig that usually means the flash did not fire.
+    results, escalated, photo_mean, photo_std = await analyse_band_photo(
+        contents, media_type, requested_variants, settings["repeats"], DEFAULT_VISION_MODEL,
+        escalate_settings=settings, refuse_unusable_as=reading_id,
+    )
+
+    if pair and len(results) == 2:
+        instruction, alert, decider = combined_instruction(results[0], results[1], settings)
+    else:
+        decider = results[0]
+        instruction, alert = operator_instruction(decider.get("estimate_pct"), settings)
+    # The streak is worked out in shadow mode too, so the record says what live
+    # would have done -- that is what the trial is for. Only live tells Teams.
+    alert, reason, notify = _apply_streak(instruction, alert, settings, source="inline")
+    decider["instruction"], decider["instruction_alert"], decider["alert_reason"] = instruction, alert, reason
+    decider["photo_mean"], decider["photo_std"] = photo_mean, photo_std
+
+    storage_path = f"inline/{reading_id}.jpg"
+    try:
+        supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+            storage_path, review_copy(contents), file_options={"content-type": "image/jpeg", "upsert": "true"})
+    except Exception as e:
+        storage_path = None
+        print(f"[inline photo upload failed] {reading_id}: {type(e).__name__}: {e}")
+
+    recorded_id = None
+    for parsed in results:
+        is_decider = parsed is decider
+        row = {
+            "lot_number_text": reading_id,
+            "source": "inline",
+            "predicted_band": parsed.get("band"),
+            "confidence": parsed.get("confidence"),
+            "factors": parsed.get("factors"),
+            "justification": parsed.get("justification"),
+            "raw_response": parsed.get("raw"),
+            "storage_path": storage_path,
+            "model": parsed.get("model"),
+            "inference_time_ms": parsed.get("inference_time_ms"),
+            "is_training": False,
+            "prompt_version": parsed.get("prompt_version"),
+            "prompt_hash": parsed.get("prompt_hash"),
+            "reference_count": parsed.get("reference_count"),
+            "repeat_count": parsed.get("repeat_count", 1),
+            "estimate_pct": parsed.get("estimate_pct"),
+            "estimate_spread": parsed.get("estimate_spread"),
+            "prompt_tokens": parsed.get("prompt_tokens"),
+            "completion_tokens": parsed.get("completion_tokens"),
+            # Only the deciding prompt's row carries the instruction, as on the
+            # tray: one instruction per reading, and the other row still says
+            # what it read.
+            "operator_instruction": instruction if is_decider else None,
+            "instruction_alert": alert if is_decider else False,
+            "escalated": escalated,
+            "repeat_bands": parsed.get("repeat_bands"),
+            "photo_mean": photo_mean,
+            "photo_std": photo_std,
+            **({
+                "plastic_flag": parsed.get("plastic_flag"),
+                "plastic_votes": parsed.get("plastic_votes"),
+                "plastic_desc": parsed.get("plastic_desc"),
+            } if parsed.get("plastic_votes") is not None else {}),
+        }
+        try:
+            resp = supabase.table("vision_band_estimates").insert(row).execute()
+            if is_decider and resp.data:
+                recorded_id = resp.data[0].get("id")
+        except Exception as e:
+            print(f"[inline recording failed] {reading_id}: {type(e).__name__}: {e}")
+
+    if notify is not None and recorded_id and settings["mode"] == "live":
+        notify_increase_streak(settings["alert_consecutive_increase"],
+                               notify + [{"operator_instruction": instruction,
+                                          "estimate_pct": decider.get("estimate_pct")}],
+                               source="inline")
+
+    return _inline_response(reading_id, decider, settings, recorded_id)
+
+
+INLINE_ACK_CHOICES = ("adjusted", "clean_rejects", "set")
+
+
+@app.post("/inline/acks")
+async def inline_acks(request: Request, _: bool = Depends(verify_inline_key)):
+    """Record operator confirmations from the destoner screen.
+
+    Takes a JSON list, the lines of the Pi's ~/inline_acks.jsonl it has not yet
+    forwarded. Idempotent on (reading_id, acked_at), so the Pi can resend a
+    batch whose answer it never received. Needs rig/inline/inline_acks.sql.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    items = body if isinstance(body, list) else [body]
+    rows = []
+    for a in items:
+        if not isinstance(a, dict) or a.get("choice") not in INLINE_ACK_CHOICES \
+                or not INLINE_READING_ID.match(str(a.get("reading_id") or "")) or not a.get("at"):
+            raise HTTPException(status_code=400, detail=f"Confirmation invalide : {a!r}"[:300])
+        rows.append({
+            "reading_id": a["reading_id"],
+            "choice": a["choice"],
+            "acked_at": a["at"],
+            "setting": a.get("setting"),
+            "unit": a.get("unit"),
+        })
+    if rows:
+        supabase.table("inline_acks").upsert(
+            rows, on_conflict="reading_id,acked_at", ignore_duplicates=True).execute()
+    return {"ok": True, "count": len(rows)}
 
 
 @app.post("/admin/photo-stats/backfill")
