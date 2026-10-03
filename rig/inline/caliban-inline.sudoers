@@ -1,4 +1,4 @@
-# Let the rig user restart the destoner screen without a password.
+# Let the rig user restart the inline rig's two services without a password.
 #
 # Install with:
 #     sudo install -m 440 -o root -g root \
@@ -6,5 +6,5 @@
 #
 # Same reasoning as ../caliban-rig.sudoers: update.sh runs from a timer as
 # ttownshend and restarts the service after a pull. Scoped to these verbs on
-# this one unit.
-ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl start caliban-inline-screen, /usr/bin/systemctl stop caliban-inline-screen, /usr/bin/systemctl restart caliban-inline-screen
+# these two units.
+ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl start caliban-inline-screen, /usr/bin/systemctl stop caliban-inline-screen, /usr/bin/systemctl restart caliban-inline-screen, /usr/bin/systemctl start caliban-inline, /usr/bin/systemctl stop caliban-inline, /usr/bin/systemctl restart caliban-inline

@@ -167,6 +167,10 @@ const INSTRUCTIONS = {
   decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a' },
 };
 const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748b', fg: '#f8fafc' };
+// Trial mode (Caliban's inline_settings.mode = 'shadow'): the reading is real
+// but not yet validated against tray samples and lab results, so nothing on
+// this screen may look like an instruction to act on.
+const TRIAL = { title: 'MODE ESSAI', bg: '#e0e7ff', border: '#6366f1', fg: '#312e81' };
 
 // A reading older than this no longer describes the product going past, so its
 // instruction is withdrawn rather than left on screen looking current.
@@ -247,16 +251,22 @@ function render() {
   overlay(null);
 
   const stale = minsAgo(r.at) > STALE_MIN;
-  const ins = stale ? STALE : (INSTRUCTIONS[r.instruction] || STALE);
+  const trial = !stale && s.mode === 'shadow';
+  const read = INSTRUCTIONS[r.instruction];
+  const ins = stale ? STALE : trial ? TRIAL : (read || STALE);
   const card = $('card');
   card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
   $('title').textContent = ins.title;
-  $('band').textContent = r.band ? `${String(r.band).replace(/\./g, ',')} %` : '—';
+  // Caliban's labels carry their own % ("8-10%"); the demo's do not.
+  $('band').textContent = r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
 
   let sub = '', steps = [];
   if (stale) {
     sub = `Dernière lecture ${agoText(r.at)} — ne pas régler le destoner sur cette base.`;
+  } else if (trial) {
+    sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') : '—'}. `
+        + "Ne rien régler d'après cet écran : suivre l'échantillonnage au plateau.";
   } else if (r.instruction === 'hold') {
     sub = 'Garder le réglage actuel du destoner';
   } else if (r.instruction === 'decrease') {
@@ -275,14 +285,14 @@ function render() {
   $('steps').innerHTML = steps.map(t => `<li>${esc(t)}</li>`).join('');
 
   // AQ is told by Caliban, not by this screen; this only says that it was.
-  const alert = !stale && r.alert;
+  const alert = !stale && !trial && r.alert;
   $('alert').hidden = !alert;
   if (alert) {
     $('alert').innerHTML = "⚠ Aviser l'AQ immédiatement" + (r.alert_reason === 'streak'
       ? `<small>${esc(r.alert_streak || 2)} AUGMENTER de suite — l'ajustement n'a pas suffi</small>` : '');
   }
 
-  const actionable = !stale && (isIncrease(r.instruction) || r.instruction === 'decrease');
+  const actionable = !stale && !trial && (isIncrease(r.instruction) || r.instruction === 'decrease');
   // Once confirmed, the value lives in the setting bar at the top; the box
   // asking for it would only repeat it.
   renderTarget(actionable && !s.ack ? r.target : null, s.setting);

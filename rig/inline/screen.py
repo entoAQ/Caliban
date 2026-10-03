@@ -168,6 +168,7 @@ def demo_state():
                        alert=True, alert_reason="streak", alert_streak=2)),
         ("stale", None),
         ("flash_low", dict(band="3-8", estimate_pct=5.1, instruction="hold")),
+        ("trial", dict(band="8-10", estimate_pct=8.7, instruction="increase_minor")),
     ]
     tick = int(time.time() // DEMO_SECONDS)
     name, reading = scenes[tick % len(scenes)]
@@ -187,6 +188,7 @@ def demo_state():
 
     reading["id"] = f"DEMO-{tick}-{name}"
     return {
+        "mode": "shadow" if name == "trial" else "live",
         "reading": reading,
         "history": history,
         "health": health,

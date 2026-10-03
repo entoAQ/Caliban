@@ -1,0 +1,29 @@
+[Unit]
+Description=Caliban inline rig -- capture loop (photo -> Caliban -> destoner screen)
+# Wants= rather than Requires=: the loop handles a missing network itself and
+# says so on the screen. Refusing to start would leave the screen silent.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ttownshend
+WorkingDirectory=/home/ttownshend/caliban/rig/inline
+
+# Kept out of this file so the unit can live in git without the key in it.
+# Create /etc/caliban-inline.env containing:
+#     CALIBAN_URL=https://your-caliban-host
+#     INLINE_API_KEY=...
+# then: sudo chmod 600 /etc/caliban-inline.env
+EnvironmentFile=/etc/caliban-inline.env
+
+ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/loop.py
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

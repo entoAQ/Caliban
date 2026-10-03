@@ -69,6 +69,16 @@ if systemctl list-unit-files caliban-rig.service >/dev/null 2>&1; then
     systemctl --no-pager --lines=0 status caliban-rig
 fi
 
+# The inline rig's capture loop (inline/loop.py). No busy-file deferral as for
+# the tray poller: nobody is standing at a bench waiting on this photo. A
+# restart mid-reading costs that one reading, and the loop takes the next at
+# once on startup.
+if systemctl list-unit-files caliban-inline.service >/dev/null 2>&1; then
+    sudo systemctl restart caliban-inline
+    echo
+    systemctl --no-pager --lines=0 status caliban-inline
+fi
+
 # The inline rig's destoner screen (inline/). screen.html is re-read on every
 # request and the open page reloads itself when it changes, so this restart is
 # only for screen.py -- but restarting costs the display a few seconds of

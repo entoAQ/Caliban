@@ -12,8 +12,30 @@ itself.
 | Camera | Camera Module 3 (standard) on CAM/DISP 0, under an upturned tote as a light shroud |
 | Light | Godox TT520III at 1/128, fired through a PC817 from a Pi GPIO |
 
-**Status:** the destoner screen exists. The capture loop that feeds it does
-not yet, so the screen runs in demo mode until it does.
+**Status:** screen, capture loop and the Caliban side are written and tested
+against stand-ins. The camera part of the loop is provisional (a plain still,
+no flash sync) until the Camera Module 3 and the flash are on the bench, and
+every current prompt describes a dish, not a chute -- so readings run in
+**trial mode** until a chute prompt exists and has been checked against tray
+samples and lab results.
+
+```
+ loop.py ── photo ──> Caliban /inline/readings ── reading + instruction ──┐
+    │                                                                    │
+    └── writes ~/inline_state.json <──────────────────────────────────────┘
+                        │
+               screen.py ── localhost:8090 ──> touchscreen
+                        │
+          operator taps ──> ~/inline_acks.jsonl ── loop.py ──> Caliban /inline/acks
+```
+
+## Trial mode
+
+`system_config.inline_settings.mode` is `shadow` unless set to `live`. In
+shadow every reading is still made and recorded -- including the AUGMENTER run
+that would alert AQ -- but the screen shows **MODE ESSAI** with what the rig
+would have said, offers nothing to act on, and nothing goes to Teams. Switch to
+`live` only once the readings have held up against the tray's and the lab's.
 
 ---
 
@@ -40,8 +62,10 @@ automatically.
 
 | | |
 |---|---|
-| `~/inline_state.json` | What the screen shows. Written by the capture loop (to come); read by `screen.py`. |
-| `~/inline_acks.jsonl` | One line per operator confirmation. Written by `screen.py`; forwarded to Caliban by the capture loop (to come). |
+| `~/inline_state.json` | What the screen shows. Written by `loop.py`; read by `screen.py`. |
+| `~/inline_acks.jsonl` | One line per operator confirmation. Written by `screen.py`; forwarded to Caliban by `loop.py`. |
+| `~/inline_acks.sent` | How many of those lines Caliban has confirmed receiving. |
+| `~/captures/inline/` | Full-resolution photos. Caliban keeps only a review copy. |
 
 `inline_state.json`, as the screen reads it:
 
@@ -50,13 +74,14 @@ automatically.
   "reading": {
     "id": "IL-20261003-140500",
     "at": "2026-10-03T18:05:00+00:00",
-    "band": "8-10",
+    "band": "8-10%",
     "estimate_pct": 8.9,
     "instruction": "increase_minor",
     "alert": false,
     "target": {"value": 4.2, "unit": "psi"},
-    "photo": "/home/ttownshend/captures/IL-20261003-140500.jpg"
+    "photo": "/home/ttownshend/captures/inline/IL-20261003-140500.jpg"
   },
+  "mode": "shadow",
   "history": [{"at": "...", "estimate_pct": 7.9, "instruction": "hold"}],
   "health": {"camera": "ok", "flash": "low", "network": "ok",
              "message": "Piles du flash faibles — changer les piles"},
@@ -73,22 +98,74 @@ Health values are `ok`, `low` or anything else for a fault. Write the file
 atomically (write a temp file, then rename) so the screen never reads half of
 one.
 
-### Setup on the Pi
+## The capture loop
 
-Once `~/caliban` is cloned (same deploy-key method as the tray rig, see
-`../README.md`):
+`loop.py`, as `caliban-inline`: every `interval_min` (Caliban's setting, 5 by
+default) it takes a photo, sends it to `/inline/readings`, and writes the reply
+into `~/inline_state.json`. Every 5 s it forwards new confirmations to
+`/inline/acks`. Camera, flash and network trouble show on the screen's chips.
+
+`take_photo()` is the provisional part: `rpicam-still`, no flash. The real
+capture -- a long exposure with the flash fired while every row is exposing --
+gets written on the bench. `INLINE_FAKE_PHOTO=/path/to.jpg` sends a fixed file
+instead of using the camera, to exercise the whole chain without one.
+
+`INLINE_REF_REGION=x0,y0,x1,y1` (fractions of the frame) names a patch that
+never changes -- tote wall, white card -- for the flash-battery warning: two
+readings in a row under 85 % of its usual brightness show "changer les piles du
+flash". Set it once the rig is mounted; until then only a black frame (flash
+not firing at all) is caught.
+
+## Caliban side
+
+- `POST /inline/readings` -- photo + reading id, judged by `analyse_band_photo`
+  (the same code as a tray capture) with the operator's thresholds and prompts
+  unless `inline_settings` overrides them. Recorded in `vision_band_estimates`
+  with `source = 'inline'`; a retry with the same id returns the recorded
+  reading instead of analysing twice.
+- `POST /inline/acks` -- confirmations, into `inline_acks` (`inline_acks.sql`).
+- Both need the `X-API-Key` header to match the **`INLINE_API_KEY`** app
+  setting -- a key of its own, not the tray rig's, because this one can spend
+  Azure calls.
+
+**Cost:** a reading every 5 minutes is ~290 a day, each `repeats` calls per
+prompt (2 by default, more when escalated). Lower it with `interval_min` or
+`repeats` in `inline_settings` -- no redeploy needed.
+
+## Setup
+
+**Once, in Supabase:** run `inline_acks.sql`.
+
+**Once, in Azure** (Caliban App Service → Settings → Environment variables):
+add `INLINE_API_KEY`, a long random string (`python3 -c "import secrets;
+print(secrets.token_urlsafe(32))"`). Saving restarts Caliban.
+
+**On the Pi**, once `~/caliban` is cloned (same deploy-key method as the tray
+rig, see `../README.md`):
 
 ```bash
+# The loop's settings -- same key as in Azure.
+sudo tee /etc/caliban-inline.env >/dev/null <<'EOF'
+CALIBAN_URL=https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net
+INLINE_API_KEY=paste-the-key-here
+EOF
+sudo chmod 600 /etc/caliban-inline.env
+
+sudo cp ~/caliban/rig/inline/caliban-inline.service /etc/systemd/system/
 sudo cp ~/caliban/rig/inline/caliban-inline-screen.service /etc/systemd/system/
 sudo install -m 440 -o root -g root ~/caliban/rig/inline/caliban-inline.sudoers /etc/sudoers.d/caliban-inline
 sudo systemctl daemon-reload
 sudo systemctl enable --now caliban-inline-screen
+# Only once the camera is fitted (or INLINE_FAKE_PHOTO is set in the env file):
+sudo systemctl enable --now caliban-inline
 
-# Demo mode until the capture loop exists:
-sudo systemctl edit caliban-inline-screen
+# Demo mode (no loop, cycles through sample states) is a drop-in override:
+#   /etc/systemd/system/caliban-inline-screen.service.d/demo.conf
 #   [Service]
 #   ExecStart=
 #   ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/screen.py --demo
+# Remove that file, then `sudo systemctl daemon-reload` and restart the
+# screen, when the loop takes over.
 
 chmod +x ~/caliban/rig/inline/kiosk.sh
 echo '/usr/bin/lwrespawn /home/ttownshend/caliban/rig/inline/kiosk.sh &' > ~/.config/labwc/autostart
@@ -98,18 +175,20 @@ sudo reboot
 ```
 
 For updates, install `../caliban-rig-update.service` and its timer as on the
-tray rig: `update.sh` restarts `caliban-inline-screen` when it is installed. An
-open page reloads itself when `screen.html` changes.
+tray rig: `update.sh` restarts `caliban-inline` and `caliban-inline-screen`
+when they are installed. An open page reloads itself when `screen.html`
+changes.
 
-### Getting out of the kiosk
+## Getting out of the kiosk
 
 With a USB keyboard, Alt+F4 closes the browser, but `lwrespawn` reopens it. To
 stop it for good, comment out the line in `~/.config/labwc/autostart` (Pi
 Connect shell or SSH) and reboot.
 
-### Checking it from a laptop
+## Checking it from a laptop
 
 ```bash
 ssh ttownshend@Ariel.local 'curl -s localhost:8090/state'
-journalctl -u caliban-inline-screen -f      # on the Pi; acks are logged
+journalctl -u caliban-inline -f             # on the Pi: every reading, every forward
+journalctl -u caliban-inline-screen -f      # confirmations as they are tapped
 ```
