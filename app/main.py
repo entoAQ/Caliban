@@ -3735,7 +3735,7 @@ def admin_reject_captures(limit: int = 50, operator: dict = Depends(require_role
 # (LARVES/MATIERE_ETRANGERE/DECISION/...) is not that, and inserting it there
 # would put a reject-decision prompt one wrong click away from being run as
 # if it were a MEO reading.
-REJECT_VISION_PROMPT_VERSION = "reject-v5"
+REJECT_VISION_PROMPT_VERSION = "reject-v6"
 
 
 def reject_vision_prompt():
@@ -3778,6 +3778,7 @@ Then decide: reprise (rework) only if LARVES is abondantes AND no foreign materi
 Answer EXACTLY in this format, with nothing before or after:
 
 LARVES: [quasi_absentes, faibles, moderees, ou abondantes -- the recoverable-larvae fraction against frass/waste]
+LARVES_PCT: [a single integer from 0 to 100, rounded to the nearest 5 -- your best estimate of the percentage of the occupied area that is larvae, consistent with LARVES above]
 MATIERE_ETRANGERE: [oui, non, ou incertain]
 CONFIANCE: [Faible, Moyenne, ou Elevee]
 DECISION: [reprise ou rejet]
@@ -3785,12 +3786,16 @@ JUSTIFICATION: [one sentence, in French, what drove this decision]"""
 
 
 def parse_reject_vision_response(text):
-    larves = matiere = confiance = decision = justification = None
+    larves = larves_pct = matiere = confiance = decision = justification = None
     for line in (text or "").splitlines():
         line = line.strip()
         upper = line.upper()
         if upper.startswith("LARVES:"):
             larves = line.split(":", 1)[1].strip()
+        elif upper.startswith("LARVES_PCT:"):
+            m = re.search(r"\d+(?:[.,]\d+)?", line.split(":", 1)[1])
+            if m:
+                larves_pct = min(100.0, max(0.0, float(m.group().replace(",", "."))))
         elif upper.startswith("MATIERE_ETRANGERE:"):
             matiere = line.split(":", 1)[1].strip()
         elif upper.startswith("CONFIANCE:"):
@@ -3801,6 +3806,7 @@ def parse_reject_vision_response(text):
             justification = line.split(":", 1)[1].strip()
     return {
         "larves": larves,
+        "larves_pct": larves_pct,
         "matiere_etrangere": matiere,
         "confiance": confiance,
         "decision": decision,
