@@ -19,24 +19,24 @@ Setup (see README.md):
                                            # using the camera, to test the chain
         INLINE_REF_REGION=0.02,0.02,0.10,0.10   # optional, see flash_level()
 
-THE CAMERA PART IS PROVISIONAL. take_photo() shoots a plain still with
-rpicam-still. The real capture fires the flash inside the window where every
-row of the rolling shutter is exposing at once, and that is written on the
-bench with the camera and flash in hand -- it cannot be got right without them.
-Everything around it (Caliban, the screen, confirmations, health) is final.
+The photo itself is flashcam.py: a long exposure with the flash fired while
+every row of the rolling shutter is exposing, checked for "lit" and "lit
+evenly" before it is sent anywhere.
 """
 
 import json
 import os
 import shutil
 import statistics
-import subprocess
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+import flashcam
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
@@ -56,7 +56,9 @@ DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
 HISTORY_KEEP = 36          # three hours at five minutes
-CAMERA_TIMEOUT_S = 30
+# A capture is a few seconds, up to ~15 with retries. Past this, libcamera has
+# wedged inside this process and nothing here can free it -- see watchdog.
+CAMERA_WATCHDOG_S = 60
 
 
 def log(message):
@@ -108,17 +110,36 @@ def set_health(state, **parts):
 
 # --- Camera -------------------------------------------------------------------
 
+class watchdog:
+    """Exit if the camera never returns, so systemd restarts the loop with a
+    fresh camera session. Same reasoning as the tray poller's watchdog: after a
+    CSI fault libcamera waits forever for a frame, inside this process."""
+
+    def __enter__(self):
+        def fire():
+            log(f"watchdog: capture exceeded {CAMERA_WATCHDOG_S}s -- restarting")
+            os._exit(3)
+        self.timer = threading.Timer(CAMERA_WATCHDOG_S, fire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def __exit__(self, *exc):
+        self.timer.cancel()
+        return False
+
+
 def take_photo(reading_id):
-    """A photo of the chute at full resolution. Provisional: see the docstring."""
+    """A flash-lit photo of the chute. Raises flashcam.FlashNotFired /
+    FlashTiming when the flash did not light it properly."""
     os.makedirs(CAPTURE_DIR, exist_ok=True)
     path = os.path.join(CAPTURE_DIR, f"{reading_id}.jpg")
     if FAKE_PHOTO:
         shutil.copyfile(FAKE_PHOTO, path)
         return path
-    subprocess.run(
-        ["rpicam-still", "--nopreview", "--immediate", "-o", path],
-        check=True, timeout=CAMERA_TIMEOUT_S, capture_output=True,
-    )
+    with watchdog():
+        measured = flashcam.capture(path, log=log)
+    if measured.get("attempts", 1) > 1:
+        log(f"{reading_id}: needed {measured['attempts']} flash attempts")
     return path
 
 
@@ -228,6 +249,15 @@ def take_reading(state):
 
     try:
         path = take_photo(reading_id)
+    except flashcam.FlashNotFired as e:
+        log(f"no flash for {reading_id}: {e}")
+        set_health(state, camera="ok", flash="fail",
+                   message="Le flash ne se déclenche pas — vérifier qu'il est allumé et ses piles")
+        return interval
+    except flashcam.FlashTiming as e:
+        log(f"flash timing for {reading_id}: {e}")
+        set_health(state, camera="ok", flash="fail", message="Flash mal synchronisé — prévenir l'AQ")
+        return interval
     except Exception as e:
         log(f"camera failed for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, camera="fail", message="Caméra : aucune photo — vérifier le câble et la caméra")
