@@ -2,23 +2,25 @@
 """Flash-lit capture for the inline rig.
 
 The camera (Camera Module 3) has a rolling shutter: rows start and stop
-exposing one after another, about 18 ms from top to bottom in the 2304x1296
-mode. A flash lasts ~30 us, so it lights only the rows exposing at that
-instant. Fire it while *every* row is exposing and the frame is lit evenly;
-fire it a moment too late and the frame comes out half lit.
+exposing one after another. A flash lasts ~30 us, so it lights only the rows
+exposing at that instant. Fire it while *every* row is exposing and the frame
+is lit evenly; fire it a moment early or late and part of the frame is dark.
 
-So the exposure is made much longer than the readout (60 ms against ~18 ms),
-which leaves a ~40 ms window per frame in which all rows are exposing, and the
-flash is aimed at the middle of it. The tote keeps room light out, so the long
-exposure collects almost nothing but the flash: measured 2026-10-05, the frame
-without flash read 1/255 against ~190 with it.
+The exposure therefore has to be longer than the readout -- but not much
+longer, because the chute is never fully dark. Room light is recorded for the
+whole exposure while the product moves, and lands on the photo as a smear
+over the flash-frozen image. So the rig uses the sensor's fast mode, a
+1536x864 binned centre crop read out in ~7.5 ms, with a 15 ms exposure:
+a ~7 ms window in which every row is exposing, and a quarter of the room
+light a 60 ms exposure collected.
 
-Where the window sits was measured on the bench rather than assumed: the
-SensorTimestamp libcamera reports for a frame is when its first row ends
-exposing and is read out, and a flash 15-105 ms before that timestamp lit
-the whole frame, while one 6 ms after it lit only the bottom (rig/inline
-history, 2026-10-05). Frames come exactly PERIOD apart, so the next frames'
-timestamps can be predicted and the flash fired FIRE_BEFORE_MS ahead of one.
+Where the window sits was measured, not assumed (bench, 2026-10-05). The
+SensorTimestamp libcamera reports for a frame is when its first row stops
+exposing. Swept in 1 ms steps, a flash 3-7 ms before that timestamp lit the
+frame evenly; 8 ms just short of it, 10-14 ms lit a shrinking top part --
+exactly a 7.5 ms readout. Frames come exactly PERIOD apart, so the next
+frames' timestamps can be predicted and the flash fired FIRE_BEFORE_MS
+ahead of one, in the middle of the window.
 
 Every capture is checked before it is used: lit at all (the flash fired), and
 lit evenly (the timing held). A failed check is retried, then reported -- the
@@ -39,10 +41,11 @@ HOME = os.path.expanduser("~")
 SETTINGS_FILE = os.path.join(HOME, "inline_camera.json")
 
 DEFAULTS = {
-    "size": [2304, 1296],          # the binned full-sensor mode: whole field, ~18 ms readout
-    "exposure_us": 60000,          # >> readout, so every row is exposing for ~40 ms
-    "period_us": 100000,
-    "fire_before_ms": 25,          # middle of the all-rows window, before the frame timestamp
+    "size": [1536, 864],           # fast mode: binned centre crop, ~7.5 ms readout
+    "sensor_size": [1536, 864],    # forces that sensor mode rather than a scaled full frame
+    "exposure_us": 15000,          # readout + ~7 ms in which every row is exposing
+    "period_us": 25000,
+    "fire_before_ms": 3.5,         # middle of the measured 0-7 ms window
     "analogue_gain": 1.0,
     "colour_gains": [1.8, 1.6],    # placeholder until a white balance under the flash
     "lens_position": 2.8,          # dioptres = 1 / metres; ~35 cm. Set by calibration.
@@ -109,6 +112,7 @@ def capture(path, settings=None, log=print):
     try:
         config = cam.create_still_configuration(
             main={"size": tuple(s["size"]), "format": "RGB888"},
+            **({"sensor": {"output_size": tuple(s["sensor_size"])}} if s.get("sensor_size") else {}),
             buffer_count=4,
             controls={
                 "ExposureTime": s["exposure_us"],
@@ -126,7 +130,7 @@ def capture(path, settings=None, log=print):
         time.sleep(1.0)          # controls settle; the first frames are not trusted
 
         r = cam.capture_request()
-        ambient = _brightness(r.make_array("main"))[0]
+        ambient, amb_top, amb_bottom = _brightness(r.make_array("main"))
         r.release()
 
         fired_any = False
@@ -139,7 +143,7 @@ def capture(path, settings=None, log=print):
             # a request that was waiting in the queue carries a timestamp from
             # the past, and aiming relative to it would aim at a frame that has
             # already gone by.
-            lead_ns = s["fire_before_ms"] * 1_000_000
+            lead_ns = int(s["fire_before_ms"] * 1_000_000)
             margin_ns = 5_000_000
             frames_ahead = -(-(_boottime_ns() + margin_ns + lead_ns - ts) // period_ns)
             target_ts = ts + max(1, frames_ahead) * period_ns
@@ -160,13 +164,19 @@ def capture(path, settings=None, log=print):
 
             mean, top, bottom = _brightness(array)
             lit = mean - ambient >= s["min_flash_gain"]
-            even = lit and min(top, bottom) >= s["even_ratio"] * max(top, bottom)
+            # Judged on the flash's own share, top against bottom: the room
+            # light under the tote is not even (brighter where the chute
+            # comes in), and left in it would make a half-lit frame look even.
+            flash_top, flash_bottom = top - amb_top, bottom - amb_bottom
+            even = lit and min(flash_top, flash_bottom) >= s["even_ratio"] * max(flash_top, flash_bottom)
             fired_any |= lit
             if even:
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 Image.fromarray(array[..., ::-1]).save(path, quality=92)
                 return {"mean": round(mean, 1), "top": round(top, 1), "bottom": round(bottom, 1),
-                        "ambient": round(ambient, 1), "attempts": attempt}
+                        "ambient": round(ambient, 1), "attempts": attempt,
+                        # The share of the photo that is room light, i.e. smear.
+                        "ambient_share": round(ambient / mean, 2) if mean else None}
             log(f"flash attempt {attempt}: mean {mean:.0f} (ambient {ambient:.0f}) "
                 f"top {top:.0f} bottom {bottom:.0f} -> {'split' if lit else 'no flash'}")
             time.sleep(s["recharge_s"])

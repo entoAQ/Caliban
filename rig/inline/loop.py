@@ -128,19 +128,27 @@ class watchdog:
         return False
 
 
+# Room light's share of a photo above which the screen says so. Room light is
+# recorded over the whole exposure while the product moves, so it lands as a
+# smear over the flash-frozen image; ~0.2 was measured with the tote in place
+# (2026-10-05). Much above that, the cover has probably been knocked.
+AMBIENT_SHARE_WARN = 0.35
+
+
 def take_photo(reading_id):
-    """A flash-lit photo of the chute. Raises flashcam.FlashNotFired /
-    FlashTiming when the flash did not light it properly."""
+    """A flash-lit photo of the chute -> (path, what flashcam measured).
+    Raises flashcam.FlashNotFired / FlashTiming when the flash did not light
+    it properly."""
     os.makedirs(CAPTURE_DIR, exist_ok=True)
     path = os.path.join(CAPTURE_DIR, f"{reading_id}.jpg")
     if FAKE_PHOTO:
         shutil.copyfile(FAKE_PHOTO, path)
-        return path
+        return path, {}
     with watchdog():
         measured = flashcam.capture(path, log=log)
     if measured.get("attempts", 1) > 1:
         log(f"{reading_id}: needed {measured['attempts']} flash attempts")
-    return path
+    return path, measured
 
 
 def flash_level(path):
@@ -248,7 +256,7 @@ def take_reading(state):
     interval = state.get("interval_s") or DEFAULT_INTERVAL_S
 
     try:
-        path = take_photo(reading_id)
+        path, measured = take_photo(reading_id)
     except flashcam.FlashNotFired as e:
         log(f"no flash for {reading_id}: {e}")
         set_health(state, camera="ok", flash="fail",
@@ -262,7 +270,14 @@ def take_reading(state):
         log(f"camera failed for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, camera="fail", message="Caméra : aucune photo — vérifier le câble et la caméra")
         return interval
-    set_health(state, camera="ok")
+    state["last_capture"] = measured
+    share = measured.get("ambient_share")
+    if share is not None and share > AMBIENT_SHARE_WARN:
+        log(f"{reading_id}: room light is {share:.0%} of the photo")
+        set_health(state, camera="low",
+                   message=f"Trop de lumière sous la couverture ({share:.0%}) — vérifier qu'elle est bien en place")
+    else:
+        set_health(state, camera="ok")
     level = flash_level(path)
 
     try:
