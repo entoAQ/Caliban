@@ -73,8 +73,13 @@ fi
 # the tray poller: nobody is standing at a bench waiting on this photo. A
 # restart mid-reading costs that one reading, and the loop takes the next at
 # once on startup.
+#
+# try-restart, not restart: restart also STARTS a stopped service, and the
+# loop is stopped on purpose while the camera or flash is being worked on --
+# an update must not switch it back on underneath someone (2026-10-05: it
+# did, and the bench test hit "GPIO busy").
 if systemctl list-unit-files caliban-inline.service >/dev/null 2>&1; then
-    sudo systemctl restart caliban-inline
+    sudo systemctl try-restart caliban-inline
     echo
     systemctl --no-pager --lines=0 status caliban-inline
 fi
@@ -84,7 +89,7 @@ fi
 # only for screen.py -- but restarting costs the display a few seconds of
 # "Écran en redémarrage", which is cheaper than reasoning about which file moved.
 if systemctl list-unit-files caliban-inline-screen.service >/dev/null 2>&1; then
-    sudo systemctl restart caliban-inline-screen
+    sudo systemctl try-restart caliban-inline-screen
     echo
     systemctl --no-pager --lines=0 status caliban-inline-screen
 fi

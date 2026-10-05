@@ -7,4 +7,4 @@
 # Same reasoning as ../caliban-rig.sudoers: update.sh runs from a timer as
 # ttownshend and restarts the service after a pull. Scoped to these verbs on
 # these two units.
-ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl start caliban-inline-screen, /usr/bin/systemctl stop caliban-inline-screen, /usr/bin/systemctl restart caliban-inline-screen, /usr/bin/systemctl start caliban-inline, /usr/bin/systemctl stop caliban-inline, /usr/bin/systemctl restart caliban-inline
+ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl start caliban-inline-screen, /usr/bin/systemctl stop caliban-inline-screen, /usr/bin/systemctl restart caliban-inline-screen, /usr/bin/systemctl try-restart caliban-inline-screen, /usr/bin/systemctl start caliban-inline, /usr/bin/systemctl stop caliban-inline, /usr/bin/systemctl restart caliban-inline, /usr/bin/systemctl try-restart caliban-inline
