@@ -66,10 +66,15 @@ DEFAULTS = {
     "recharge_s": 10.0,
     "attempts": 6,
     # Acceptance: a frame is "flash-lit" when its mean is this much above the
-    # frame taken without flash, and "even" when its top and bottom quarters
-    # are within this ratio of each other.
+    # frame taken without flash, and "whole" when every one of `bands`
+    # horizontal strips got at least `band_min_share` of the best-lit strip's
+    # flash. A timing miss leaves strips at room-light level (share ~0); the
+    # flash sitting nearer one end of the view only makes a smooth gradient
+    # (~0.8 measured 2026-10-06), which must pass. An earlier top-vs-bottom
+    # ratio of 0.8 failed exactly that gradient, six times in a row.
     "min_flash_gain": 20.0,
-    "even_ratio": 0.8,
+    "bands": 8,
+    "band_min_share": 0.35,
 }
 
 
@@ -102,6 +107,15 @@ def _brightness(array):
     g = array[::16, ::16].mean(axis=2)
     q = g.shape[0] // 4
     return float(g.mean()), float(g[:q].mean()), float(g[-q:].mean())
+
+
+def _bands(array, n):
+    """Mean brightness of n horizontal strips, top to bottom. Rows are what a
+    rolling shutter exposes one after another, so a flash that missed part of
+    the exposure shows up as whole strips left dark."""
+    g = array[::8, ::8].mean(axis=2)
+    edges = [round(i * g.shape[0] / n) for i in range(n + 1)]
+    return [float(g[edges[i]:edges[i + 1]].mean()) for i in range(n)]
 
 
 def capture(path, settings=None, log=print, keep=None):
@@ -145,8 +159,10 @@ def capture(path, settings=None, log=print, keep=None):
         time.sleep(1.0)          # controls settle; the first frames are not trusted
 
         r = cam.capture_request()
-        ambient, amb_top, amb_bottom = _brightness(r.make_array("main"))
+        dark = r.make_array("main")
         r.release()
+        ambient = _brightness(dark)[0]
+        amb_bands = _bands(dark, s["bands"])
 
         fired_any = False
         for attempt in range(1, s["attempts"] + 1):
@@ -192,11 +208,11 @@ def capture(path, settings=None, log=print, keep=None):
 
             mean, top, bottom = _brightness(array)
             lit = mean - ambient >= s["min_flash_gain"]
-            # Judged on the flash's own share, top against bottom: the room
-            # light under the tote is not even (brighter where the chute
-            # comes in), and left in it would make a half-lit frame look even.
-            flash_top, flash_bottom = top - amb_top, bottom - amb_bottom
-            even = lit and min(flash_top, flash_bottom) >= s["even_ratio"] * max(flash_top, flash_bottom)
+            # The flash's own share in each strip, room light taken off: the
+            # light under the tote is not even (brighter where the chute comes
+            # in), and left in it would make a half-lit frame look whole.
+            shares = [b - a for b, a in zip(_bands(array, s["bands"]), amb_bands)]
+            even = lit and min(shares) >= s["band_min_share"] * max(shares)
             fired_any |= lit
             if even:
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -215,7 +231,7 @@ def capture(path, settings=None, log=print, keep=None):
             # How late the trigger went out, against a margin of ~3.5 ms: a
             # large number here means the Pi was busy, not that the flash failed.
             log(f"flash attempt {attempt}: mean {mean:.0f} (ambient {ambient:.0f}) "
-                f"top {top:.0f} bottom {bottom:.0f} fired {late_ms:+.2f} ms late "
+                f"strips {' '.join(f'{v:.0f}' for v in shares)} fired {late_ms:+.2f} ms late "
                 f"-> {'split' if lit else 'no flash'}")
             time.sleep(s["recharge_s"])
 
