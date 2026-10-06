@@ -129,6 +129,17 @@ not firing at all) is caught.
 
 ## Calibration
 
+Order: **focus**, then settle the flash's diffusion, then **white balance**.
+Stop the loop first for all of them (`sudo systemctl stop caliban-inline`):
+they need the camera and the flash.
+
+`python3 flashcam.py focus` -- autofocus is off for readings, so every photo
+is focused the same; this chooses that fixed position. It takes flash photos
+across the lens range (~25 flashes, a minute or two), scores each for
+sharpness and saves the best as `lens_position`. Put product, or anything
+with fine detail, where the stream will be first. Redo it if the camera's
+height over the chute changes.
+
 `python3 flashcam.py wb` -- white balance **under the flash**: hold a white or
 grey card under the camera, filling the centre of the view, and it sets
 `colour_gains` in `~/inline_camera.json` so the card comes out neutral. Redo

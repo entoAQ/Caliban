@@ -33,6 +33,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py                 # one test capture -> ~/captures/inline/TEST.jpg
     python3 flashcam.py wb              # white balance under the flash, card in the centre
     python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
+    python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
 """
 
 import gc
@@ -246,6 +247,65 @@ def capture(path, settings=None, log=print, keep=None):
             flash.close()
 
 
+def _save_setting(key, value):
+    current = {}
+    try:
+        with open(SETTINGS_FILE) as f:
+            current = json.load(f)
+    except FileNotFoundError:
+        pass
+    current[key] = value
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(current, f, indent=1)
+
+
+def _sharpness(array, region=(0.25, 0.25, 0.75, 0.75)):
+    """Variance of a Laplacian over the middle of the frame: high when edges
+    are crisp, low when blurred. Only comparable between photos of the same
+    scene, which is all a focus sweep needs."""
+    import numpy as np
+    h, w = array.shape[:2]
+    x0, y0, x1, y1 = region
+    g = array[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].mean(axis=2)
+    lap = 4 * g[1:-1, 1:-1] - g[:-2, 1:-1] - g[2:, 1:-1] - g[1:-1, :-2] - g[1:-1, 2:]
+    return float(np.var(lap))
+
+
+def focus(near=0.5, far=8.0):
+    """Find the lens position that makes the scene sharpest, under the flash,
+    and save it as lens_position.
+
+    Autofocus is off for readings so every photo is focused the same; this
+    is how that fixed position is chosen. A sweep under the flash rather than
+    the camera's own autofocus: the tote is too dark for autofocus, and this
+    measures the photos exactly as readings will be taken. Put product (or
+    anything with fine detail) under the camera at the height the stream will
+    be, first. Positions are dioptres, 1 / distance in metres.
+    """
+    s = load_settings()
+    base = dict(s, attempts=3, recharge_s=1.5)
+    path = os.path.join(HOME, "captures", "inline", "FOCUS.jpg")
+
+    def measure(pos):
+        keep = {}
+        capture(path, dict(base, lens_position=pos), log=lambda *_: None, keep=keep)
+        v = _sharpness(keep["array"])
+        print(f"  lens {pos:5.2f} dioptres (~{100 / pos:4.0f} cm): sharpness {v:8.1f}", flush=True)
+        return v
+
+    print("coarse sweep", flush=True)
+    step = 0.5
+    coarse = {p: measure(p) for p in [round(near + i * step, 2) for i in range(int((far - near) / step) + 1)]}
+    best = max(coarse, key=coarse.get)
+    print(f"fine sweep around {best}", flush=True)
+    around = [round(best + d, 2) for d in (-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4) if near <= best + d <= far]
+    fine = {p: measure(p) for p in around}
+    fine[best] = coarse[best]
+    best = max(fine, key=fine.get)
+    _save_setting("lens_position", best)
+    print(f"saved lens_position {best} (~{100 / best:.0f} cm) to {SETTINGS_FILE}")
+
+
 def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
@@ -274,21 +334,15 @@ def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
                   "or add diffusion over the flash, and run this again.")
         if step == 1:
             gains = [max(0.5, min(8.0, gains[0] * g / r)), max(0.5, min(8.0, gains[1] * g / b))]
-    current = {}
-    try:
-        with open(SETTINGS_FILE) as f:
-            current = json.load(f)
-    except FileNotFoundError:
-        pass
-    current["colour_gains"] = [round(gains[0], 3), round(gains[1], 3)]
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(current, f, indent=1)
-    print(f"saved colour_gains {current['colour_gains']} to {SETTINGS_FILE}")
+    _save_setting("colour_gains", [round(gains[0], 3), round(gains[1], 3)])
+    print(f"saved colour_gains {[round(gains[0], 3), round(gains[1], 3)]} to {SETTINGS_FILE}")
 
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "wb":
+    if len(sys.argv) > 1 and sys.argv[1] == "focus":
+        focus()
+    elif len(sys.argv) > 1 and sys.argv[1] == "wb":
         region = tuple(float(v) for v in sys.argv[2].split(",")) if len(sys.argv) > 2 else (0.3, 0.3, 0.7, 0.7)
         white_balance(region)
     else:
