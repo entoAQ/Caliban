@@ -55,8 +55,13 @@ DEFAULTS = {
     # closure longer to register. 3 ms missed intermittently on the bench
     # (2026-10-06) where 20 ms did not.
     "pulse_ms": 20,
-    "recharge_s": 3.0,             # the TT520III at 1/128 is ready well within this
-    "attempts": 3,
+    # After a miss, wait this long and fire again, up to `attempts` in all.
+    # On the bench (2026-10-06, transistor trigger) about 1 shot in 11 missed
+    # at random; 10 s apart, six tries make a whole reading lost to it
+    # vanishingly rare, and a flash that is really off is still reported
+    # within about a minute.
+    "recharge_s": 10.0,
+    "attempts": 6,
     # Acceptance: a frame is "flash-lit" when its mean is this much above the
     # frame taken without flash, and "even" when its top and bottom quarters
     # are within this ratio of each other.

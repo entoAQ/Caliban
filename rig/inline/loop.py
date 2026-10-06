@@ -56,9 +56,10 @@ DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
 HISTORY_KEEP = 36          # three hours at five minutes
-# A capture is a few seconds, up to ~15 with retries. Past this, libcamera has
-# wedged inside this process and nothing here can free it -- see watchdog.
-CAMERA_WATCHDOG_S = 60
+# A capture is a few seconds; with every flash retry used (6 tries, 10 s
+# apart, flashcam.DEFAULTS) about 65 s. Past this, libcamera has wedged inside
+# this process and nothing here can free it -- see watchdog.
+CAMERA_WATCHDOG_S = 120
 
 
 def log(message):
