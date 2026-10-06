@@ -31,6 +31,8 @@ Settings live in ~/inline_camera.json so a calibration can change them without
 touching the code; anything missing takes the defaults below.
 
     python3 flashcam.py                 # one test capture -> ~/captures/inline/TEST.jpg
+    python3 flashcam.py wb              # white balance under the flash, card in the centre
+    python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
 """
 
 import gc
@@ -102,13 +104,16 @@ def _brightness(array):
     return float(g.mean()), float(g[:q].mean()), float(g[-q:].mean())
 
 
-def capture(path, settings=None, log=print):
+def capture(path, settings=None, log=print, keep=None):
     """Take one flash-lit photo to `path` (JPEG). Returns a dict of what was
     measured, for the loop to keep and the screen's health chips to use.
 
     The camera is opened for each capture and closed after, rather than held
     open between readings five minutes apart: it frees it for preview.py and
     calibration in between, and a camera that wedges cannot outlive one capture.
+
+    keep: a dict to receive the accepted frame as keep["array"] (BGR, as
+    picamera2 delivers "RGB888"), for calibration to measure.
     """
     from gpiozero import DigitalOutputDevice
     from picamera2 import Picamera2
@@ -196,8 +201,15 @@ def capture(path, settings=None, log=print):
             if even:
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 Image.fromarray(array[..., ::-1]).save(path, quality=92)
+                if keep is not None:
+                    keep["array"] = array
+                coarse = array[::8, ::8]
                 return {"mean": round(mean, 1), "top": round(top, 1), "bottom": round(bottom, 1),
                         "ambient": round(ambient, 1), "attempts": attempt, "late_ms": round(late_ms, 2),
+                        # Share of the frame blown out in some channel: detail
+                        # there is gone, and pale frass on pale larvae is the
+                        # first thing lost. Aim well under a few percent.
+                        "clipped_pct": round(float((coarse >= 250).any(axis=2).mean()) * 100, 1),
                         # The share of the photo that is room light, i.e. smear.
                         "ambient_share": round(ambient / mean, 2) if mean else None}
             # How late the trigger went out, against a margin of ~3.5 ms: a
@@ -218,7 +230,52 @@ def capture(path, settings=None, log=print):
             flash.close()
 
 
+def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
+    """Set colour_gains so a white or grey card under the flash comes out
+    neutral, and save them to SETTINGS_FILE.
+
+    Measured under the flash because the flash is the light every reading is
+    taken in -- a white balance in room light would be for the wrong light.
+    On the NoIR camera (no infrared filter) it can only partly correct the
+    colour: the flash carries infrared, and how much each material reflects
+    differs, so no single pair of gains is right for all of them. Redo it
+    whenever the camera, the flash, its diffuser or the tote lining changes.
+    """
+    s = load_settings()
+    x0, y0, x1, y1 = region
+    gains = [1.0, 1.0]
+    for step in (1, 2):            # measure with flat gains, then confirm with the result
+        keep = {}
+        capture(os.path.join(HOME, "captures", "inline", "WB.jpg"),
+                dict(s, colour_gains=gains), keep=keep)
+        a = keep["array"]
+        h, w = a.shape[:2]
+        patch = a[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].reshape(-1, 3).mean(axis=0)
+        b, g, r = (float(v) for v in patch)
+        print(f"pass {step}: card R {r:.0f}  G {g:.0f}  B {b:.0f}  (gains {gains[0]:.2f}, {gains[1]:.2f})")
+        if max(r, g, b) > 235:
+            print("  the card is close to white-out: the ratio is unreliable. Use a grey card, "
+                  "or add diffusion over the flash, and run this again.")
+        if step == 1:
+            gains = [max(0.5, min(8.0, gains[0] * g / r)), max(0.5, min(8.0, gains[1] * g / b))]
+    current = {}
+    try:
+        with open(SETTINGS_FILE) as f:
+            current = json.load(f)
+    except FileNotFoundError:
+        pass
+    current["colour_gains"] = [round(gains[0], 3), round(gains[1], 3)]
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(current, f, indent=1)
+    print(f"saved colour_gains {current['colour_gains']} to {SETTINGS_FILE}")
+
+
 if __name__ == "__main__":
-    out = os.path.join(HOME, "captures", "inline", "TEST.jpg")
-    print(capture(out))
-    print("saved", out)
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "wb":
+        region = tuple(float(v) for v in sys.argv[2].split(",")) if len(sys.argv) > 2 else (0.3, 0.3, 0.7, 0.7)
+        white_balance(region)
+    else:
+        out = os.path.join(HOME, "captures", "inline", "TEST.jpg")
+        print(capture(out))
+        print("saved", out)

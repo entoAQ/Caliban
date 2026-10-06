@@ -127,6 +127,27 @@ readings in a row under 85 % of its usual brightness show "changer les piles du
 flash". Set it once the rig is mounted; until then only a black frame (flash
 not firing at all) is caught.
 
+## Calibration
+
+`python3 flashcam.py wb` -- white balance **under the flash**: hold a white or
+grey card under the camera, filling the centre of the view, and it sets
+`colour_gains` in `~/inline_camera.json` so the card comes out neutral. Redo
+it whenever the camera, the flash, its diffuser or the tote lining changes.
+Stop the loop first (`sudo systemctl stop caliban-inline`): both need the
+camera and the flash.
+
+**The camera fitted until further notice is the Camera Module 3 Wide NoIR**
+(detected as `imx708_wide_noir`). Without an infrared filter, the flash's
+infrared tints the photos and white balance only partly corrects it, since
+each material reflects infrared differently. Fine for timing, framing,
+lighting and building the chute prompt; **not** for calibrating bands. Note
+the date it is swapped for the standard Camera Module 3 (SC0872) -- readings
+before that date are NoIR readings.
+
+`flashcam.py`'s test capture also prints `clipped_pct`, the share of the frame
+blown out in some channel. Keep it to a few percent: add diffusion over the
+flash or bounce it off the lined wall if it is higher.
+
 ## Caliban side
 
 - `POST /inline/readings` -- photo + reading id, judged by `analyse_band_photo`
