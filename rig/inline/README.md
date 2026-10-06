@@ -10,7 +10,18 @@ itself.
 | Pi | `Ariel`, user `ttownshend` |
 | Display | Raspberry Pi Touch Display 2, portrait 720×1280, on CAM/DISP 1 |
 | Camera | Camera Module 3 (standard) on CAM/DISP 0, under an upturned tote as a light shroud |
-| Light | Godox TT520III at 1/128, fired through a PC817 from a Pi GPIO |
+| Light | Godox TT520III at 1/128, fired by an NPN transistor (S8050) from GPIO 17 |
+
+**Flash trigger wiring.** GPIO 17 (pin 11) → 1 kΩ → base; emitter → GND
+(pin 9) and the flash cable's sleeve; collector → the cable's tip. On the
+cable in use, **black is the tip and red the sleeve** -- the reverse of the
+usual colours. A PC817 optocoupler was tried first (2026-10-05/06) and fired
+the flash only intermittently, two chips, any wiring: driven from a Pi pin it
+did not short the flash's trigger hard enough. The transistor fires it every
+time. It gives up isolation between Pi and flash, acceptable at this flash's
+low trigger voltage. Keep it off the first rows of the breadboard (loose
+contacts), and solder it for the line -- push-fit joints do not survive the
+destoner's vibration.
 
 **Status:** screen, capture loop and the Caliban side are written and tested
 against stand-ins. The camera part of the loop is provisional (a plain still,
