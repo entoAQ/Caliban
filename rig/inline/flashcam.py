@@ -34,6 +34,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py wb              # white balance under the flash, card in the centre
     python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
     python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
+    python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
 """
 
 import gc
@@ -306,6 +307,29 @@ def focus(near=0.5, far=8.0):
     print(f"saved lens_position {best} (~{100 / best:.0f} cm) to {SETTINGS_FILE}")
 
 
+def focus_shots(positions=(0.0, 2.0, 3.5, 5.0, 8.0)):
+    """Save a 100% crop of the middle of a flash photo at each lens position,
+    for comparing by eye -- the arbiter when the sharpness score is in doubt
+    (2026-10-06: the score barely moved across the whole lens range although
+    the camera reported the lens moving)."""
+    from PIL import Image
+    s = load_settings()
+    out_dir = os.path.join(HOME, "captures", "inline", "focus")
+    os.makedirs(out_dir, exist_ok=True)
+    for pos in positions:
+        keep = {}
+        capture(os.path.join(out_dir, "full.jpg"), dict(s, lens_position=pos, attempts=3, recharge_s=1.5),
+                log=lambda *_: None, keep=keep)
+        a = keep["array"]
+        h, w = a.shape[:2]
+        crop = a[h // 2 - 200:h // 2 + 200, w // 2 - 300:w // 2 + 300, ::-1]
+        name = os.path.join(out_dir, f"lens_{pos:04.1f}.png")
+        Image.fromarray(crop).save(name)
+        print(f"lens {pos:4.1f} dioptres (~{100 / pos if pos else float('inf'):.0f} cm): "
+              f"sharpness {_sharpness(a):7.1f} -> {name}", flush=True)
+    print(f"compare the crops in {out_dir} at 100% zoom")
+
+
 def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
@@ -342,6 +366,8 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "focus":
         focus()
+    elif len(sys.argv) > 1 and sys.argv[1] == "focus-shots":
+        focus_shots()
     elif len(sys.argv) > 1 and sys.argv[1] == "wb":
         region = tuple(float(v) for v in sys.argv[2].split(",")) if len(sys.argv) > 2 else (0.3, 0.3, 0.7, 0.7)
         white_balance(region)
