@@ -50,7 +50,11 @@ DEFAULTS = {
     "colour_gains": [1.8, 1.6],    # placeholder until a white balance under the flash
     "lens_position": 2.8,          # dioptres = 1 / metres; ~35 cm. Set by calibration.
     "flash_gpio": 17,
-    "pulse_ms": 3,
+    # How long the trigger is held closed. The flash fires as it closes, so
+    # this does not move the moment of firing -- it only gives a marginal
+    # closure longer to register. 3 ms missed intermittently on the bench
+    # (2026-10-06) where 20 ms did not.
+    "pulse_ms": 20,
     "recharge_s": 3.0,             # the TT520III at 1/128 is ready well within this
     "attempts": 3,
     # Acceptance: a frame is "flash-lit" when its mean is this much above the
