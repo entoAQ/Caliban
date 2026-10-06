@@ -19,6 +19,13 @@ EnvironmentFile=/etc/caliban-inline.env
 
 ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/loop.py
 
+# Real-time priority, so the few milliseconds in which the flash has to be
+# fired are not interrupted by the touchscreen's browser or anything else --
+# the flash has only a ~7 ms window per frame (flashcam.py). The loop sleeps
+# almost all of the time, so this costs the rest of the Pi nothing.
+CPUSchedulingPolicy=fifo
+CPUSchedulingPriority=50
+
 Restart=always
 RestartSec=10
 

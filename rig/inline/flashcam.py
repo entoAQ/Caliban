@@ -33,6 +33,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py                 # one test capture -> ~/captures/inline/TEST.jpg
 """
 
+import gc
 import json
 import os
 import time
@@ -157,11 +158,24 @@ def capture(path, settings=None, log=print):
             frames_ahead = -(-(_boottime_ns() + margin_ns + lead_ns - ts) // period_ns)
             target_ts = ts + max(1, frames_ahead) * period_ns
             fire_at = target_ts - lead_ns
-            while _boottime_ns() < fire_at:
-                pass                 # busy-wait: sleep() is too coarse for a ~40 ms window
-            flash.on()
+            # The window is ~7 ms wide and aimed at its middle, so a pause of
+            # more than ~3.5 ms between the wait ending and the flash firing
+            # misses it -- seen on 2026-10-06, the flash visibly firing outside
+            # the exposure. Python's garbage collector is the classic source of
+            # such a pause, so it is held off for these few milliseconds; the
+            # scheduler is the other, which caliban-inline.service handles by
+            # running the loop at real-time priority.
+            gc.disable()
+            try:
+                while _boottime_ns() < fire_at:
+                    pass             # busy-wait: sleep() is far too coarse for this
+                flash.on()
+                fired_at = _boottime_ns()
+            finally:
+                gc.enable()
             time.sleep(s["pulse_ms"] / 1000)
             flash.off()
+            late_ms = (fired_at - fire_at) / 1e6
 
             while True:
                 r = cam.capture_request()
@@ -183,11 +197,14 @@ def capture(path, settings=None, log=print):
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 Image.fromarray(array[..., ::-1]).save(path, quality=92)
                 return {"mean": round(mean, 1), "top": round(top, 1), "bottom": round(bottom, 1),
-                        "ambient": round(ambient, 1), "attempts": attempt,
+                        "ambient": round(ambient, 1), "attempts": attempt, "late_ms": round(late_ms, 2),
                         # The share of the photo that is room light, i.e. smear.
                         "ambient_share": round(ambient / mean, 2) if mean else None}
+            # How late the trigger went out, against a margin of ~3.5 ms: a
+            # large number here means the Pi was busy, not that the flash failed.
             log(f"flash attempt {attempt}: mean {mean:.0f} (ambient {ambient:.0f}) "
-                f"top {top:.0f} bottom {bottom:.0f} -> {'split' if lit else 'no flash'}")
+                f"top {top:.0f} bottom {bottom:.0f} fired {late_ms:+.2f} ms late "
+                f"-> {'split' if lit else 'no flash'}")
             time.sleep(s["recharge_s"])
 
         if fired_any:
