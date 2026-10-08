@@ -186,7 +186,7 @@ def shoot(lot_number):
         except Exception as e:
             log(f"IR capture failed, continuing with visible only: {e}")
 
-        tof_reading = None
+    tof_reading = None
 
     return visible, ir, tof_reading
 
