@@ -186,11 +186,7 @@ def shoot(lot_number):
         except Exception as e:
             log(f"IR capture failed, continuing with visible only: {e}")
 
-    tof_reading = None
-    try:
-        tof_reading = tof.measure_volume()
-    except Exception as e:
-        log(f"ToF reading failed, continuing without it: {e}")
+        tof_reading = None
 
     return visible, ir, tof_reading
 
