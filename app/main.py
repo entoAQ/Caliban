@@ -307,11 +307,13 @@ def _check_capture_queue():
     lags = [l for l in (_claim_lag_s(r) for r in rows) if l is not None]
     if not lags:
         return "aucune capture depuis 24 h"
-    worst = max(lags)
-    if worst > CAPTURE_LAG_WARN_S:
-        raise RuntimeError(f"une capture a attendu {worst:.0f} s avant d'être prise par le banc "
-                           f"(5 dernières : {', '.join(f'{l:.0f}' for l in lags)} s)")
-    return f"prises en {', '.join(f'{l:.0f}' for l in lags)} s (5 dernières)"
+    # The latest one decides; the rest are context. A slow capture from
+    # before a fix must not keep this red until four more have been taken.
+    listed = ", ".join(f"{l:.0f}" for l in lags)
+    if lags[0] > CAPTURE_LAG_WARN_S:
+        raise RuntimeError(f"la dernière capture a attendu {lags[0]:.0f} s avant d'être prise par le banc "
+                           f"(5 dernières, la plus récente d'abord : {listed} s)")
+    return f"prises en {listed} s (5 dernières, la plus récente d'abord)"
 
 
 @app.get("/health/deep")
