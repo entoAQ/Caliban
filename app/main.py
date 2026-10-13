@@ -226,6 +226,96 @@ def health():
     }
 
 
+# ── Deep health: is each thing Caliban depends on actually answering ──
+# /health says the process is up. Every outage so far that was not a bad
+# deploy was something behind it -- a rotated secret, a dependency down -- with
+# /health still green. This tries each one, so the GitHub "Caliban — vérifier"
+# button and SGSC's diagnostic page can say which. Booleans and timings only;
+# never a value. Cached briefly so a page left open costs nothing.
+#
+# `critical` decides the overall status: a reading cannot be made without
+# Supabase or the vision endpoint. SharePoint only holds the legacy screening
+# photos, and Ariel's last report is about Ariel, not Caliban.
+_deep_health_cache = {"at": 0.0, "body": None}
+DEEP_HEALTH_CACHE_S = 30
+
+
+def _deep_check(fn, critical=True):
+    t0 = time.time()
+    try:
+        detail = fn()
+        ok = True
+    except Exception as e:
+        detail, ok = f"{type(e).__name__}: {e}"[:300], False
+    return {"ok": ok, "critical": critical, "ms": int((time.time() - t0) * 1000), "detail": detail}
+
+
+def _check_supabase():
+    supabase.table("system_config").select("key").limit(1).execute()
+    return "répond"
+
+
+def _check_vision_endpoint():
+    import urllib.error
+    import urllib.request
+    if not (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY and AZURE_OPENAI_DEPLOYMENT):
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT / _API_KEY / _DEPLOYMENT incomplets")
+    # Reachability only -- any HTTP answer, even 404, means the endpoint is
+    # there. A real call would spend money every time someone presses Vérifier.
+    try:
+        urllib.request.urlopen(AZURE_OPENAI_ENDPOINT, timeout=10)
+    except urllib.error.HTTPError:
+        pass
+    return "joignable"
+
+
+def _check_sharepoint():
+    sharepoint_client._get_access_token()
+    return "jeton obtenu"
+
+
+def _check_ariel_report():
+    rows = supabase.table("device_status").select("reported_at, report").eq("device", DOCTOR_DEVICE) \
+        .limit(1).execute().data
+    if not rows:
+        raise RuntimeError("aucun rapport reçu")
+    age = (_utc_now() - datetime.datetime.fromisoformat(rows[0]["reported_at"])).total_seconds()
+    if age > 300:
+        raise RuntimeError(f"dernier rapport il y a {int(age // 60)} min")
+    return f"rapport il y a {int(age)} s, état {(rows[0]['report'] or {}).get('overall', '?')}"
+
+
+@app.get("/health/deep")
+def health_deep():
+    if _deep_health_cache["body"] and time.time() - _deep_health_cache["at"] < DEEP_HEALTH_CACHE_S:
+        return _deep_health_cache["body"]
+    checks = {
+        "supabase": _deep_check(_check_supabase),
+        "vision": _deep_check(_check_vision_endpoint),
+        "sharepoint": _deep_check(_check_sharepoint, critical=False),
+        "ariel": _deep_check(_check_ariel_report, critical=False),
+    }
+    wakeup = getattr(app.state, "command_wakeup", None)
+    checks["command_wakeup"] = {
+        "ok": bool(wakeup) and not wakeup.done(), "critical": False, "ms": 0,
+        "detail": "en marche" if wakeup and not wakeup.done() else "arrêté",
+    }
+    body = {
+        "status": "ok" if all(c["ok"] for c in checks.values() if c["critical"]) else "degraded",
+        "build_sha": os.environ.get("CALIBAN_BUILD_SHA", "unknown"),
+        "started_at": STARTUP_TIME,
+        "checks": checks,
+        # Set or not, never the value: a missing app setting after a portal
+        # edit is the other outage that /health cannot see.
+        "config": {k: bool(os.environ.get(k)) for k in (
+            "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
+            "AZURE_OPENAI_DEPLOYMENT", "RIG_API_KEY", "INLINE_API_KEY", "POWER_AUTOMATE_API_KEY",
+            "TEAMS_ALERT_WEBHOOK_URL", "MS_CLIENT_SECRET")},
+    }
+    _deep_health_cache.update(at=time.time(), body=body)
+    return body
+
+
 # ── Browser-facing: which prompt variants exist right now ────────────
 # Lets the validation UI build its variant-selection checkboxes without
 # hardcoding the list -- adding a key to BAND_PROMPT_VARIANTS is enough
@@ -3524,6 +3614,37 @@ async def inline_reading(
     return _inline_response(reading_id, decider, settings, recorded_id)
 
 
+INLINE_STATE_MAX_BYTES = 200_000
+
+
+@app.post("/inline/state")
+async def inline_state(request: Request, _: bool = Depends(verify_inline_key)):
+    """The destoner screen's current state, from the Pi, for SGSC's mirror.
+
+    Overwrites the rig's one row in inline_rig_status (rig/inline/
+    inline_rig_status.sql). The Pi sends it whenever the screen would change
+    and at least once a minute, so updated_at doubles as "is the rig still
+    reporting". Nothing here is a record -- readings and confirmations have
+    their own tables -- so a lost update costs nothing but freshness.
+    """
+    raw = await request.body()
+    if len(raw) > INLINE_STATE_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="État trop volumineux.")
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Objet JSON attendu.")
+    device = str(body.pop("device", "ariel"))[:40] or "ariel"
+    supabase.table("inline_rig_status").upsert({
+        "device": device,
+        "state": body,
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }, on_conflict="device").execute()
+    return {"ok": True}
+
+
 INLINE_ACK_CHOICES = ("adjusted", "clean_rejects", "set")
 
 
@@ -3556,6 +3677,125 @@ async def inline_acks(request: Request, _: bool = Depends(verify_inline_key)):
         supabase.table("inline_acks").upsert(
             rows, on_conflict="reading_id,acked_at", ignore_duplicates=True).execute()
     return {"ok": True, "count": len(rows)}
+
+
+# ── Device diagnostic and repair (rig/inline/doctor.py) ──────────────
+# Ariel's doctor posts its checks here every minute, and the reply carries any
+# repair queued from SGSC's diagnostic page -- the report is the poll, so the
+# Pi still only ever reaches out. Tables: rig/inline/device_doctor.sql.
+#
+# The device is fixed by the key rather than named in the request: the inline
+# key is Ariel's and nobody else's, so it can only ever report as Ariel.
+DOCTOR_DEVICE = "ariel"
+# What SGSC may ask for, mirrored in device_commands' check constraint and in
+# doctor.py FIXES. cycle_wifi is deliberately absent: from a desk it can only
+# cut the link it would be asked over.
+DOCTOR_ACTIONS = {
+    "repair_all": "Tout réparer",
+    "restart_loop": "Redémarrer les lectures",
+    "restart_screen": "Redémarrer l'écran",
+    "restart_kiosk": "Rouvrir le navigateur",
+    "restore_kiosk": "Rétablir le plein écran",
+    "test_flash": "Tester le flash",
+    "free_disk": "Libérer de l'espace",
+    "update_code": "Remettre le logiciel à jour",
+    "reboot": "Redémarrer le Pi",
+}
+# A repair not picked up within this long is dropped, not delivered late --
+# see device_doctor.sql.
+DOCTOR_COMMAND_TTL_S = 600
+
+
+def _utc_now():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+@app.get("/inline/ping")
+def inline_ping(_: bool = Depends(verify_inline_key)):
+    """Lets the Pi's doctor tell "Caliban refuses my key" from "Caliban is
+    down" without spending an analysis to find out."""
+    return {"ok": True}
+
+
+@app.post("/inline/doctor/report")
+async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline_key)):
+    """Store the doctor's latest checks; record results of repairs it ran;
+    hand it any repair waiting for it."""
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    report = body.get("report") if isinstance(body, dict) else None
+    if not isinstance(report, dict):
+        raise HTTPException(status_code=400, detail="« report » attendu.")
+    now = _utc_now()
+    supabase.table("device_status").upsert(
+        {"device": DOCTOR_DEVICE, "report": report, "reported_at": now.isoformat()},
+        on_conflict="device").execute()
+
+    for r in body.get("results") or []:
+        if isinstance(r, dict) and isinstance(r.get("id"), int):
+            supabase.table("device_commands").update({
+                "done_at": now.isoformat(), "ok": bool(r.get("ok")),
+                "detail": str(r.get("detail") or "")[:500],
+            }).eq("id", r["id"]).eq("device", DOCTOR_DEVICE).execute()
+
+    cutoff = (now - datetime.timedelta(seconds=DOCTOR_COMMAND_TTL_S)).isoformat()
+    pending = (
+        supabase.table("device_commands").select("id, action")
+        .eq("device", DOCTOR_DEVICE).is_("sent_at", "null").gte("requested_at", cutoff)
+        .order("requested_at").limit(5).execute()
+    ).data or []
+    if pending:
+        supabase.table("device_commands").update({"sent_at": now.isoformat()}) \
+            .in_("id", [c["id"] for c in pending]).execute()
+    return {"commands": pending}
+
+
+@app.get("/admin/devices/{device}")
+def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
+    """SGSC's diagnostic page: the device's latest checks and recent repairs."""
+    if device != DOCTOR_DEVICE:
+        raise HTTPException(status_code=404, detail="Appareil inconnu.")
+    status = (supabase.table("device_status").select("*").eq("device", device).limit(1).execute()).data
+    commands = (
+        supabase.table("device_commands").select("*").eq("device", device)
+        .order("requested_at", desc=True).limit(15).execute()
+    ).data or []
+    return {
+        "status": status[0] if status else None,
+        "commands": commands,
+        "now": _utc_now().isoformat(),
+        "command_ttl_s": DOCTOR_COMMAND_TTL_S,
+        "actions": DOCTOR_ACTIONS,
+    }
+
+
+@app.post("/admin/devices/{device}/commands")
+async def admin_device_command(device: str, request: Request,
+                               operator: dict = Depends(require_role("qc"))):
+    """Queue one repair for the device's next report (within a minute)."""
+    if device != DOCTOR_DEVICE:
+        raise HTTPException(status_code=404, detail="Appareil inconnu.")
+    try:
+        action = (await request.json()).get("action")
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Corps JSON invalide.")
+    if action not in DOCTOR_ACTIONS:
+        raise HTTPException(status_code=400, detail=f"Réparation inconnue : {action!r}"[:200])
+    # The same request already waiting: a second press of "Redémarrer le Pi"
+    # while the first is in flight must not reboot it twice.
+    cutoff = (_utc_now() - datetime.timedelta(seconds=DOCTOR_COMMAND_TTL_S)).isoformat()
+    waiting = (
+        supabase.table("device_commands").select("id").eq("device", device).eq("action", action)
+        .is_("done_at", "null").gte("requested_at", cutoff).limit(1).execute()
+    ).data
+    if waiting:
+        raise HTTPException(status_code=409, detail="Cette réparation est déjà en attente.")
+    row = supabase.table("device_commands").insert({
+        "device": device, "action": action, "requested_by": operator.get("email"),
+    }).execute().data
+    return row[0] if row else {"ok": True}
 
 
 @app.post("/admin/photo-stats/backfill")

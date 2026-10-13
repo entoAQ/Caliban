@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 import flashcam
+import screen
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
@@ -219,6 +220,41 @@ def forward_acks():
     log(f"forwarded {len(batch)} confirmation(s)")
 
 
+# --- Mirror for SGSC -----------------------------------------------------------
+#
+# What the touchscreen shows, sent to Caliban (/inline/state) so SGSC's
+# destoner-mirror.html can show the same screen anywhere. Sent when it would
+# change and at least once a minute, so the mirror can tell a quiet line from
+# a rig that has stopped reporting. Best-effort: a failure costs the mirror's
+# freshness, never a reading.
+
+MIRROR_EVERY_S = 60
+_mirror = {"sig": None, "at": 0.0, "failing": False}
+
+
+def mirror_state(state):
+    by_reading, setting = screen.summarise_acks(screen.read_acks())
+    payload = {k: v for k, v in state.items() if k not in ("flash_levels", "updated_at")}
+    reading = payload.get("reading") or {}
+    payload["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
+    payload["setting"] = setting
+    sig = json.dumps(payload, sort_keys=True, default=str)
+    if sig == _mirror["sig"] and time.monotonic() - _mirror["at"] < MIRROR_EVERY_S:
+        return
+    try:
+        resp = requests.post(f"{CALIBAN_URL}/inline/state", headers=headers(),
+                             json={**payload, "device": "ariel"}, timeout=15)
+        resp.raise_for_status()
+        _mirror.update(sig=sig, at=time.monotonic())
+        if _mirror["failing"]:
+            log("mirror state reaching Caliban again")
+        _mirror["failing"] = False
+    except requests.RequestException as e:
+        if not _mirror["failing"]:
+            log(f"mirror state not sent: {type(e).__name__}: {e}")
+        _mirror["failing"] = True
+
+
 # --- One reading --------------------------------------------------------------
 
 # While the line is stopped or the chute empty, look again this often. The
@@ -392,6 +428,7 @@ def main():
             except requests.RequestException as e:
                 # Kept in the file; the next tick tries again.
                 log(f"confirmations not forwarded yet: {type(e).__name__}: {e}")
+            mirror_state(state)
         except Exception as e:
             log(f"unexpected error: {type(e).__name__}: {e}")
             traceback.print_exc()
