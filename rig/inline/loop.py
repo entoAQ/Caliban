@@ -155,6 +155,16 @@ def take_photo(reading_id):
 # so one odd frame does not send someone for batteries.
 FLASH_LOW_LEVEL = 0.85
 
+# OFF since 2026-10-13. The level is measured on bare chute against a photo of
+# the chute clean, and a chute that has run product is never that clean: a
+# film of grey dust darkens it without changing its colour. The first day read
+# 0.70-0.78 all day, stopped or running, with no trend -- dust, not batteries,
+# and the screen told the floor to change good batteries. Levels are still
+# recorded (flash_levels, and the log) to design a replacement that needs
+# nothing fitted to the chute. A flash that does not fire is still caught --
+# FlashNotFired / a black photo -- and does not depend on any of this.
+FLASH_LOW_WARN = False
+
 
 def judge_flash(state, level):
     if level is None:
@@ -162,7 +172,7 @@ def judge_flash(state, level):
     levels = state.setdefault("flash_levels", [])
     levels.append(level)
     del levels[:-60]
-    if len(levels) >= 2 and all(v < FLASH_LOW_LEVEL for v in levels[-2:]):
+    if FLASH_LOW_WARN and len(levels) >= 2 and all(v < FLASH_LOW_LEVEL for v in levels[-2:]):
         set_health(state, flash="low", message="Flash plus faible que d'habitude — changer les piles du flash")
     elif state.get("health", {}).get("flash") == "low":
         set_health(state, flash="ok")
@@ -414,6 +424,10 @@ def main():
 
     state = load_state()
     state.pop("demo", None)
+    # A "low" left in the state file from before FLASH_LOW_WARN was turned off
+    # would otherwise stay on the screen until a usable level came in.
+    if not FLASH_LOW_WARN and state.get("health", {}).get("flash") == "low":
+        set_health(state, flash="ok")
     next_at = now_utc()
 
     while True:
