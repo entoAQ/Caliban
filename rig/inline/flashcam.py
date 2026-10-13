@@ -123,10 +123,14 @@ DEFAULTS = {
     # Flash strength against the reference photo, measured on the tiles that
     # still look like bare chute. Bare chute is picked by colour -- each
     # tile's r:g:b proportions within this distance of the reference's --
-    # because brightness is exactly what a tiring flash changes. Needs at
-    # least flash_min_tiles of the view to be bare to say anything.
+    # because brightness is exactly what a tiring flash changes.
+    # Only judged when most of the view is bare (flash_min_tiles): grey frass
+    # and dust on a running chute pass the colour test but are darker than
+    # the clean chute, and read as a failing flash -- 0.90 to 0.62 in ten
+    # minutes of running product on 2026-10-13. Mostly-bare views are the
+    # keep-alive photos during stops and sparse moments, which is enough.
     "flash_chroma_tol": 0.03,
-    "flash_min_tiles": 0.15,
+    "flash_min_tiles": 0.60,
 }
 
 REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
