@@ -37,6 +37,8 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
     python3 flashcam.py sweep           # measure the firing window for this camera and save it
     python3 flashcam.py daylight        # colour from the camera's own calibration at flash colour
+    python3 flashcam.py reference       # flash photo of the EMPTY chute, for the product check
+    python3 flashcam.py motion          # line-running scores, to set motion_threshold
 """
 
 import gc
@@ -95,7 +97,32 @@ DEFAULTS = {
     "min_flash_gain": 20.0,
     "bands": 8,
     "band_min_share": 0.35,
+    # Is the line running? Without the flash: a few long, sensitive exposures
+    # in the little room light under the tote, a fraction of a second apart.
+    # Moving product changes between them; an empty or stopped chute does
+    # not. The score is the mean frame-to-frame change (0-255) on 8x8-pixel
+    # blocks, which averages the sensor noise of a high gain away.
+    # motion_threshold is set by calibration (`flashcam.py motion`, line
+    # running and line stopped); the default is a guess until then.
+    "motion_exposure_us": 100000,
+    "motion_gain": 8.0,
+    "motion_frames": 4,
+    "motion_gap_s": 0.3,
+    "motion_threshold": 3.0,
+    "motion_min_brightness": 4.0,   # darker than this, there is nothing to judge by
+    # Is there product in the photo? Compared tile by tile with a flash photo
+    # of the empty chute (`flashcam.py reference`): a tile counts as product
+    # when its colour differs from the empty chute's by more than
+    # coverage_diff (0-255). Below min_coverage the photo is not analysed.
+    "coverage_grid": [32, 24],
+    "coverage_diff": 25.0,
+    "min_coverage": 0.30,
+    # During a stop, fire the flash this often anyway: the TT520III falls
+    # into a sleep only its button wakes after ~10 min without a trigger.
+    "keepalive_s": 480,
 }
+
+REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
 
 
 class FlashNotFired(Exception):
@@ -157,6 +184,102 @@ def _bands(array, n):
     g = array[::8, ::8].mean(axis=2)
     edges = [round(i * g.shape[0] / n) for i in range(n + 1)]
     return [float(g[edges[i]:edges[i + 1]].mean()) for i in range(n)]
+
+
+def _tiles(array, grid):
+    """Mean colour of each tile on a cols x rows grid -> (rows, cols, 3)."""
+    cols, rows = grid
+    h, w = array.shape[:2]
+    a = array[:h - h % rows, :w - w % cols].astype(float)
+    return a.reshape(rows, a.shape[0] // rows, cols, a.shape[1] // cols, 3).mean(axis=(1, 3))
+
+
+_reference = {}
+
+
+def coverage(array, settings):
+    """Share of the view that is not empty chute (0-1), or None without a
+    reference photo of the empty chute or when it was taken in another mode."""
+    import numpy as np
+    try:
+        mtime = os.path.getmtime(REFERENCE_FILE)
+    except OSError:
+        return None
+    if _reference.get("mtime") != mtime:
+        _reference.update(mtime=mtime, tiles=np.load(REFERENCE_FILE))
+    ref = _reference["tiles"]
+    tiles = _tiles(array, settings["coverage_grid"])
+    if tiles.shape != ref.shape:
+        return None
+    diff = np.abs(tiles - ref).mean(axis=2)
+    return round(float((diff > settings["coverage_diff"]).mean()), 3)
+
+
+def save_reference():
+    """Flash photo of the EMPTY chute, kept as what "no product" looks like.
+    Take it with the line stopped and the chute clear; redo it if the camera,
+    the flash, the aperture or the chute surface changes."""
+    import numpy as np
+    s = load_settings()
+    keep = {}
+    m = capture(os.path.join(HOME, "captures", "inline", "REFERENCE.jpg"), s, keep=keep)
+    np.save(REFERENCE_FILE, _tiles(keep["array"], s["coverage_grid"]))
+    print(f"reference saved to {REFERENCE_FILE} (mean {m['mean']:.0f}); "
+          f"photo in ~/captures/inline/REFERENCE.jpg")
+
+
+def _blocks(gray, n=8):
+    h, w = gray.shape
+    return gray[:h - h % n, :w - w % n].reshape(h // n, n, w // n, n).mean(axis=(1, 3))
+
+
+def motion_check(settings=None):
+    """Is product moving under the camera? No flash.
+
+    Returns {"score", "brightness", "running"}; running is None when it is
+    too dark to tell (lights out, cover sealed) -- the caller decides what an
+    unknown means. Opens and closes the camera like capture()."""
+    import numpy as np
+    from picamera2 import Picamera2
+    s = settings or load_settings()
+    cam = Picamera2()
+    try:
+        frame_us = s["motion_exposure_us"] + 20000
+        cam.configure(cam.create_still_configuration(
+            main={"size": tuple(s["size"]), "format": "RGB888"},
+            **({"sensor": {"output_size": tuple(s["sensor_size"])}} if s.get("sensor_size") else {}),
+            buffer_count=2,
+            controls={"ExposureTime": s["motion_exposure_us"], "AnalogueGain": s["motion_gain"],
+                      "AeEnable": False, "AwbEnable": False, "ColourGains": tuple(s["colour_gains"]),
+                      "FrameDurationLimits": (frame_us, frame_us)}))
+        cam.start()
+        time.sleep(0.5)
+        frames = []
+        for _ in range(s["motion_frames"]):
+            frames.append(_blocks(cam.capture_array("main").astype(float).mean(axis=2)))
+            time.sleep(s["motion_gap_s"])
+    finally:
+        try:
+            cam.stop()
+        finally:
+            cam.close()
+    brightness = float(np.mean(frames))
+    score = float(np.mean([np.abs(b - a).mean() for a, b in zip(frames, frames[1:])]))
+    running = None if brightness < s["motion_min_brightness"] else score >= s["motion_threshold"]
+    return {"score": round(score, 2), "brightness": round(brightness, 1), "running": running}
+
+
+def keepalive(settings=None):
+    """Fire the flash once with no photo, so it does not fall asleep."""
+    from gpiozero import DigitalOutputDevice
+    s = settings or load_settings()
+    flash = DigitalOutputDevice(s["flash_gpio"])
+    try:
+        flash.on()
+        time.sleep(s["pulse_ms"] / 1000)
+        flash.off()
+    finally:
+        flash.close()
 
 
 def capture(path, settings=None, log=print, keep=None):
@@ -269,6 +392,10 @@ def capture(path, settings=None, log=print, keep=None):
                         # there is gone, and pale frass on pale larvae is the
                         # first thing lost. Aim well under a few percent.
                         "clipped_pct": round(float((coarse >= 250).any(axis=2).mean()) * 100, 1),
+                        # Share of the view that is not empty chute, when a
+                        # reference exists; the loop skips sending below
+                        # min_coverage.
+                        "coverage": coverage(array, s),
                         # The share of the photo that is room light, i.e. smear.
                         "ambient_share": round(ambient / mean, 2) if mean else None}
             # How late the trigger went out, against a margin of ~3.5 ms: a
@@ -518,6 +645,15 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "sweep":
         sweep()
+    elif len(sys.argv) > 1 and sys.argv[1] == "reference":
+        save_reference()
+    elif len(sys.argv) > 1 and sys.argv[1] == "motion":
+        # Calibration: run once with the line running and once stopped, and
+        # set motion_threshold between the two sets of scores.
+        n = int(sys.argv[2]) if len(sys.argv) > 2 else 8
+        for i in range(n):
+            print(motion_check(), flush=True)
+            time.sleep(2)
     elif len(sys.argv) > 1 and sys.argv[1] == "daylight":
         daylight(int(sys.argv[2]) if len(sys.argv) > 2 else 5600)
     elif len(sys.argv) > 1 and sys.argv[1] in ("focus", "focus-shots") and load_settings()["camera"] == "imx477":

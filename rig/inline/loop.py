@@ -251,10 +251,58 @@ def forward_acks():
 
 # --- One reading --------------------------------------------------------------
 
+# While the line is stopped or the chute empty, look again this often. The
+# motion check costs no flash and no Azure call, so it can be frequent.
+IDLE_RECHECK_S = 60
+
+
+def line_running(state, cam_settings):
+    """True / False / None (too dark to tell). Updates state["line"] and,
+    during a stop, keeps the flash awake. A camera fault here is not a reason
+    to skip a reading: it returns None and the flash capture goes ahead."""
+    if FAKE_PHOTO:
+        return True
+    try:
+        with watchdog():
+            m = flashcam.motion_check(cam_settings)
+    except Exception as e:
+        log(f"motion check failed: {type(e).__name__}: {e}")
+        return None
+    running = m["running"]
+    line = state.setdefault("line", {})
+    if running is False:
+        if line.get("running") is not False:
+            line["since"] = iso(now_utc())
+            log(f"line stopped (motion {m['score']}, light {m['brightness']})")
+        line.update(running=False, motion=m["score"])
+        # The TT520III falls into a sleep only its button wakes after ~10 min
+        # with no trigger; a stop must not leave it there for the restart.
+        last = state.get("last_flash_at")
+        if not last or (now_utc() - datetime.fromisoformat(last)).total_seconds() >= cam_settings["keepalive_s"]:
+            try:
+                flashcam.keepalive(cam_settings)
+                state["last_flash_at"] = iso(now_utc())
+                log("keep-alive flash")
+            except Exception as e:
+                log(f"keep-alive flash failed: {type(e).__name__}: {e}")
+    else:
+        if line.get("running") is False:
+            log(f"line running again (motion {m['score']})")
+        line.update(running=True if running else None, motion=m["score"], since=None)
+    return running
+
+
 def take_reading(state):
     """Returns seconds until the next one."""
     reading_id = datetime.now().strftime("IL-%Y%m%d-%H%M%S")
     interval = state.get("interval_s") or DEFAULT_INTERVAL_S
+    cam_settings = flashcam.load_settings()
+
+    # No flash and no analysis while nothing is moving: a stopped line, or an
+    # empty chute. Too dark to tell (None) is treated as running -- a wasted
+    # reading is cheaper than a missed one.
+    if line_running(state, cam_settings) is False:
+        return IDLE_RECHECK_S
 
     try:
         path, measured = take_photo(reading_id)
@@ -272,6 +320,18 @@ def take_reading(state):
         set_health(state, camera="fail", message="Caméra : aucune photo — vérifier le câble et la caméra")
         return interval
     state["last_capture"] = measured
+    state["last_flash_at"] = iso(now_utc())
+
+    # Product in view? Compared with the empty-chute reference; without one,
+    # coverage is None and the photo goes as before.
+    cov = measured.get("coverage")
+    line = state.setdefault("line", {})
+    if cov is not None and cov < cam_settings["min_coverage"]:
+        log(f"{reading_id}: product covers {cov:.0%} of the view -- not analysed")
+        line.update(product=False, coverage=cov)
+        return IDLE_RECHECK_S
+    line.update(product=True, coverage=cov)
+
     share = measured.get("ambient_share")
     if share is not None and share > AMBIENT_SHARE_WARN:
         log(f"{reading_id}: room light is {share:.0%} of the photo")

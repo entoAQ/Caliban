@@ -169,6 +169,8 @@ def demo_state():
         ("stale", None),
         ("flash_low", dict(band="3-8", estimate_pct=5.1, instruction="hold")),
         ("trial", dict(band="8-10", estimate_pct=8.7, instruction="increase_minor")),
+        ("stopped", dict(band="3-8", estimate_pct=4.4, instruction="hold")),
+        ("empty", dict(band="3-8", estimate_pct=4.4, instruction="hold")),
     ]
     tick = int(time.time() // DEMO_SECONDS)
     name, reading = scenes[tick % len(scenes)]
@@ -187,7 +189,10 @@ def demo_state():
         health["message"] = "Piles du flash faibles — changer les piles"
 
     reading["id"] = f"DEMO-{tick}-{name}"
+    line = ({"running": False} if name == "stopped"
+            else {"running": True, "product": False} if name == "empty" else {"running": True, "product": True})
     return {
+        "line": line,
         "mode": "shadow" if name == "trial" else "live",
         "reading": reading,
         "history": history,

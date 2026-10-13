@@ -171,6 +171,12 @@ const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748
 // but not yet validated against tray samples and lab results, so nothing on
 // this screen may look like an instruction to act on.
 const TRIAL = { title: 'MODE ESSAI', bg: '#e0e7ff', border: '#6366f1', fg: '#312e81' };
+// Nothing to read: the loop saw no movement (line stopped) or too little
+// product in the photo, so no reading was taken and the last one is withdrawn.
+const IDLE = {
+  stopped: { title: 'LIGNE ARRÊTÉE', sub: "Aucune lecture pendant l'arrêt — reprise automatique au redémarrage." },
+  empty:   { title: 'PAS DE PRODUIT', sub: 'Trop peu de produit sur la chute pour une lecture — nouvel essai chaque minute.' },
+};
 
 // A reading older than this no longer describes the product going past, so its
 // instruction is withdrawn rather than left on screen looking current.
@@ -243,17 +249,22 @@ function render() {
   $('health-msg').textContent = s.state_error ? `État illisible : ${s.state_error}` : (h.message || '');
   renderSetting(s.setting);
 
+  const line = s.line || {};
+  const idle = line.running === false ? 'stopped' : line.product === false ? 'empty' : null;
   const r = s.reading;
   if (!r || !r.at) {
-    overlay('En attente de la première lecture', "Le banc n'a encore rien photographié.");
+    overlay(idle ? IDLE[idle].title : 'En attente de la première lecture',
+            idle ? IDLE[idle].sub : "Le banc n'a encore rien photographié.");
     return;
   }
   overlay(null);
 
-  const stale = minsAgo(r.at) > STALE_MIN;
+  // A stop or an empty chute withdraws the last instruction the same way an
+  // old reading does: it no longer describes what is going past.
+  const stale = minsAgo(r.at) > STALE_MIN || !!idle;
   const trial = !stale && s.mode === 'shadow';
   const read = INSTRUCTIONS[r.instruction];
-  const ins = stale ? STALE : trial ? TRIAL : (read || STALE);
+  const ins = idle ? { ...STALE, title: IDLE[idle].title } : stale ? STALE : trial ? TRIAL : (read || STALE);
   const card = $('card');
   card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
   $('title').textContent = ins.title;
@@ -262,7 +273,9 @@ function render() {
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
 
   let sub = '', steps = [];
-  if (stale) {
+  if (idle) {
+    sub = IDLE[idle].sub;
+  } else if (stale) {
     sub = `Dernière lecture ${agoText(r.at)} — ne pas régler le destoner sur cette base.`;
   } else if (trial) {
     sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') : '—'}. `
