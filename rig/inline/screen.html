@@ -39,14 +39,17 @@
   #health-msg { font-size: 18px; font-weight: 700; color: var(--warn); min-height: 0; }
   #health-msg:empty { display: none; }
 
-  #card { border-radius: 18px; border: 4px solid; padding: 24px 22px; text-align: center; }
-  #title { font-size: 64px; font-weight: 900; line-height: 1.05; letter-spacing: .01em; }
-  #sub { font-size: 24px; font-weight: 600; margin-top: 10px; }
-  #steps { text-align: left; font-size: 22px; font-weight: 600; line-height: 1.45;
+  /* The instruction is what the operator acts on, from a few metres away: it takes the
+     space the graph gives up (the graph is context, not an instruction). */
+  #card { border-radius: 18px; border: 4px solid; padding: 30px 22px; text-align: center;
+    flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  #title { font-size: 88px; font-weight: 900; line-height: 1.05; letter-spacing: .01em; }
+  #sub { font-size: 32px; font-weight: 700; margin-top: 14px; }
+  #steps { text-align: left; font-size: 28px; font-weight: 700; line-height: 1.45;
     margin: 14px 0 0; padding-left: 30px; }
   #reading { display: flex; justify-content: center; gap: 18px; margin-top: 18px;
     font-size: 20px; font-weight: 600; opacity: .85; }
-  #band { font-size: 26px; font-weight: 800; }
+  #band { font-size: 32px; font-weight: 800; }
 
   #alert { background: var(--bad); color: #fff; border-radius: 14px; padding: 18px;
     text-align: center; font-size: 28px; font-weight: 900; }
@@ -74,11 +77,11 @@
   #ack-error { color: var(--bad); font-size: 18px; font-weight: 700; text-align: center; }
   #ack-error:empty { display: none; }
 
-  #trend-box { background: var(--panel); border-radius: 14px; padding: 12px 14px;
-    flex: 1; min-height: 180px; display: flex; flex-direction: column; }
+  #trend-box { background: var(--panel); border-radius: 14px; padding: 10px 14px;
+    flex: 0 0 auto; display: flex; flex-direction: column; }
   #trend-box h2, #bottom h2 { font-size: 16px; margin: 0 0 6px; color: var(--muted); font-weight: 700;
     text-transform: uppercase; letter-spacing: .06em; }
-  #trend { width: 100%; flex: 1; min-height: 140px; display: block; }
+  #trend { width: 100%; height: 110px; display: block; }
 
   #bottom { display: flex; gap: 14px; align-items: stretch; }
   #photo-box { flex: 0 0 46%; background: var(--panel); border-radius: 14px; padding: 10px;
