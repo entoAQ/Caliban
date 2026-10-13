@@ -35,6 +35,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
     python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
     python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
+    python3 flashcam.py sweep           # measure the firing window for this camera and save it
 """
 
 import gc
@@ -45,15 +46,31 @@ import time
 HOME = os.path.expanduser("~")
 SETTINGS_FILE = os.path.join(HOME, "inline_camera.json")
 
+# Per camera, by sensor. Each is the camera's fast mode: a short readout lets
+# the exposure stay short, which keeps room-light smear down. fire_before_ms
+# is where the flash lands in the all-rows window; `flashcam.py sweep`
+# measures it and saves the middle of the window to the settings file.
+CAMERA_DEFAULTS = {
+    # Camera Module 3 (any variant). 1536x864 binned centre crop, ~7.5 ms
+    # readout; 15 ms exposure gives a ~7 ms window, measured 2026-10-05.
+    "imx708": {
+        "size": [1536, 864], "sensor_size": [1536, 864],
+        "exposure_us": 15000, "period_us": 25000, "fire_before_ms": 3.5,
+        "colour_gains": [1.8, 1.6],
+        "lens_position": 2.8,      # dioptres = 1 / metres; set by `focus`
+    },
+    # HQ Camera. 1332x990 binned crop (the 120 fps mode), readout under
+    # ~8.3 ms. Timing not yet measured on this camera: run `sweep`.
+    # No focus motor -- focus is the lens ring, set by hand.
+    "imx477": {
+        "size": [1332, 990], "sensor_size": [1332, 990],
+        "exposure_us": 15000, "period_us": 25000, "fire_before_ms": 3.5,
+        "colour_gains": [2.0, 1.8],
+    },
+}
+
 DEFAULTS = {
-    "size": [1536, 864],           # fast mode: binned centre crop, ~7.5 ms readout
-    "sensor_size": [1536, 864],    # forces that sensor mode rather than a scaled full frame
-    "exposure_us": 15000,          # readout + ~7 ms in which every row is exposing
-    "period_us": 25000,
-    "fire_before_ms": 3.5,         # middle of the measured 0-7 ms window
     "analogue_gain": 1.0,
-    "colour_gains": [1.8, 1.6],    # placeholder until a white balance under the flash
-    "lens_position": 2.8,          # dioptres = 1 / metres; ~35 cm. Set by calibration.
     "flash_gpio": 17,
     # How long the trigger is held closed. The flash fires as it closes, so
     # this does not move the moment of firing -- it only gives a marginal
@@ -89,8 +106,29 @@ class FlashTiming(Exception):
     """The flash fired but kept landing outside the all-rows window."""
 
 
+def camera_family():
+    """'imx708', 'imx477', ... for the camera plugged in, without opening it.
+    Variants share their family's settings (imx708_wide_noir -> imx708)."""
+    try:
+        from picamera2 import Picamera2
+        model = (Picamera2.global_camera_info() or [{}])[0].get("Model", "")
+    except Exception:
+        model = ""
+    for family in CAMERA_DEFAULTS:
+        if model.startswith(family):
+            return family
+    return "imx708"
+
+
 def load_settings():
+    """Common defaults, then the fitted camera's, then ~/inline_camera.json.
+
+    The file holds what calibration measured *for one camera* -- delete it
+    when the camera is swapped, or the old camera's focus and colour carry
+    over to the new one."""
     settings = dict(DEFAULTS)
+    settings["camera"] = camera_family()
+    settings.update(CAMERA_DEFAULTS.get(settings["camera"], {}))
     try:
         with open(SETTINGS_FILE) as f:
             settings.update(json.load(f))
@@ -152,8 +190,10 @@ def capture(path, settings=None, log=print, keep=None):
                 "AwbEnable": False,
                 "ColourGains": tuple(s["colour_gains"]),
                 "FrameDurationLimits": (s["period_us"], s["period_us"]),
-                "AfMode": lc.AfModeEnum.Manual,
-                "LensPosition": s["lens_position"],
+                # Only on a camera with a focus motor; the HQ camera has none
+                # and would refuse the controls.
+                **({"AfMode": lc.AfModeEnum.Manual, "LensPosition": s["lens_position"]}
+                   if "LensPosition" in cam.camera_controls and "lens_position" in s else {}),
             },
         )
         cam.configure(config)
@@ -330,6 +370,49 @@ def focus_shots(positions=(0.0, 2.0, 3.5, 5.0, 8.0)):
     print(f"compare the crops in {out_dir} at 100% zoom")
 
 
+def sweep():
+    """Measure where the flash must land on this camera, and save it.
+
+    Fires once per firing moment from 2 ms after the frame timestamp to the
+    full exposure before it, 1 ms apart, and reports each photo whole, split
+    or unlit. The middle of the longest run of whole photos is saved as
+    fire_before_ms. Needed once per camera model: the window depends on how
+    fast the sensor reads its rows out.
+    """
+    s = load_settings()
+    whole = []
+    leads = list(range(-2, s["exposure_us"] // 1000 + 2))
+    print(f"camera {s['camera']}, {s['size'][0]}x{s['size'][1]}, exposure {s['exposure_us'] / 1000:.0f} ms", flush=True)
+    for lead in leads:
+        notes = []
+        try:
+            capture(os.path.join(HOME, "captures", "inline", "SWEEP.jpg"),
+                    dict(s, fire_before_ms=lead, attempts=1), log=notes.append)
+            verdict = "WHOLE"
+            whole.append(lead)
+        except FlashTiming:
+            verdict = "split"
+        except FlashNotFired:
+            verdict = "no flash"
+        detail = notes[-1].split("strips ")[-1].split(" fired")[0] if notes else ""
+        print(f"  fire {lead:3d} ms before the timestamp: {verdict:8s} {detail}", flush=True)
+        time.sleep(2.0)
+    if not whole:
+        print("no whole photo at any moment -- is the flash on? nothing saved")
+        return
+    runs, run = [], [whole[0]]
+    for v in whole[1:]:
+        if v == run[-1] + 1:
+            run.append(v)
+        else:
+            runs.append(run); run = [v]
+    runs.append(run)
+    best = max(runs, key=len)
+    middle = (best[0] + best[-1]) / 2
+    _save_setting("fire_before_ms", middle)
+    print(f"whole from {best[0]} to {best[-1]} ms before -> saved fire_before_ms {middle} to {SETTINGS_FILE}")
+
+
 def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
@@ -364,7 +447,12 @@ def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "focus":
+    if len(sys.argv) > 1 and sys.argv[1] == "sweep":
+        sweep()
+    elif len(sys.argv) > 1 and sys.argv[1] in ("focus", "focus-shots") and load_settings()["camera"] == "imx477":
+        print("The HQ camera has no focus motor: focus it by hand on the lens ring "
+              "(live view: python3 ~/caliban/rig/preview.py).")
+    elif len(sys.argv) > 1 and sys.argv[1] == "focus":
         focus()
     elif len(sys.argv) > 1 and sys.argv[1] == "focus-shots":
         focus_shots()
