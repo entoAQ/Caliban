@@ -413,7 +413,7 @@ def sweep():
     print(f"whole from {best[0]} to {best[-1]} ms before -> saved fire_before_ms {middle} to {SETTINGS_FILE}")
 
 
-def white_balance(region=(0.3, 0.3, 0.7, 0.7), passes=8):
+def white_balance(region=(0.3, 0.3, 0.7, 0.7), passes=12):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
 
@@ -443,11 +443,16 @@ def white_balance(region=(0.3, 0.3, 0.7, 0.7), passes=8):
         patch = a[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].reshape(-1, 3).mean(axis=0)
         b, g, r = (float(v) for v in patch)
         print(f"pass {step}: card R {r:.0f}  G {g:.0f}  B {b:.0f}  (gains {gains[0]:.2f}, {gains[1]:.2f})", flush=True)
-        if max(r, g, b) > 235:
-            print("  the card is whiting out -- close the aperture further and run this again. Nothing saved.")
+        # Only true clipping or a dead channel stops it. Thresholds of 235 and
+        # 15 left an aperture band too narrow to set by hand on a white card
+        # (2026-10-13): a low channel is not a problem -- the next step raises
+        # its gain -- and only a channel pinned at the top has lost its ratio.
+        if max(r, g, b) >= 248:
+            print("  the card is clipping -- close the aperture a little and run this again. Nothing saved.")
             return
-        if min(r, g, b) < 15:
-            print("  a channel is near zero -- the card is too dark or not in the centre of the view. Nothing saved.")
+        if min(r, g, b) < 3:
+            print("  a channel reads zero -- open the aperture a little, or check the card fills "
+                  "the centre of the view. Nothing saved.")
             return
         if abs(r - g) <= 0.03 * g and abs(b - g) <= 0.03 * g:
             break
