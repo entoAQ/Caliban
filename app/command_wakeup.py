@@ -44,10 +44,26 @@ _healthy = False
 # still succeeds and no INSERT ever arrives, and the rig would then wait on the
 # safety claim for every capture instead of falling back to its 3 s poll.
 _pg_subscribed = False
+# Set when a command turned up that the listener never announced. Neither
+# check above can see this: on 2026-10-13 the client stayed connected, the
+# channel JOINED and the subscription confirmed, while no INSERT arrived --
+# every capture waited for the safety claim, 90-120 s, and the operator
+# screen gave up at 90. Only the queue itself shows a deaf listener.
+_deaf = False
+
+
+def missed(lag_s):
+    """The safety claim found a command queued lag_s ago that nobody
+    announced: stop vouching for the listener (the rig drops back to its 3 s
+    poll at once) and rebuild it."""
+    global _deaf
+    if not _deaf:
+        print(f"[command wakeup] a command waited {lag_s:.0f}s unannounced -- listener deaf, rebuilding")
+    _deaf = True
 
 
 def healthy():
-    return _healthy
+    return _healthy and not _deaf
 
 
 def pending():
@@ -82,10 +98,11 @@ def _on_system(payload):
 
 async def run():
     """Keep one subscription alive for the life of the worker."""
-    global _healthy, _pg_subscribed
+    global _healthy, _pg_subscribed, _deaf
     while True:
         client = None
         _pg_subscribed = False
+        _deaf = False
         try:
             client = AsyncRealtimeClient(f"{SUPABASE_URL}/realtime/v1", token=SUPABASE_SERVICE_KEY)
             await client.connect()
@@ -98,6 +115,8 @@ async def run():
 
             unhealthy_since = time.monotonic()
             while True:
+                if _deaf:
+                    break
                 joined = client.is_connected and channel.state == ChannelStates.JOINED
                 if not joined:
                     # A rejoin confirms itself again with a fresh system message.

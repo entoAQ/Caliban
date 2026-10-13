@@ -289,6 +289,31 @@ def _check_ariel_report():
     return f"rapport il y a {int(age)} s, état {(rows[0]['report'] or {}).get('overall', '?')}"
 
 
+# A tray capture claimed this long after it was queued has outlived the
+# wakeup: the 3 s fallback poll and the 20 s safety claim both land well under.
+CAPTURE_LAG_WARN_S = 30
+
+
+def _check_capture_queue():
+    """How long the tray rig's last few captures waited to be picked up. The
+    one symptom of a deaf wakeup listener (command_wakeup.missed) that shows
+    from outside: the listener looks healthy and the commands wait anyway."""
+    since = (_utc_now() - datetime.timedelta(days=1)).isoformat()
+    rows = (
+        supabase.table("capture_commands").select("requested_at, claimed_at")
+        .gte("requested_at", since).not_.is_("claimed_at", "null")
+        .order("requested_at", desc=True).limit(5).execute()
+    ).data or []
+    lags = [l for l in (_claim_lag_s(r) for r in rows) if l is not None]
+    if not lags:
+        return "aucune capture depuis 24 h"
+    worst = max(lags)
+    if worst > CAPTURE_LAG_WARN_S:
+        raise RuntimeError(f"une capture a attendu {worst:.0f} s avant d'être prise par le banc "
+                           f"(5 dernières : {', '.join(f'{l:.0f}' for l in lags)} s)")
+    return f"prises en {', '.join(f'{l:.0f}' for l in lags)} s (5 dernières)"
+
+
 @app.get("/health/deep")
 def health_deep():
     if _deep_health_cache["body"] and time.time() - _deep_health_cache["at"] < DEEP_HEALTH_CACHE_S:
@@ -298,6 +323,7 @@ def health_deep():
         "vision": _deep_check(_check_vision_endpoint),
         "sharepoint": _deep_check(_check_sharepoint, critical=False),
         "ariel": _deep_check(_check_ariel_report, critical=False),
+        "capture_queue": _deep_check(_check_capture_queue, critical=False),
     }
     wakeup = getattr(app.state, "command_wakeup", None)
     checks["command_wakeup"] = {
@@ -4480,10 +4506,29 @@ LONG_POLL_MAX_SECONDS = 55
 
 # Claim at least this often even with nothing announced: it covers an INSERT
 # the listener missed, and it is the only thing that runs the queue's
-# stale-claim reclaim (claim_capture_command's stale_after, also 2 minutes).
-SAFETY_CLAIM_SECONDS = 120
+# stale-claim reclaim (claim_capture_command's stale_after, 2 minutes).
+#
+# Was 120 s. On 2026-10-13 the listener went deaf while looking healthy, every
+# capture waited for this claim, and the operator screen (OP_TIMEOUT_MS, 90 s)
+# gave up before each photo arrived. 20 s keeps the worst case well inside
+# that: ~4,300 claims a day per worker in use, against 28,800 for the old
+# 3 s poll. A held request now also ends when the claim falls due, rather
+# than waiting out its full 55 s first.
+SAFETY_CLAIM_SECONDS = 20
+# A command the safety claim finds that was queued longer ago than this was
+# never announced -- the listener is deaf (command_wakeup.missed).
+UNANNOUNCED_LAG_SECONDS = 5
 
 _last_claim = 0.0
+
+
+def _claim_lag_s(data):
+    """Seconds between a command being queued and this claim, or None."""
+    try:
+        return (datetime.datetime.fromisoformat(data["claimed_at"])
+                - datetime.datetime.fromisoformat(data["requested_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _claim_next_command():
@@ -4497,7 +4542,7 @@ def _claim_next_command():
     if isinstance(data, list):
         data = data[0] if data else None
     if not data or not data.get("id"):
-        return None
+        return None, None
 
     return {
         "id": data["id"],
@@ -4506,7 +4551,7 @@ def _claim_next_command():
         # Older rows predate the column and are all plain captures, so an
         # absent kind means capture rather than an error.
         "kind": data.get("kind") or "capture",
-    }
+    }, _claim_lag_s(data)
 
 
 @app.get("/capture-commands/next")
@@ -4527,15 +4572,22 @@ async def capture_commands_next(wait: float = 0, _: bool = Depends(verify_rig_ke
     wait = min(max(wait, 0), LONG_POLL_MAX_SECONDS)
     held = bool(wait) and command_wakeup.healthy()
 
+    woken = False
     if held:
-        due = time.monotonic() - _last_claim > SAFETY_CLAIM_SECONDS
-        if not due and not command_wakeup.pending():
-            if not await command_wakeup.wait(wait):
+        remaining = SAFETY_CLAIM_SECONDS - (time.monotonic() - _last_claim)
+        woken = command_wakeup.pending()
+        if remaining > 0 and not woken:
+            # Held no longer than until the safety claim is due -- then claim
+            # here rather than send the rig away empty-handed.
+            woken = await command_wakeup.wait(min(wait, remaining))
+            if not woken and time.monotonic() - _last_claim < SAFETY_CLAIM_SECONDS:
                 return {"command": None, "waited": True}
         command_wakeup.consume()
 
     _last_claim = time.monotonic()
-    command = await run_in_threadpool(_claim_next_command)
+    command, lag = await run_in_threadpool(_claim_next_command)
+    if held and not woken and command and lag is not None and lag > UNANNOUNCED_LAG_SECONDS:
+        command_wakeup.missed(lag)
     return {"command": command, "waited": held}
 
 
