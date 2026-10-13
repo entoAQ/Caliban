@@ -2454,7 +2454,13 @@ def notify_increase_streak(n, series, source="operator"):
     if not TEAMS_ALERT_WEBHOOK_URL:
         return
     _, cycle_date = current_cycle_start()
-    card = increase_streak_card(n, series, cycle_date, source)
+    post_teams(increase_streak_card(n, series, cycle_date, source), "streak alert")
+
+
+def post_teams(card, what):
+    """Post a card to the AQ Teams channel on a thread, never raising."""
+    if not TEAMS_ALERT_WEBHOOK_URL:
+        return
 
     def send():
         import urllib.request
@@ -2464,7 +2470,7 @@ def notify_increase_streak(n, series, source="operator"):
                 headers={"Content-Type": "application/json"}, method="POST")
             urllib.request.urlopen(req, timeout=15).read()
         except Exception as e:
-            print(f"[teams streak alert failed] {type(e).__name__}: {e}")
+            print(f"[teams {what} failed] {type(e).__name__}: {e}")
 
     import threading
     threading.Thread(target=send, daemon=True).start()
@@ -3466,6 +3472,8 @@ def inline_settings():
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
+        if isinstance(overrides.get("offline_alert"), bool):
+            settings["offline_alert"] = overrides["offline_alert"]
     if settings["mode"] not in ("shadow", "live"):
         settings["mode"] = "shadow"
     settings["repeats"] = max(1, min(8, settings["repeats"]))
@@ -3714,6 +3722,102 @@ def _utc_now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
+# Silent this long and Caliban treats the device as offline. The doctor
+# reports every minute, and Ariel's own network watchdog cycles its Wi-Fi at 5
+# minutes and reboots at 15 -- so at 10 it has had its chance to fix the
+# common case alone, and anything later is worth a person knowing about.
+DOCTOR_OFFLINE_AFTER_S = 600
+DOCTOR_WATCH_EVERY_S = 60
+
+
+def _device_card(title, text, good):
+    return {"type": "message", "attachments": [{
+        "contentType": "application/vnd.microsoft.card.adaptive",
+        "content": {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard", "version": "1.4",
+            "body": [
+                {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "wrap": True,
+                 "color": "Good" if good else "Attention", "text": title},
+                {"type": "TextBlock", "wrap": True, "text": text},
+            ],
+        },
+    }]}
+
+
+def _offline_alerts_on():
+    """Teams only when the rig is live, like every other inline alert --
+    unless inline_settings.offline_alert says otherwise. In trial mode the
+    outage is still recorded (device_status.offline_since) and shown in SGSC."""
+    s = inline_settings()
+    return s.get("offline_alert", s["mode"] == "live")
+
+
+def _minutes(seconds):
+    return f"{int(seconds // 60)} min"
+
+
+def _watch_device_once():
+    now = _utc_now()
+    cutoff = (now - datetime.timedelta(seconds=DOCTOR_OFFLINE_AFTER_S)).isoformat()
+    # Conditional, so of the two workers' watchers exactly one gets the row
+    # back -- and with it the one alert for this outage.
+    rows = (
+        supabase.table("device_status").update({"offline_since": now.isoformat()})
+        .eq("device", DOCTOR_DEVICE).is_("offline_since", "null").lt("reported_at", cutoff)
+        .execute()
+    ).data
+    if not rows:
+        return
+    silent = (now - datetime.datetime.fromisoformat(rows[0]["reported_at"])).total_seconds()
+    print(f"[device watch] {DOCTOR_DEVICE} offline -- no report for {int(silent)}s")
+    if _offline_alerts_on():
+        post_teams(_device_card(
+            "⚠ Banc en ligne (Ariel) : plus de nouvelles",
+            f"Aucun rapport depuis {_minutes(silent)}. Le Pi a déjà relancé son Wi-Fi et redémarré seul, "
+            "sans succès : il est éteint, figé, ou le Wi-Fi de l'usine est en panne. Pas de lectures en attendant. "
+            "Sur place : l'écran du destoner est-il allumé ? SGSC → Diagnostic des bancs pour le détail.",
+            good=False), "device offline alert")
+
+
+async def watch_devices():
+    """Notice a device that has gone quiet. Every worker runs one; see
+    _watch_device_once for why that sends one alert, not two."""
+    while True:
+        await asyncio.sleep(DOCTOR_WATCH_EVERY_S)
+        try:
+            await run_in_threadpool(_watch_device_once)
+        except Exception as e:
+            print(f"[device watch failed] {type(e).__name__}: {e}")
+
+
+@app.on_event("startup")
+async def _start_device_watch():
+    app.state.device_watch = asyncio.create_task(watch_devices())
+
+
+def _device_back_online(now):
+    """Called on every report: if this one ends an outage, say so once."""
+    rows = (supabase.table("device_status").select("offline_since")
+            .eq("device", DOCTOR_DEVICE).limit(1).execute()).data
+    since = rows[0].get("offline_since") if rows else None
+    if not since:
+        return
+    cleared = (
+        supabase.table("device_status").update({"offline_since": None})
+        .eq("device", DOCTOR_DEVICE).not_.is_("offline_since", "null").execute()
+    ).data
+    if not cleared:
+        return
+    lasted = (now - datetime.datetime.fromisoformat(since)).total_seconds() + DOCTOR_OFFLINE_AFTER_S
+    print(f"[device watch] {DOCTOR_DEVICE} back online after ~{int(lasted)}s")
+    if _offline_alerts_on():
+        post_teams(_device_card(
+            "✓ Banc en ligne (Ariel) : de retour",
+            f"Le banc répond de nouveau, après environ {_minutes(lasted)} sans nouvelles. "
+            "Les lectures reprennent toutes seules.", good=True), "device back alert")
+
+
 @app.get("/inline/ping")
 def inline_ping(_: bool = Depends(verify_inline_key)):
     """Lets the Pi's doctor tell "Caliban refuses my key" from "Caliban is
@@ -3736,6 +3840,12 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
     supabase.table("device_status").upsert(
         {"device": DOCTOR_DEVICE, "report": report, "reported_at": now.isoformat()},
         on_conflict="device").execute()
+    try:
+        _device_back_online(now)
+    except Exception as e:
+        # Before device_offline.sql is run the column is missing; the report
+        # itself must still land.
+        print(f"[device back-online check failed] {type(e).__name__}: {e}")
 
     for r in body.get("results") or []:
         if isinstance(r, dict) and isinstance(r.get("id"), int):

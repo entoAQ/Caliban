@@ -254,7 +254,16 @@ loop for the shot, restarts it only if it was running), free disk (oldest
 captures older than 3 days), reset the checkout to GitHub, reboot. Plus, on
 the touchscreen only, cycle the Wi-Fi. None changes a setting or a key.
 
-Setup, once: run `device_doctor.sql` in Supabase, deploy Caliban, then on the
+**When the network drops.** Both ends notice. On Ariel, the tray rig's
+watchdog (`../netwatch.sh`, installed by `install-doctor.sh`) cycles the
+Wi-Fi at 5 minutes offline and reboots at 15, and the destoner screen shows a
+red "PAS DE CONNEXION depuis…" banner saying what the watchdog has done and
+will do -- only while offline. In Caliban, a watcher marks Ariel offline after
+10 minutes without a report (`device_status.offline_since`,
+`device_offline.sql`) and clears it on the next one; Teams hears about both
+only when the rig is live, or when `inline_settings.offline_alert` is `true`.
+
+Setup, once: run `device_doctor.sql` and `device_offline.sql` in Supabase, deploy Caliban, then on the
 Pi `bash ~/caliban/rig/inline/install-doctor.sh`. `update.sh` restarts the
 doctor after every pull from then on; the sudo rules are root-owned copies
 and only change when that script is run again.

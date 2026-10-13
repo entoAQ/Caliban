@@ -226,6 +226,12 @@ def check_wifi(full):
     if status is None:
         return check("wifi", "Wi-Fi", "fail", f"Connecté à « {up[0][2]} », mais pas d'accès à Internet.",
                      fix="cycle_wifi")
+    # The watchdog that brings the Pi back on its own (../netwatch.sh). Without
+    # it, an outage lasts until someone presses a button at the destoner.
+    if run(["systemctl", "is-enabled", "caliban-rig-netwatch.timer"])[1] != "enabled":
+        return check("wifi", "Wi-Fi", "warn",
+                     f"Connecté à « {up[0][2]} », mais la reconnexion automatique n'est pas installée.",
+                     manual="Prévenir l'AQ (install-doctor.sh).")
     return check("wifi", "Wi-Fi", "ok", f"Connecté à « {up[0][2]} ».")
 
 

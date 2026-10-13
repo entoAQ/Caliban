@@ -30,10 +30,16 @@
 
 set -uo pipefail
 
+# The tray rig's settings, or the inline rig's (Ariel) -- either names Caliban.
 ENV_FILE=/etc/caliban-rig.env
+[ -f "$ENV_FILE" ] || ENV_FILE=/etc/caliban-inline.env
 BUSY_FILE=/home/ttownshend/.caliban-rig-busy
 OFF_FILE=/home/ttownshend/.caliban-netwatch-off
 
+# The inline rig's destoner screen (inline/screen.py) reads down_since and
+# wifi_cycled to say "no connection" on the display, so they stay readable by
+# the rig user (root's default umask already makes them so).
+#
 # /run is cleared at boot, so every boot starts a fresh outage count and the
 # Wi-Fi cycle is available again. The reboot stamp must survive the reboot it
 # records, so it lives on disk.

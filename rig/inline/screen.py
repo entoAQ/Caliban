@@ -99,6 +99,40 @@ def read_state():
         return {"state_error": f"{type(e).__name__}: {e}"}
 
 
+# The network watchdog's own record of an outage (../netwatch.sh, run every
+# minute by caliban-rig-netwatch.timer). It decides "offline" -- neither
+# Caliban nor the internet answers -- so the screen says exactly what the
+# watchdog is acting on. The files exist only during an outage.
+NETWATCH_RUN = "/run/caliban-netwatch"
+NETWATCH_STATE = "/var/lib/caliban-netwatch"
+NETWATCH_WIFI_AFTER_S, NETWATCH_REBOOT_AFTER_S = 5 * 60, 15 * 60
+
+
+def read_connection():
+    """None while online; otherwise when the outage started and what the
+    watchdog has done and will do about it."""
+    try:
+        with open(os.path.join(NETWATCH_RUN, "down_since")) as f:
+            since = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        with open(os.path.join(NETWATCH_STATE, "last_reboot")) as f:
+            last_reboot = int(f.read().strip())
+    except (OSError, ValueError):
+        last_reboot = 0
+    return {
+        "offline": True,
+        "since": datetime.fromtimestamp(since, timezone.utc).isoformat(timespec="seconds"),
+        "wifi_cycled": os.path.exists(os.path.join(NETWATCH_RUN, "wifi_cycled")),
+        # The watchdog reboots at most once an hour; after one, the next
+        # outage minute brings no new action until that hour is up.
+        "rebooted_recently": time.time() - last_reboot < 3600,
+        "wifi_after_s": NETWATCH_WIFI_AFTER_S,
+        "reboot_after_s": NETWATCH_REBOOT_AFTER_S,
+    }
+
+
 def read_acks():
     """Every ack in file order. The file grows by one line per confirmation --
     a few hundred a week -- so reading it whole each poll is cheap."""
@@ -235,6 +269,7 @@ class Handler(server.BaseHTTPRequestHandler):
             state["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
             state["setting"] = setting
             state["server"] = {"version": page_version(), "now": now_iso()}
+            state["connection"] = None if self.demo else read_connection()
             self._json(200, state)
         elif path == "/photo":
             self._photo()

@@ -23,12 +23,16 @@ for unit in caliban-inline.service caliban-inline-screen.service caliban-doctor.
     sudo cp "$unit" /etc/systemd/system/
 done
 sudo cp ../caliban-rig-update.service ../caliban-rig-update.timer /etc/systemd/system/
+# Network watchdog, shared with the tray rig: Wi-Fi cycle at 5 min offline,
+# reboot at 15. A root-owned copy, as there (see ../netwatch.sh).
+sudo install -m 755 ../netwatch.sh /usr/local/sbin/caliban-netwatch
+sudo cp ../caliban-rig-netwatch.service ../caliban-rig-netwatch.timer /etc/systemd/system/
 sudo install -m 440 -o root -g root caliban-inline.sudoers /etc/sudoers.d/caliban-inline
 sudo install -m 440 -o root -g root caliban-doctor.sudoers /etc/sudoers.d/caliban-doctor
 sudo visudo -c >/dev/null
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now caliban-doctor caliban-inline-screen caliban-rig-update.timer
+sudo systemctl enable --now caliban-doctor caliban-inline-screen caliban-rig-update.timer caliban-rig-netwatch.timer
 sudo systemctl enable caliban-inline
 sudo systemctl restart caliban-doctor caliban-inline-screen caliban-inline
 

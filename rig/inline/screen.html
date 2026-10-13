@@ -100,6 +100,12 @@
   #overlay b { font-size: 40px; }
   #overlay span { font-size: 22px; color: var(--muted); }
   #demo-tag { position: fixed; right: 10px; bottom: 6px; font-size: 13px; color: var(--warn); }
+  /* No connection: above everything, overlay included, so it shows during a
+     stop as well. Only ever present while the network watchdog says offline. */
+  #offline { position: fixed; top: 0; left: 0; right: 0; z-index: 11; background: #7f1d1d;
+    border-bottom: 4px solid var(--bad); padding: 18px 20px; display: flex; flex-direction: column; gap: 6px; }
+  #offline b { font-size: 30px; }
+  #offline span { font-size: 19px; color: #fecaca; }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -156,6 +162,8 @@
     </div>
   </div>
 
+  <div id="offline" hidden><b id="offline-title"></b><span id="offline-what"></span>
+    <span>Les lectures reprennent seules au retour du réseau. En attendant, l'instruction affichée peut être périmée.</span></div>
   <div id="overlay" hidden><b id="overlay-title"></b><span id="overlay-text"></span></div>
   <div id="demo-tag" hidden>DÉMO</div>
 
@@ -273,6 +281,7 @@ function render() {
   chip('chip-network', 'Réseau', h.network || 'ok');
   $('health-msg').textContent = s.state_error ? `État illisible : ${s.state_error}` : (h.message || '');
   renderSetting(s.setting);
+  renderOffline(s.connection);
 
   const line = s.line || {};
   const idle = line.running === false ? 'stopped' : line.product === false ? 'empty' : null;
@@ -449,6 +458,26 @@ function renderBottom(s, r) {
   $('photo-none').hidden = !!r.photo;
   $('last').textContent = `Dernière : ${hhmm(r.at)}`;
   tickNext();
+}
+
+// From the network watchdog (screen.py read_connection): what it has done so
+// far and what it will do next, so nobody reboots the Pi by hand a minute
+// before it would have done it itself.
+function renderOffline(c) {
+  $('offline').hidden = !(c && c.offline);
+  if (!c || !c.offline) return;
+  const min = Math.floor(minsAgo(c.since));
+  $('offline-title').textContent = `PAS DE CONNEXION depuis ${hhmm(c.since)} (${min} min)`;
+  let what;
+  if (min >= 30 || c.rebooted_recently)
+    what = "Le réseau de l'usine est peut-être en panne. Si ça dure, prévenir l'AQ.";
+  else if (min * 60 >= c.reboot_after_s)
+    what = 'Le Pi va redémarrer tout seul (écran noir environ 1 minute).';
+  else if (c.wifi_cycled)
+    what = `Wi-Fi relancé. Sinon, le Pi redémarre tout seul à ${c.reboot_after_s / 60} min.`;
+  else
+    what = `Le Pi relancera le Wi-Fi tout seul à ${c.wifi_after_s / 60} min. Rien à faire.`;
+  $('offline-what').textContent = what;
 }
 
 function tickNext() {
