@@ -82,14 +82,9 @@
   <div class="ok-list" id="oks"></div>
 
   <h2>Autres actions</h2>
-  <div id="more">
-    <button onclick="fix('test_flash', this)">Tester le flash</button>
-    <button onclick="fix('restart_loop', this)">Redémarrer les lectures</button>
-    <button onclick="fix('restart_kiosk', this)">Rouvrir le navigateur</button>
-    <button onclick="fix('update_code', this, true)">Remettre le logiciel à jour</button>
-    <button onclick="fix('reboot', this, true)">Redémarrer le Pi</button>
-    <button onclick="load()">Revérifier</button>
-  </div>
+  <!-- Built from the fixes this rig's doctor offers (doctor.py FIXES): the
+       same page serves Ariel and the tray rig. -->
+  <div id="more"></div>
 
   <div id="busy" hidden><div id="busy-title">Réparation en cours…</div><span>Ne pas éteindre le Pi.</span></div>
 
@@ -122,8 +117,26 @@ async function load() {
   }
 }
 
+// Ask twice for these: they interrupt the rig for a minute or more.
+const RISKY = ['reboot', 'update_code', 'rollback_code'];
+// Buttons with nothing to show on this page: they bring back a log or a
+// photo for SGSC to display.
+const REMOTE_ONLY = ['send_logs'];
+let device = null;
+
+function renderMore() {
+  $('more').innerHTML = Object.entries(fixes)
+    .filter(([k]) => !REMOTE_ONLY.includes(k))
+    .map(([k, label]) => `<button onclick="fix('${k}', this, ${RISKY.includes(k)})">${esc(label)}</button>`)
+    .join('') + '<button onclick="load()">Revérifier</button>';
+}
+
 function render(rep) {
-  fixes = rep.fixes || {};
+  if (JSON.stringify(rep.fixes || {}) !== JSON.stringify(fixes)) { fixes = rep.fixes || {}; renderMore(); }
+  device = rep.device || 'ariel';
+  // Only Ariel has a destoner screen to go back to.
+  $('back').hidden = device !== 'ariel';
+  if (device !== 'ariel') document.querySelector('header h1').textContent = 'Diagnostic — banc à plateau';
   const checks = rep.checks || [];
   const bad = checks.filter(c => c.status === 'fail' || c.status === 'warn');
   const fails = checks.filter(c => c.status === 'fail');
@@ -132,14 +145,14 @@ function render(rep) {
   s.innerHTML = rep.overall === 'ok' ? 'Tout fonctionne'
     : `${fails.length ? fails.length + ' panne(s)' : ''}${fails.length && bad.length > fails.length ? ', ' : ''}${bad.length > fails.length ? (bad.length - fails.length) + ' avertissement(s)' : ''}`
       + '<small>Commencer par « Tout réparer ». Si ça ne suffit pas, suivre les consignes en jaune.</small>';
-  $('repair-all').hidden = !bad.some(c => c.fix && !['reboot', 'test_flash', 'update_code'].includes(c.fix));
+  $('repair-all').hidden = !bad.some(c => c.fix && !['reboot', 'test_flash', 'test_photo', 'update_code', 'rollback_code'].includes(c.fix));
 
   $('problems').innerHTML = bad.map(c => `
     <div class="check ${c.status}">
       <div class="top"><span class="dot"></span><span class="label">${esc(c.label)}</span></div>
       <div class="detail">${esc(c.detail)}</div>
       ${c.manual ? `<div class="manual">➜ ${esc(c.manual)}</div>` : ''}
-      ${c.fix ? `<button onclick="fix('${c.fix}', this, ${c.fix === 'reboot' || c.fix === 'update_code'})">${esc(fixes[c.fix] || c.fix)}</button>` : ''}
+      ${c.fix ? `<button onclick="fix('${c.fix}', this, ${RISKY.includes(c.fix)})">${esc(fixes[c.fix] || c.fix)}</button>` : ''}
     </div>`).join('');
   const oks = checks.filter(c => c.status === 'ok');
   $('ok-title').hidden = !oks.length;
@@ -147,7 +160,7 @@ function render(rep) {
 
   // Came here because the destoner screen stopped answering: go back as soon
   // as it answers again, nobody needs to tap anything.
-  const screenOk = (checks.find(c => c.id === 'screen') || {}).status === 'ok';
+  const screenOk = device === 'ariel' && (checks.find(c => c.id === 'screen') || {}).status === 'ok';
   if (screenOk && !busy && (fromScreen ? Date.now() - lastTouch > 15000 : Date.now() - lastTouch > IDLE_RETURN_MS)) goBack();
 }
 
@@ -173,7 +186,7 @@ async function fix(action, btn, risky) {
     res = await r.json();
   } catch (e) {
     // A reboot or a code update restarts the service under us -- expected.
-    res = { ok: action === 'reboot' || action === 'update_code',
+    res = { ok: ['reboot', 'update_code', 'rollback_code'].includes(action),
             message: action === 'reboot' ? 'Redémarrage du Pi…' : 'Le diagnostic redémarre…' };
   }
   busy = false;
@@ -181,7 +194,7 @@ async function fix(action, btn, risky) {
   const out = $('result');
   out.hidden = false;
   out.className = res.ok ? 'ok' : 'bad';
-  out.innerHTML = esc(res.message) + (action === 'test_flash' ? `<img src="/test-photo?t=${Date.now()}" alt="">` : '');
+  out.innerHTML = esc(res.message) + (res.ok && (action === 'test_flash' || action === 'test_photo') ? `<img src="/test-photo?t=${Date.now()}" alt="">` : '');
   load();
 }
 

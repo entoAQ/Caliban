@@ -1,0 +1,27 @@
+[Unit]
+Description=Caliban tray rig -- diagnostic and repair (localhost:8091, reports to Caliban)
+# The same doctor as Ariel's (inline/doctor.py), with the tray rig's checks
+# and fixes (DOCTOR_DEVICE=prosperos). Installed as caliban-doctor.service by
+# install-doctor-tray.sh, so update.sh restarts it after every pull exactly
+# as on Ariel.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ttownshend
+WorkingDirectory=/home/ttownshend/caliban/rig/inline
+# CALIBAN_URL and RIG_API_KEY -- the tray rig's own key, which is how Caliban
+# knows this report is the tray rig's.
+EnvironmentFile=/etc/caliban-rig.env
+Environment=DOCTOR_DEVICE=prosperos
+ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/doctor.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

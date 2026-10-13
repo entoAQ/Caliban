@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Ariel's doctor -- find what is wrong with the inline rig, and fix it with a button.
+"""The rigs' doctor -- find what is wrong with a rig, and fix it with a button.
+
+One file for both rigs, chosen by DOCTOR_DEVICE in the unit: Ariel, the
+inline rig at the destoner (the default, and what most of this describes),
+and Prosperos, the tray rig at the lab bench (DOCTOR_DEVICE=prosperos, see
+../caliban-doctor-tray.service). Same report, same remote repairs, same
+safety rules; each rig gets its own checks and fixes (CHECKS, FIXES).
 
 The people who see the destoner screen go wrong are on the line, not at a
 terminal. Everything that has broken on this rig so far has had a known fix --
@@ -65,10 +71,26 @@ UPDATE_PAUSE_FILE = os.path.join(HOME, ".caliban-update-paused")
 GOOD_AFTER_REPORTS = 30
 LOG_UNITS = ["caliban-inline", "caliban-inline-screen", "caliban-doctor",
              "caliban-rig-update", "caliban-rig-netwatch"]
+LOG_UNITS_TRAY = ["caliban-rig", "caliban-doctor", "caliban-rig-update", "caliban-rig-netwatch"]
 LOG_LINES = 300
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
-INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
+# Which rig this is. Each reports with its own key, and Caliban tells them
+# apart by the key, never by anything the rig says about itself.
+DEVICE = os.environ.get("DOCTOR_DEVICE", "ariel")
+TRAY = DEVICE == "prosperos"
+API_KEY = os.environ.get("RIG_API_KEY" if TRAY else "INLINE_API_KEY", "")
+ENV_FILE = "/etc/caliban-rig.env" if TRAY else "/etc/caliban-inline.env"
+
+# The tray rig (rig/poller.py and rig/capture.py).
+POLLER = "caliban-rig"
+RIG_DIR = os.path.abspath(os.path.join(HERE, ".."))
+BUSY_FILE = os.path.join(HOME, ".caliban-rig-busy")
+BUSY_STALE_S = 180
+RIG_SETTINGS = os.path.join(HOME, "rig_settings.json")
+TRAY_CAPTURES = os.path.join(HOME, "captures")
+TRAY_TEST_DIR = os.path.join(HOME, "captures-doctor")
+TOF_I2C_BUS, TOF_I2C_ADDR = "1", "0x33"
 
 LOOP = "caliban-inline"
 SCREEN = "caliban-inline-screen"
@@ -254,7 +276,7 @@ def check_wifi(full):
 def check_caliban(full):
     if not CALIBAN_URL:
         return check("caliban", "Caliban (nuage)", "fail", "Adresse de Caliban absente sur ce Pi.",
-                     manual="Installation incomplète : prévenir l'AQ (fichier /etc/caliban-inline.env).")
+                     manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
     status, body = http_get(f"{CALIBAN_URL}/health", timeout=20)
     if status is None:
         return check("caliban", "Caliban (nuage)", "fail", "Caliban ne répond pas.",
@@ -267,10 +289,10 @@ def check_caliban(full):
 
 
 def check_key(full):
-    if not INLINE_API_KEY:
+    if not API_KEY:
         return check("key", "Clé d'accès", "fail", "Clé absente sur ce Pi.",
-                     manual="Installation incomplète : prévenir l'AQ (fichier /etc/caliban-inline.env).")
-    status, body = http_get(f"{CALIBAN_URL}/inline/ping", timeout=20, headers={"X-API-Key": INLINE_API_KEY})
+                     manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
+    status, body = http_get(f"{CALIBAN_URL}/doctor/ping", timeout=20, headers={"X-API-Key": API_KEY})
     if status is None:
         return check("key", "Clé d'accès", "off", "Non vérifiable sans Caliban.")
     if status == 401:
@@ -403,8 +425,91 @@ def check_flash(full):
     return check("flash", "Flash", "ok", f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK.")
 
 
-CHECKS = [check_power, check_disk, check_clock, check_wifi, check_caliban, check_key,
-          check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash]
+def tray_busy():
+    """A capture is in progress (poller.py's busy marker, fresh)."""
+    try:
+        return time.time() - os.path.getmtime(BUSY_FILE) < BUSY_STALE_S
+    except OSError:
+        return False
+
+
+def check_disk_tray(full):
+    # The originals in ~/captures are the only copy until moved to SharePoint
+    # (monthly reminder issue), so there is no button that deletes them.
+    u = shutil.disk_usage("/")
+    free_pct = 100 * u.free / u.total
+    rc, size = run(["du", "-sh", TRAY_CAPTURES], timeout=30)
+    held = f" Photos du banc : {size.split()[0]}." if rc == 0 and size else ""
+    detail = f"{u.free / 1e9:.1f} Go libres ({free_pct:.0f} %).{held}"
+    manual = "Déplacer les photos de ~/captures vers SharePoint (voir le rappel mensuel sur GitHub)."
+    if free_pct < DISK_FAIL_PCT:
+        return check("disk", "Espace disque", "fail", detail, manual=manual)
+    if free_pct < DISK_WARN_PCT:
+        return check("disk", "Espace disque", "warn", detail, manual=manual)
+    return check("disk", "Espace disque", "ok", detail)
+
+
+def check_poller(full):
+    if not is_active(POLLER):
+        return check("poller", "Prise des photos", "fail", "Le service du banc est arrêté.", fix="restart_poller")
+    # poller.py logs at least "idle" every 10 minutes while waiting.
+    rc, recent = run(["journalctl", "-u", POLLER, "--since", "-15min", "-q", "--no-pager", "-o", "cat"])
+    if rc == 0 and not recent.strip():
+        return check("poller", "Prise des photos", "fail",
+                     "En marche, mais muet depuis 15 min : probablement bloqué.", fix="restart_poller")
+    rc, failed = run(["journalctl", "-u", POLLER, "--since", "-2h", "-q", "--no-pager", "-o", "cat",
+                      "--grep", "capture failed"])
+    n = len([l for l in failed.splitlines() if l.strip()]) if rc == 0 else 0
+    if n:
+        return check("poller", "Prise des photos", "warn", f"{n} capture(s) échouée(s) depuis 2 h.",
+                     manual="« Envoyer le journal » pour voir pourquoi.")
+    return check("poller", "Prise des photos", "ok",
+                 "Capture en cours." if tray_busy() else "En attente des demandes.")
+
+
+def check_camera_tray(full):
+    if tray_busy():
+        return check("camera", "Caméra", "ok", "Utilisée par une capture en cours.")
+    # The poller opens the camera only for a capture, so listing it between
+    # captures touches nothing.
+    rc, out = run(["rpicam-hello", "--list-cameras"], timeout=20)
+    if rc == 127:
+        return check("camera", "Caméra", "off", "Vérification indisponible.")
+    if "Available cameras" not in out:
+        return check("camera", "Caméra", "fail", "Aucune caméra détectée.", fix="reboot",
+                     manual="Si ça revient après le redémarrage : vérifier la nappe de la caméra (Pi éteint).")
+    model = out.split("Available cameras", 1)[1].split(":", 2)[-1].strip().split()[0] if ":" in out else ""
+    return check("camera", "Caméra", "ok", f"Détectée{f' ({model})' if model else ''}.")
+
+
+def check_tof(full):
+    if tray_busy():
+        return check("tof", "Capteur de hauteur", "ok", "Utilisé par une capture en cours.")
+    rc, out = run(["i2cdetect", "-y", "-r", TOF_I2C_BUS, TOF_I2C_ADDR, TOF_I2C_ADDR])
+    if rc == 127:
+        return check("tof", "Capteur de hauteur", "off", "Vérification indisponible.")
+    if TOF_I2C_ADDR[2:] not in out.split("\n", 1)[-1]:
+        return check("tof", "Capteur de hauteur", "warn", "Introuvable : la densité ne sera pas mesurée.",
+                     fix="reboot", manual="Si ça revient : vérifier le câble du capteur (Pi éteint).")
+    return check("tof", "Capteur de hauteur", "ok", "Répond.")
+
+
+def check_calibration(full):
+    try:
+        age = time.time() - os.path.getmtime(RIG_SETTINGS)
+    except OSError:
+        return check("calibration", "Calibration", "fail", "Aucune calibration enregistrée.",
+                     manual="Calibrer le banc depuis SGSC (Dépistage visuel → Calibrer le banc).")
+    hours = age / 3600
+    return check("calibration", "Calibration", "ok",
+                 f"Dernière il y a {hours:.0f} h." if hours < 48 else f"Dernière il y a {hours / 24:.0f} jours.")
+
+
+CHECKS_ARIEL = [check_power, check_disk, check_clock, check_wifi, check_caliban, check_key,
+                check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash]
+CHECKS_TRAY = [check_power, check_disk_tray, check_clock, check_wifi, check_caliban, check_key,
+               check_update, check_poller, check_camera_tray, check_tof, check_calibration]
+CHECKS = CHECKS_TRAY if TRAY else CHECKS_ARIEL
 
 
 def _safe(fn, full):
@@ -482,7 +587,22 @@ def fix_cycle_wifi():
     return False, "Wi-Fi relancé, mais toujours pas de connexion."
 
 
+def restart_rig_services():
+    """After the code under them changed. The tray poller's sudo rule allows
+    restart, not try-restart; callers have already refused during a capture."""
+    if TRAY:
+        sudo_systemctl("restart", POLLER)
+    else:
+        sudo_systemctl("try-restart", LOOP)
+        sudo_systemctl("try-restart", SCREEN)
+
+
+BUSY_MESSAGE = "Une capture est en cours : réessayer dans une minute."
+
+
 def fix_update_code():
+    if TRAY and tray_busy():
+        return False, BUSY_MESSAGE
     if run(["git", "fetch", "--quiet"], timeout=90, cwd=REPO)[0] != 0:
         return False, "Impossible de joindre GitHub : vérifier le Wi-Fi."
     # The Pi only ever consumes this repo. Anything changed by hand here is
@@ -496,8 +616,7 @@ def fix_update_code():
     except OSError:
         pass
     head = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO)[1]
-    sudo_systemctl("try-restart", LOOP)
-    sudo_systemctl("try-restart", SCREEN)
+    restart_rig_services()
     # This process is now running the old code; systemd restarts it on the new.
     threading.Timer(5, lambda: os._exit(0)).start()
     return True, f"Logiciel remis à la version {head} de GitHub ; services redémarrés."
@@ -575,18 +694,25 @@ def fix_test_flash():
 def fix_send_logs():
     """The rig's recent journals, for reading from a desk."""
     cmd = ["journalctl", "--no-pager", "-o", "short-iso", "-n", str(LOG_LINES)]
-    for u in LOG_UNITS:
+    for u in (LOG_UNITS_TRAY if TRAY else LOG_UNITS):
         cmd += ["-u", u]
     rc, out = run(cmd, timeout=30)
     if rc != 0 or not out.strip():
         return False, f"Journal illisible : {out[:200]}"
     head = run(["git", "log", "--oneline", "-3"], cwd=REPO)[1]
-    state = load_state()
-    state.pop("history", None)
-    state.pop("flash_levels", None)
-    text = (f"== Version\n{head}\n\n== État de l'écran (inline_state.json)\n"
-            f"{json.dumps(state, ensure_ascii=False, indent=1)[:4000]}\n\n"
-            f"== Journal, {LOG_LINES} dernières lignes\n{out}")
+    if TRAY:
+        try:
+            with open(RIG_SETTINGS) as f:
+                about = f"== Calibration (rig_settings.json)\n{f.read()[:4000]}"
+        except OSError:
+            about = "== Calibration : aucune"
+    else:
+        state = load_state()
+        state.pop("history", None)
+        state.pop("flash_levels", None)
+        about = (f"== État de l'écran (inline_state.json)\n"
+                 f"{json.dumps(state, ensure_ascii=False, indent=1)[:4000]}")
+    text = f"== Version\n{head}\n\n{about}\n\n== Journal, {LOG_LINES} dernières lignes\n{out}"
     return True, f"{len(out.splitlines())} lignes de journal envoyées.", {"output": text}
 
 
@@ -613,6 +739,8 @@ note_good_version.streak = 0
 
 
 def fix_rollback_code():
+    if TRAY and tray_busy():
+        return False, BUSY_MESSAGE
     try:
         with open(GOOD_SHA_FILE) as f:
             good = f.read().strip()
@@ -626,11 +754,60 @@ def fix_rollback_code():
     rc, out = run(["git", "reset", "--hard", good], cwd=REPO)
     if rc != 0:
         return False, f"Échec du retour en arrière : {out[:200]}"
-    sudo_systemctl("try-restart", LOOP)
-    sudo_systemctl("try-restart", SCREEN)
+    restart_rig_services()
     threading.Timer(5, lambda: os._exit(0)).start()
     return True, (f"Revenu à la version {good[:7]} (au lieu de {head[:7]}). Mises à jour automatiques "
                   "en pause jusqu'à « Remettre le logiciel à jour ».")
+
+
+def fix_restart_poller():
+    if tray_busy():
+        return False, BUSY_MESSAGE
+    rc, out = sudo_systemctl("restart", POLLER)
+    if rc != 0:
+        return False, f"Échec du redémarrage : {out[:200]}"
+    time.sleep(3)
+    return (True, "Service du banc redémarré.") if is_active(POLLER) \
+        else (False, "Le service du banc ne repart pas : « Envoyer le journal ».")
+
+
+TRAY_TEST_SCRIPT = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, %r)
+try:
+    import capture
+    capture.OUTPUT_DIR = Path(%r)
+    print(json.dumps({"ok": True, "path": capture.capture("DOCTOR-TEST", "visible")}))
+except SystemExit as e:
+    print(json.dumps({"ok": False, "error": str(e)}))
+except Exception as e:
+    print(json.dumps({"ok": False, "error": type(e).__name__ + ": " + str(e)}))
+""" % (RIG_DIR, TRAY_TEST_DIR)
+
+
+def fix_test_photo_tray():
+    """A photo with the bench's locked settings, of whatever is on the tray.
+    The poller is stopped for it, so no operator's capture can collide with
+    it, and started again only if it was running."""
+    if tray_busy():
+        return False, BUSY_MESSAGE
+    was_running = is_active(POLLER)
+    if was_running:
+        sudo_systemctl("stop", POLLER)
+    try:
+        shutil.rmtree(TRAY_TEST_DIR, ignore_errors=True)
+        rc, out = run([sys.executable, "-c", TRAY_TEST_SCRIPT], timeout=90, cwd=RIG_DIR)
+    finally:
+        if was_running:
+            sudo_systemctl("start", POLLER)
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, f"Photo impossible : {out[-200:]}"
+    if not res.get("ok"):
+        return False, f"Photo impossible : {res.get('error', '')[:200]}"
+    return True, "Photo prise avec les réglages du banc.", {"attachment_file": res["path"]}
 
 
 def fix_reboot():
@@ -655,6 +832,18 @@ FIXES = {
     "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
     "reboot":         ("Redémarrer le Pi", fix_reboot),
 }
+
+FIXES_TRAY = {
+    "cycle_wifi":     ("Relancer le Wi-Fi", fix_cycle_wifi),
+    "update_code":    ("Remettre le logiciel à jour", fix_update_code),
+    "restart_poller": ("Redémarrer le service du banc", fix_restart_poller),
+    "test_photo":     ("Photo de contrôle", fix_test_photo_tray),
+    "send_logs":      ("Envoyer le journal", fix_send_logs),
+    "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
+    "reboot":         ("Redémarrer le Pi", fix_reboot),
+}
+if TRAY:
+    FIXES = FIXES_TRAY
 
 # Never applied by "Tout réparer": the reboot is its own decision, the flash
 # test only means something after someone has woken the flash by hand, and
@@ -722,9 +911,9 @@ def upload_attachment(cid, path):
             data = f.read()
     except OSError as e:
         return f"photo introuvable : {e}"
-    req = urllib.request.Request(f"{CALIBAN_URL}/inline/doctor/attachment?command_id={int(cid)}",
+    req = urllib.request.Request(f"{CALIBAN_URL}/doctor/attachment?command_id={int(cid)}",
                                  data=data, method="POST",
-                                 headers={"Content-Type": "image/jpeg", "X-API-Key": INLINE_API_KEY})
+                                 headers={"Content-Type": "image/jpeg", "X-API-Key": API_KEY})
     try:
         urllib.request.urlopen(req, timeout=60).read()
         return None
@@ -737,9 +926,9 @@ def report_once():
     note_good_version(report)
     with results_lock:
         results, pending_results[:] = list(pending_results), []
-    status, body = http_post_json(f"{CALIBAN_URL}/inline/doctor/report",
+    status, body = http_post_json(f"{CALIBAN_URL}/doctor/report",
                                   {"report": report, "results": results},
-                                  headers={"X-API-Key": INLINE_API_KEY})
+                                  headers={"X-API-Key": API_KEY})
     if status != 200 or not isinstance(body, dict):
         with results_lock:
             pending_results[:0] = results     # try them again next time
@@ -748,8 +937,8 @@ def report_once():
 
 
 def reporter():
-    if not CALIBAN_URL or not INLINE_API_KEY:
-        log("no CALIBAN_URL / INLINE_API_KEY: not reporting to Caliban")
+    if not CALIBAN_URL or not API_KEY:
+        log("no CALIBAN_URL / API_KEY: not reporting to Caliban")
         return
     while True:
         try:
@@ -801,10 +990,15 @@ class Handler(server.BaseHTTPRequestHandler):
         elif path == "/checks":
             report = run_checks(full=True)
             report["fixes"] = {k: v[0] for k, v in FIXES.items()}
+            report["device"] = DEVICE
             self._json(200, report)
         elif path == "/test-photo":
+            photo = TEST_PHOTO
+            if TRAY:
+                found = sorted(os.listdir(TRAY_TEST_DIR)) if os.path.isdir(TRAY_TEST_DIR) else []
+                photo = os.path.join(TRAY_TEST_DIR, found[-1]) if found else ""
             try:
-                with open(TEST_PHOTO, "rb") as f:
+                with open(photo, "rb") as f:
                     self._send(200, f.read(), "image/jpeg")
             except OSError:
                 self._send(404, b"no test photo", "text/plain")
@@ -857,7 +1051,7 @@ def main():
         sys.exit(__doc__)
 
     threading.Thread(target=reporter, daemon=True).start()
-    log(f"doctor on http://127.0.0.1:{PORT}/ -> reporting to {CALIBAN_URL or '(nowhere)'}")
+    log(f"doctor ({DEVICE}) on http://127.0.0.1:{PORT}/ -> reporting to {CALIBAN_URL or '(nowhere)'}")
     Server(("127.0.0.1", PORT), Handler).serve_forever()
 
 

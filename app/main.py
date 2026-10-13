@@ -278,8 +278,8 @@ def _check_sharepoint():
     return "jeton obtenu"
 
 
-def _check_ariel_report():
-    rows = supabase.table("device_status").select("reported_at, report").eq("device", DOCTOR_DEVICE) \
+def _check_device_report(device):
+    rows = supabase.table("device_status").select("reported_at, report").eq("device", device) \
         .limit(1).execute().data
     if not rows:
         raise RuntimeError("aucun rapport reçu")
@@ -324,7 +324,8 @@ def health_deep():
         "supabase": _deep_check(_check_supabase),
         "vision": _deep_check(_check_vision_endpoint),
         "sharepoint": _deep_check(_check_sharepoint, critical=False),
-        "ariel": _deep_check(_check_ariel_report, critical=False),
+        "ariel": _deep_check(lambda: _check_device_report("ariel"), critical=False),
+        "prosperos": _deep_check(lambda: _check_device_report("prosperos"), critical=False),
         "capture_queue": _deep_check(_check_capture_queue, critical=False),
     }
     wakeup = getattr(app.state, "command_wakeup", None)
@@ -3720,33 +3721,66 @@ async def inline_acks(request: Request, _: bool = Depends(verify_inline_key)):
 
 
 # ── Device diagnostic and repair (rig/inline/doctor.py) ──────────────
-# Ariel's doctor posts its checks here every minute, and the reply carries any
-# repair queued from SGSC's diagnostic page -- the report is the poll, so the
-# Pi still only ever reaches out. Tables: rig/inline/device_doctor.sql.
+# Each rig's doctor posts its checks here every minute, and the reply carries
+# any repair queued from SGSC's diagnostic page -- the report is the poll, so
+# the Pis still only ever reach out. Tables: rig/inline/device_doctor.sql,
+# rig/inline/device_offline.sql, rig/device_doctor_v2.sql.
 #
-# The device is fixed by the key rather than named in the request: the inline
-# key is Ariel's and nobody else's, so it can only ever report as Ariel.
-DOCTOR_DEVICE = "ariel"
-# What SGSC may ask for, mirrored in device_commands' check constraint and in
-# doctor.py FIXES. cycle_wifi is deliberately absent: from a desk it can only
-# cut the link it would be asked over.
-DOCTOR_ACTIONS = {
-    "repair_all": "Tout réparer",
-    "restart_loop": "Redémarrer les lectures",
-    "restart_screen": "Redémarrer l'écran",
-    "restart_kiosk": "Rouvrir le navigateur",
-    "restore_kiosk": "Rétablir le plein écran",
-    "test_flash": "Tester le flash",
-    "free_disk": "Libérer de l'espace",
-    "update_code": "Remettre le logiciel à jour",
-    "rollback_code": "Revenir à la version précédente",
-    "test_photo": "Photo de contrôle",
-    "send_logs": "Envoyer le journal",
-    "reboot": "Redémarrer le Pi",
+# Which rig is reporting comes from its key, never from the request
+# (verify_device_key): the inline key is Ariel's, the tray key Prosperos's.
+#
+# actions: what SGSC may ask each rig for -- mirrored in device_commands'
+# check constraint and in doctor.py's FIXES / FIXES_TRAY. cycle_wifi is
+# deliberately absent: from a desk it can only cut the link it would be
+# asked over.
+DOCTOR_DEVICES = {
+    "ariel": {
+        "name": "Banc en ligne (Ariel)",
+        "actions": {
+            "repair_all": "Tout réparer",
+            "restart_loop": "Redémarrer les lectures",
+            "restart_screen": "Redémarrer l'écran",
+            "restart_kiosk": "Rouvrir le navigateur",
+            "restore_kiosk": "Rétablir le plein écran",
+            "test_flash": "Tester le flash",
+            "free_disk": "Libérer de l'espace",
+            "update_code": "Remettre le logiciel à jour",
+            "rollback_code": "Revenir à la version précédente",
+            "test_photo": "Photo de contrôle",
+            "send_logs": "Envoyer le journal",
+            "reboot": "Redémarrer le Pi",
+        },
+        "offline_text": "Pas de lectures en attendant. Sur place : l'écran du destoner est-il allumé ?",
+        "back_text": "Les lectures reprennent toutes seules.",
+    },
+    "prosperos": {
+        "name": "Banc à plateau (Prosperos)",
+        "actions": {
+            "repair_all": "Tout réparer",
+            "restart_poller": "Redémarrer le service du banc",
+            "test_photo": "Photo de contrôle",
+            "send_logs": "Envoyer le journal",
+            "update_code": "Remettre le logiciel à jour",
+            "rollback_code": "Revenir à la version précédente",
+            "reboot": "Redémarrer le Pi",
+        },
+        "offline_text": ("Les captures demandées depuis SGSC n'aboutiront pas. "
+                         "Sur place : le Pi du banc est-il allumé ?"),
+        "back_text": "Les captures fonctionnent de nouveau.",
+    },
 }
 # A repair not picked up within this long is dropped, not delivered late --
 # see device_doctor.sql.
 DOCTOR_COMMAND_TTL_S = 600
+
+
+def verify_device_key(x_api_key: str = Header(None)):
+    """Which rig is calling, from its key: each key belongs to one device."""
+    if INLINE_API_KEY and x_api_key == INLINE_API_KEY:
+        return "ariel"
+    if RIG_API_KEY and x_api_key == RIG_API_KEY:
+        return "prosperos"
+    raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
 
 
 def _utc_now():
@@ -3754,8 +3788,8 @@ def _utc_now():
 
 
 # Silent this long and Caliban treats the device as offline. The doctor
-# reports every minute, and Ariel's own network watchdog cycles its Wi-Fi at 5
-# minutes and reboots at 15 -- so at 10 it has had its chance to fix the
+# reports every minute, and each rig's own network watchdog cycles its Wi-Fi
+# at 5 minutes and reboots at 15 -- so at 10 it has had its chance to fix the
 # common case alone, and anything later is worth a person knowing about.
 DOCTOR_OFFLINE_AFTER_S = 600
 DOCTOR_WATCH_EVERY_S = 60
@@ -3776,38 +3810,54 @@ def _device_card(title, text, good):
     }]}
 
 
-def _offline_alerts_on():
-    """Teams only when the rig is live, like every other inline alert --
-    unless inline_settings.offline_alert says otherwise. In trial mode the
-    outage is still recorded (device_status.offline_since) and shown in SGSC."""
-    s = inline_settings()
-    return s.get("offline_alert", s["mode"] == "live")
+def _offline_alerts_on(device):
+    """Whether Teams hears about this device going quiet.
+
+    system_config.device_offline_alerts ({"prosperos": false, ...}) decides
+    when it names the device. Otherwise: the tray rig is in daily use, so yes;
+    Ariel follows its other alerts -- only when live, unless
+    inline_settings.offline_alert says otherwise. Either way the outage is
+    recorded (device_status.offline_since) and shown in SGSC."""
+    try:
+        raw = (supabase.table("system_config").select("value")
+               .eq("key", "device_offline_alerts").execute()).data
+        overrides = json.loads(raw[0]["value"]) if raw and isinstance(raw[0].get("value"), str) \
+            else (raw[0]["value"] if raw else None)
+        if isinstance(overrides, dict) and isinstance(overrides.get(device), bool):
+            return overrides[device]
+    except Exception as e:
+        print(f"[device_offline_alerts lookup failed] {type(e).__name__}: {e}")
+    if device == "ariel":
+        s = inline_settings()
+        return s.get("offline_alert", s["mode"] == "live")
+    return True
 
 
 def _minutes(seconds):
     return f"{int(seconds // 60)} min"
 
 
-def _watch_device_once():
+def _watch_device_once(device):
     now = _utc_now()
     cutoff = (now - datetime.timedelta(seconds=DOCTOR_OFFLINE_AFTER_S)).isoformat()
     # Conditional, so of the two workers' watchers exactly one gets the row
     # back -- and with it the one alert for this outage.
     rows = (
         supabase.table("device_status").update({"offline_since": now.isoformat()})
-        .eq("device", DOCTOR_DEVICE).is_("offline_since", "null").lt("reported_at", cutoff)
+        .eq("device", device).is_("offline_since", "null").lt("reported_at", cutoff)
         .execute()
     ).data
     if not rows:
         return
     silent = (now - datetime.datetime.fromisoformat(rows[0]["reported_at"])).total_seconds()
-    print(f"[device watch] {DOCTOR_DEVICE} offline -- no report for {int(silent)}s")
-    if _offline_alerts_on():
+    print(f"[device watch] {device} offline -- no report for {int(silent)}s")
+    if _offline_alerts_on(device):
+        d = DOCTOR_DEVICES[device]
         post_teams(_device_card(
-            "⚠ Banc en ligne (Ariel) : plus de nouvelles",
+            f"⚠ {d['name']} : plus de nouvelles",
             f"Aucun rapport depuis {_minutes(silent)}. Le Pi a déjà relancé son Wi-Fi et redémarré seul, "
-            "sans succès : il est éteint, figé, ou le Wi-Fi de l'usine est en panne. Pas de lectures en attendant. "
-            "Sur place : l'écran du destoner est-il allumé ? SGSC → Diagnostic des bancs pour le détail.",
+            f"sans succès : il est éteint, figé, ou le Wi-Fi de l'usine est en panne. {d['offline_text']} "
+            "SGSC → Diagnostic des bancs pour le détail.",
             good=False), "device offline alert")
 
 
@@ -3816,10 +3866,11 @@ async def watch_devices():
     _watch_device_once for why that sends one alert, not two."""
     while True:
         await asyncio.sleep(DOCTOR_WATCH_EVERY_S)
-        try:
-            await run_in_threadpool(_watch_device_once)
-        except Exception as e:
-            print(f"[device watch failed] {type(e).__name__}: {e}")
+        for device in DOCTOR_DEVICES:
+            try:
+                await run_in_threadpool(_watch_device_once, device)
+            except Exception as e:
+                print(f"[device watch failed] {device}: {type(e).__name__}: {e}")
 
 
 @app.on_event("startup")
@@ -3827,37 +3878,42 @@ async def _start_device_watch():
     app.state.device_watch = asyncio.create_task(watch_devices())
 
 
-def _device_back_online(now):
+def _device_back_online(device, now):
     """Called on every report: if this one ends an outage, say so once."""
     rows = (supabase.table("device_status").select("offline_since")
-            .eq("device", DOCTOR_DEVICE).limit(1).execute()).data
+            .eq("device", device).limit(1).execute()).data
     since = rows[0].get("offline_since") if rows else None
     if not since:
         return
     cleared = (
         supabase.table("device_status").update({"offline_since": None})
-        .eq("device", DOCTOR_DEVICE).not_.is_("offline_since", "null").execute()
+        .eq("device", device).not_.is_("offline_since", "null").execute()
     ).data
     if not cleared:
         return
     lasted = (now - datetime.datetime.fromisoformat(since)).total_seconds() + DOCTOR_OFFLINE_AFTER_S
-    print(f"[device watch] {DOCTOR_DEVICE} back online after ~{int(lasted)}s")
-    if _offline_alerts_on():
+    print(f"[device watch] {device} back online after ~{int(lasted)}s")
+    if _offline_alerts_on(device):
+        d = DOCTOR_DEVICES[device]
         post_teams(_device_card(
-            "✓ Banc en ligne (Ariel) : de retour",
-            f"Le banc répond de nouveau, après environ {_minutes(lasted)} sans nouvelles. "
-            "Les lectures reprennent toutes seules.", good=True), "device back alert")
+            f"✓ {d['name']} : de retour",
+            f"Le banc répond de nouveau, après environ {_minutes(lasted)} sans nouvelles. {d['back_text']}",
+            good=True), "device back alert")
 
 
+# The /inline/... paths are what Ariel's doctor used before it served both
+# rigs; kept so a doctor that has not pulled yet keeps reporting.
+@app.get("/doctor/ping")
 @app.get("/inline/ping")
-def inline_ping(_: bool = Depends(verify_inline_key)):
-    """Lets the Pi's doctor tell "Caliban refuses my key" from "Caliban is
-    down" without spending an analysis to find out."""
-    return {"ok": True}
+def doctor_ping(device: str = Depends(verify_device_key)):
+    """Lets a doctor tell "Caliban refuses my key" from "Caliban is down"
+    without spending anything to find out."""
+    return {"ok": True, "device": device}
 
 
+@app.post("/doctor/report")
 @app.post("/inline/doctor/report")
-async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline_key)):
+async def doctor_report(request: Request, device: str = Depends(verify_device_key)):
     """Store the doctor's latest checks; record results of repairs it ran;
     hand it any repair waiting for it."""
     try:
@@ -3869,14 +3925,12 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
         raise HTTPException(status_code=400, detail="« report » attendu.")
     now = _utc_now()
     supabase.table("device_status").upsert(
-        {"device": DOCTOR_DEVICE, "report": report, "reported_at": now.isoformat()},
+        {"device": device, "report": report, "reported_at": now.isoformat()},
         on_conflict="device").execute()
     try:
-        _device_back_online(now)
+        _device_back_online(device, now)
     except Exception as e:
-        # Before device_offline.sql is run the column is missing; the report
-        # itself must still land.
-        print(f"[device back-online check failed] {type(e).__name__}: {e}")
+        print(f"[device back-online check failed] {device}: {type(e).__name__}: {e}")
 
     for r in body.get("results") or []:
         if isinstance(r, dict) and isinstance(r.get("id"), int):
@@ -3885,12 +3939,12 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
             if r.get("output"):
                 done["output"] = str(r["output"])[-60000:]
             supabase.table("device_commands").update(done) \
-                .eq("id", r["id"]).eq("device", DOCTOR_DEVICE).execute()
+                .eq("id", r["id"]).eq("device", device).execute()
 
     cutoff = (now - datetime.timedelta(seconds=DOCTOR_COMMAND_TTL_S)).isoformat()
     pending = (
         supabase.table("device_commands").select("id, action")
-        .eq("device", DOCTOR_DEVICE).is_("sent_at", "null").gte("requested_at", cutoff)
+        .eq("device", device).is_("sent_at", "null").gte("requested_at", cutoff)
         .order("requested_at").limit(5).execute()
     ).data or []
     if pending:
@@ -3902,28 +3956,34 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
 DOCTOR_ATTACHMENT_MAX_BYTES = 8_000_000
 
 
+@app.post("/doctor/attachment")
 @app.post("/inline/doctor/attachment")
-async def inline_doctor_attachment(command_id: int, request: Request,
-                                   _: bool = Depends(verify_inline_key)):
+async def doctor_attachment(command_id: int, request: Request,
+                            device: str = Depends(verify_device_key)):
     """A repair's photo (test_photo / test_flash), filed against its request
     so SGSC can show it. Same bucket as the readings' review copies, which
     any signed-in user can already read."""
     body = await request.body()
     if not body or len(body) > DOCTOR_ATTACHMENT_MAX_BYTES:
         raise HTTPException(status_code=413, detail="Photo vide ou trop grande.")
-    path = f"inline/doctor/{command_id}.jpg"
+    path = f"doctor/{device}/{command_id}.jpg"
     supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
         path, review_copy(body), file_options={"content-type": "image/jpeg", "upsert": "true"})
     supabase.table("device_commands").update({"attachment": path}) \
-        .eq("id", command_id).eq("device", DOCTOR_DEVICE).execute()
+        .eq("id", command_id).eq("device", device).execute()
     return {"ok": True, "path": path}
+
+
+def _known_device(device):
+    if device not in DOCTOR_DEVICES:
+        raise HTTPException(status_code=404, detail="Appareil inconnu.")
+    return DOCTOR_DEVICES[device]
 
 
 @app.get("/admin/devices/{device}")
 def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
     """SGSC's diagnostic page: the device's latest checks and recent repairs."""
-    if device != DOCTOR_DEVICE:
-        raise HTTPException(status_code=404, detail="Appareil inconnu.")
+    d = _known_device(device)
     status = (supabase.table("device_status").select("*").eq("device", device).limit(1).execute()).data
     # Not the output itself: up to 60 kB of journal per row, every 10 s.
     # Fetched on demand from /admin/devices/{device}/commands/{id}.
@@ -3934,14 +3994,16 @@ def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
     try:
         commands = recent(base + ", attachment")
     except Exception:
-        # Before device_commands_v2.sql: the history still shows, without photos.
+        # Before device_doctor_v2.sql: the history still shows, without photos.
         commands = recent(base)
     return {
+        "device": device,
+        "name": d["name"],
         "status": status[0] if status else None,
         "commands": commands,
         "now": _utc_now().isoformat(),
         "command_ttl_s": DOCTOR_COMMAND_TTL_S,
-        "actions": DOCTOR_ACTIONS,
+        "actions": d["actions"],
     }
 
 
@@ -3949,6 +4011,7 @@ def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
 def admin_device_command_output(device: str, command_id: int,
                                 operator: dict = Depends(require_role("qc"))):
     """One request's full output -- the journal a send_logs brought back."""
+    _known_device(device)
     rows = (supabase.table("device_commands").select("id, action, output")
             .eq("device", device).eq("id", command_id).limit(1).execute()).data
     if not rows:
@@ -3960,13 +4023,12 @@ def admin_device_command_output(device: str, command_id: int,
 async def admin_device_command(device: str, request: Request,
                                operator: dict = Depends(require_role("qc"))):
     """Queue one repair for the device's next report (within a minute)."""
-    if device != DOCTOR_DEVICE:
-        raise HTTPException(status_code=404, detail="Appareil inconnu.")
+    d = _known_device(device)
     try:
         action = (await request.json()).get("action")
     except (ValueError, AttributeError):
         raise HTTPException(status_code=400, detail="Corps JSON invalide.")
-    if action not in DOCTOR_ACTIONS:
+    if action not in d["actions"]:
         raise HTTPException(status_code=400, detail=f"Réparation inconnue : {action!r}"[:200])
     # The same request already waiting: a second press of "Redémarrer le Pi"
     # while the first is in flight must not reboot it twice.

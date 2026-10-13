@@ -18,7 +18,7 @@ Written 2026-10-13. When a tool changes, change its row here.
 | **Caliban — revenir à la version précédente** | GitHub → Actions | Redeploys the build before the live one |
 | **Caliban — redémarrer** | GitHub → Actions | Restarts the App Service (needs `AZURE_CREDENTIALS`, below) |
 | **Caliban — journaux** | GitHub → Actions | Container logs, errors first (needs `AZURE_CREDENTIALS`) |
-| **Diagnostic des bancs** | SGSC menu (QC+) | Caliban's status; Ariel's checks and every Ariel repair |
+| **Diagnostic des bancs** | SGSC menu (QC+) | Caliban's status; each rig's checks and every repair it offers |
 | **Diagnostic** | Destoner touchscreen, 2 s press on the chips | Ariel's checks and repairs, plus Wi-Fi restart |
 
 GitHub buttons work even when Caliban, SGSC and Ariel are all down. SGSC's
@@ -96,19 +96,45 @@ page needs Caliban up to reach Ariel.
 
 ## Prosperos (tray rig)
 
-| Failure | Noticed by | Fix | Who |
-|---|---|---|---|
-| Poller crash | — | systemd restart | Itself |
-| Capture hangs | Poller watchdog | Restarts itself | Itself |
-| Wi-Fi drops | netwatch | Wi-Fi cycle / reboot | Itself |
-| New code | Update timer | Pulled within 5 min | Itself |
-| Captures slow to start | `capture_queue` in *vérifier* / SGSC | Caliban side, see above | Itself |
-| Disk filling (originals never pruned) | Monthly GitHub reminder issue | Move `~/captures` to SharePoint | Desk (Pi Connect) |
-| **Anything else** | Operator's capture fails | **No doctor yet** — Pi Connect, or on site | Desk / Site |
+The same doctor as Ariel's since 2026-10-13 (`DOCTOR_DEVICE=prosperos`,
+installed by `rig/install-doctor-tray.sh`), reporting with the tray key and
+shown in its own card in SGSC → Diagnostic des bancs. No touchscreen, so its
+buttons are SGSC's.
 
-The tray rig has no doctor: no remote checks, no buttons, no hardware
-watchdog. Extending `doctor.py` to it (a second device name, the tray key) is
-the biggest remaining gap.
+**Recovers by itself**
+
+| Failure | How |
+|---|---|
+| Poller crash | systemd restarts it |
+| Capture hangs | Poller watchdog restarts it |
+| Wi-Fi drops | netwatch: Wi-Fi cycle at 5 min, reboot at 15 |
+| Pi freezes hard | Hardware watchdog, 15 s |
+| New code | Update timer, within 5 min, unless paused by a rollback |
+| Captures slow to start (deaf wakeup) | Caliban's listener rebuild; `capture_queue` shows it |
+| Silent 10 min | Caliban marks it offline and tells Teams (on by default for this rig: it is in daily use; `system_config.device_offline_alerts = {"prosperos": false}` turns it off) |
+
+**One button** (SGSC)
+
+| Symptom | Button |
+|---|---|
+| Anything red | Tout réparer |
+| Captures time out / "Prise des photos" red | Redémarrer le service du banc |
+| "Is the tray right / lit / in focus?" | Photo de contrôle — with the bench's locked settings; the poller is paused for the few seconds it takes |
+| "Why did that capture fail?" | Envoyer le journal (with the calibration file) |
+| An update broke it | Revenir à la version précédente |
+| Stuck on old code | Remettre le logiciel à jour |
+| Anything else | Redémarrer le Pi |
+
+None of them runs during a capture: they refuse and say to try again in a minute.
+
+**From a desk**: moving `~/captures` to SharePoint when the disk check turns
+yellow (no button deletes them -- they are the only copy); key rotation in
+`/etc/caliban-rig.env`; re-running `install-doctor-tray.sh`.
+
+**Needs someone there**: daily calibration (SGSC → Calibrer le banc, with the
+trays); camera ribbon or a dead camera; the height sensor's cable ("Capteur de
+hauteur" yellow -- density only); the LED light; an unplugged Pi; a corrupt
+SD card.
 
 ## One-time setup still to do
 
@@ -126,7 +152,8 @@ Caliban web app only; expires in two years.
 
 ## Known gaps
 
-- **Prosperos has no doctor** (above).
+- **Tray rig checks are new**: the "silent for 15 min" poller check and the
+  height-sensor probe are reasoned from the code, not yet seen failing.
 - **Vision key and quota are not checked**: a revoked key looks healthy until
   readings fail. A real test call costs money each time, so it is left out.
 - **The Teams webhook is not checked**: a broken one fails silently.
