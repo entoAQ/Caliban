@@ -36,6 +36,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
     python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
     python3 flashcam.py sweep           # measure the firing window for this camera and save it
+    python3 flashcam.py daylight        # colour from the camera's own calibration at flash colour
 """
 
 import gc
@@ -413,6 +414,53 @@ def sweep():
     print(f"whole from {best[0]} to {best[-1]} ms before -> saved fire_before_ms {middle} to {SETTINGS_FILE}")
 
 
+TUNING_DIRS = ("/usr/share/libcamera/ipa/rpi/pisp", "/usr/share/libcamera/ipa/rpi/vc4")
+
+
+def daylight_gains(kelvin=5600):
+    """colour_gains for light of this colour temperature, from the camera's
+    own libcamera tuning file -- the curve its automatic white balance uses.
+
+    A xenon flash is daylight-coloured, ~5500-6000 K, so this gives the
+    correction auto white balance would apply in sunlight, with no card at
+    all. Written after a white card proved unusable under this flash on the
+    HQ camera (2026-10-13): bright enough to clip green and blue while red
+    read ~0, with no aperture setting between that and black.
+
+    ct_curve is (kelvin, r/g, b/g) of a grey surface; the gains that make
+    that grey neutral are the reciprocals.
+    """
+    model = ""
+    try:
+        from picamera2 import Picamera2
+        model = (Picamera2.global_camera_info() or [{}])[0].get("Model", "")
+    except Exception:
+        pass
+    tuning = next((os.path.join(d, f"{model}.json") for d in TUNING_DIRS
+                   if os.path.exists(os.path.join(d, f"{model}.json"))), None)
+    if not tuning:
+        raise FileNotFoundError(f"no tuning file for camera {model!r} in {TUNING_DIRS}")
+    with open(tuning) as f:
+        data = json.load(f)
+    awb = next(a["rpi.awb"] for a in data["algorithms"] if "rpi.awb" in a)
+    c = awb["ct_curve"]
+    pts = sorted((c[i], c[i + 1], c[i + 2]) for i in range(0, len(c) - 2, 3))
+    kelvin = max(pts[0][0], min(pts[-1][0], kelvin))
+    for (k0, r0, b0), (k1, r1, b1) in zip(pts, pts[1:]):
+        if k0 <= kelvin <= k1:
+            t = (kelvin - k0) / (k1 - k0) if k1 > k0 else 0.0
+            r, b = r0 + t * (r1 - r0), b0 + t * (b1 - b0)
+            return [round(1 / r, 3), round(1 / b, 3)], tuning
+    raise ValueError("ct_curve could not be interpolated")
+
+
+def daylight(kelvin=5600):
+    gains, tuning = daylight_gains(kelvin)
+    _save_setting("colour_gains", gains)
+    print(f"colour_gains {gains} for {kelvin} K from {tuning}")
+    print(f"saved to {SETTINGS_FILE}")
+
+
 def white_balance(region=(0.3, 0.3, 0.7, 0.7), passes=12):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
@@ -470,6 +518,8 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "sweep":
         sweep()
+    elif len(sys.argv) > 1 and sys.argv[1] == "daylight":
+        daylight(int(sys.argv[2]) if len(sys.argv) > 2 else 5600)
     elif len(sys.argv) > 1 and sys.argv[1] in ("focus", "focus-shots") and load_settings()["camera"] == "imx477":
         print("The HQ camera has no focus motor: focus it by hand on the lens ring "
               "(live view: python3 ~/caliban/rig/preview.py).")

@@ -140,7 +140,15 @@ sharpness and saves the best as `lens_position`. Put product, or anything
 with fine detail, where the stream will be first. Redo it if the camera's
 height over the chute changes.
 
-`python3 flashcam.py wb` -- white balance **under the flash**: hold a white or
+`python3 flashcam.py daylight` -- **colour, no card needed.** A camera flash is
+daylight-coloured (~5600 K), and the camera's own libcamera tuning file holds
+the correction its automatic white balance uses for that light; this reads it
+and saves it as `colour_gains`. Use this first. On the HQ camera a white card
+under the flash proved unusable (2026-10-13): green and blue clipped while red
+read ~0, with no aperture setting in between.
+
+`python3 flashcam.py wb` -- white balance **under the flash** from a card, to
+refine `daylight` once a proper **grey** card is to hand: hold a white or
 grey card under the camera, filling the centre of the view, and it sets
 `colour_gains` in `~/inline_camera.json` so the card comes out neutral. Redo
 it whenever the camera, the flash, its diffuser or the tote lining changes.
