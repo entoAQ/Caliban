@@ -67,6 +67,34 @@ const PHOTO_BUCKET = 'vision-band-test-captures';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 let mirrorUpdated = null;''')
 
+# The way into Ariel's diagnostic (doctor.py, 127.0.0.1:8091). Only meaningful
+# on the Pi's own screen: in SGSC, localhost is the viewer's PC. The remote
+# side of the diagnostic is SGSC's rig-diagnostic.html instead.
+rep('''    // Still down after a minute: systemd has not managed it alone. Hand over
+    // to the diagnostic, which has the button that might, and comes back here
+    // by itself once this answers again -- if it answers itself: an error
+    // page would be worse than this overlay.
+    if (failures >= DOCTOR_AFTER_FAILURES)
+      fetch(DOCTOR_URL, { mode: 'no-cors', cache: 'no-store' })
+        .then(() => { location.href = DOCTOR_URL + '?from=screen'; }, () => {});
+''', '')
+rep('''// A long press on the health chips opens the diagnostic. Long, so a glove
+// brushing the screen does not; on the chips, because that is where the
+// operator is already looking when something is wrong -- and on the overlay,
+// which covers the chips during a stop or a restart.
+const DOCTOR_URL = 'http://127.0.0.1:8091/';
+const DOCTOR_AFTER_FAILURES = 30;     // x POLL_MS = one minute
+let pressTimer = null;
+function pressStart() { pressTimer = setTimeout(() => { location.href = DOCTOR_URL; }, 2000); }
+function pressEnd() { clearTimeout(pressTimer); }
+for (const id of ['chips', 'health-msg', 'overlay']) {
+  const el = $(id);
+  el.addEventListener('pointerdown', pressStart);
+  for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) el.addEventListener(ev, pressEnd);
+}
+
+''', '')
+
 rep('''async function poll() {
   try {
     const r = await fetch('/state', { cache: 'no-store' });

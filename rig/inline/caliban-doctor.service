@@ -1,0 +1,25 @@
+[Unit]
+Description=Caliban inline rig -- diagnostic and repair (localhost:8091, reports to Caliban)
+# Its own unit, with no dependency on the loop or the screen, so it is still
+# up to repair them when they are not. Wants= rather than Requires= on the
+# network for the same reason as the loop: a dead network is one of the
+# things it is there to report.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ttownshend
+WorkingDirectory=/home/ttownshend/caliban/rig/inline
+# Same file as the loop: CALIBAN_URL and INLINE_API_KEY.
+EnvironmentFile=/etc/caliban-inline.env
+ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/doctor.py
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

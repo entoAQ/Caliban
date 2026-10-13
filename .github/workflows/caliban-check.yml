@@ -1,0 +1,84 @@
+name: "Caliban — vérifier"
+
+# A button: Actions -> "Caliban — vérifier" -> Run workflow. Says in plain
+# words whether Caliban is up, which version is live, and which of the things
+# it depends on answer (/health/deep). Read the result on the run's Summary.
+#
+# Lives in GitHub rather than in SGSC because the moment it is needed most is
+# when Caliban is down -- and then anything Caliban serves is down with it.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      BASE: https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ROLLBACK: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/caliban-rollback.yml
+    steps:
+      - name: Check Caliban
+        run: |
+          S=$GITHUB_STEP_SUMMARY
+          # A cold start can take a minute or two: three tries before "down".
+          for i in 1 2 3; do
+            code=$(curl -sS -o health.json -w '%{http_code}' --max-time 90 "$BASE/health") || code=000
+            [ "$code" = "200" ] && break
+            sleep 20
+          done
+
+          if [ "$code" != "200" ]; then
+            {
+              echo "## ❌ Caliban ne répond pas (code $code)"
+              echo
+              echo "Si une nouvelle version vient d'être déployée, c'est presque toujours elle :"
+              echo "lancer **[Caliban — revenir à la version précédente]($ROLLBACK)**."
+              echo
+              echo "Sinon : Azure Portal → App Service *Caliban* → **Restart**, puis relancer cette vérification."
+            } >> "$S"
+            exit 1
+          fi
+
+          live=$(jq -r '.build_sha' health.json)
+          started=$(jq -r '.started_at' health.json)
+          curl -sS --max-time 90 "$BASE/health/deep" -o deep.json || echo '{}' > deep.json
+          status=$(jq -r '.status // "inconnu"' deep.json)
+
+          {
+            if [ "$status" = "ok" ]; then
+              echo "## ✅ Caliban fonctionne"
+            else
+              echo "## ⚠️ Caliban répond, mais quelque chose ne va pas ($status)"
+            fi
+            echo
+            echo "Version en ligne : \`${live:0:7}\` — démarré le $started (UTC)"
+            echo
+            echo "| Vérification | État | Détail | Temps |"
+            echo "|---|---|---|---|"
+            jq -r '.checks // {} | to_entries[] | "| \(.key)\(if .value.critical then "" else " _(info)_" end) | \(if .value.ok then "✅" else "❌" end) | \(.value.detail) | \(.value.ms) ms |"' deep.json
+            missing=$(jq -r '.config // {} | to_entries | map(select(.value == false) | .key) | join(", ")' deep.json)
+            if [ -n "$missing" ]; then
+              echo
+              echo "**Réglages Azure absents :** $missing"
+            fi
+            echo
+            echo "### Derniers déploiements"
+            echo
+            echo "| Quand (UTC) | Version | Message |"
+            echo "|---|---|---|"
+            gh api "repos/$REPO/actions/workflows/main_caliban_docker.yml/runs?branch=main&status=success&per_page=6" \
+              --jq '.workflow_runs[] | "| \(.updated_at) | `\(.head_sha[0:7])` | \(.head_commit.message | split("\n")[0]) |"' \
+              | sed "s/| \`${live:0:7}\` |/| \`${live:0:7}\` **(en ligne)** |/"
+            if [ "$status" != "ok" ]; then
+              echo
+              echo "Une vérification essentielle échoue. Si c'est arrivé juste après un déploiement :"
+              echo "**[Caliban — revenir à la version précédente]($ROLLBACK)**. Sinon, prévenir Tim."
+            fi
+          } >> "$S"
+          [ "$status" = "ok" ]

@@ -26,6 +26,14 @@ on:
       - '**/*.sql'
   workflow_dispatch:
 
+# Shared with caliban-rollback.yml: a push and a rollback queue behind each
+# other instead of racing onto App Service. Not cancelled, so a queued push
+# still deploys after the rollback -- which is why the rollback's summary says
+# to revert the bad commit first.
+concurrency:
+  group: caliban-deploy
+  cancel-in-progress: false
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest

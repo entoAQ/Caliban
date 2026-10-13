@@ -232,6 +232,33 @@ tray rig: `update.sh` restarts `caliban-inline` and `caliban-inline-screen`
 when they are installed. An open page reloads itself when `screen.html`
 changes.
 
+## Diagnostic and repair
+
+`doctor.py`, as `caliban-doctor` on `127.0.0.1:8091`: twelve checks (power,
+disk, clock, Wi-Fi, Caliban, the key, software version, screen, kiosk, loop,
+camera, flash), each with a one-button fix where a button can fix it and a
+plain-French instruction where hands are needed. Its own service, standard
+library only, so it is up when what it repairs is not. The docstring has the
+reasoning.
+
+| Who | Where | How |
+|---|---|---|
+| Operator at the destoner | the touchscreen | long press (2 s) on the Caméra/Flash/Réseau chips. The screen also hands over to it by itself after a minute of `screen.py` not answering, and `kiosk.sh` opens it if the screen never came up. It returns to the screen on its own once idle. |
+| AQ, from a desk | SGSC → *Diagnostic des bancs* (`sgsc-app/rig-diagnostic.html`) | the doctor posts its checks to Caliban every minute (`/inline/doctor/report`); a button there queues a repair (`device_commands`) that the reply hands back. A repair not picked up within 10 minutes is dropped, never run late. |
+| Anyone, Caliban down | GitHub → Actions | **Caliban — vérifier** (`/health` + `/health/deep`) and **Caliban — revenir à la version précédente** (redeploys the previous build's image; main is untouched, so revert the bad commit before the next push). |
+| Last resort | Pi Connect shell | `bash ~/caliban/rig/inline/install-doctor.sh` reinstalls every unit and sudo rule, re-enables the updater and kiosk, restarts everything and prints the checks. `python3 ~/caliban/rig/inline/doctor.py check` only prints them. |
+
+Fixes it can run, from either side, and nothing else: restart the loop, the
+screen or the browser, restore the kiosk autostart, test the flash (stops the
+loop for the shot, restarts it only if it was running), free disk (oldest
+captures older than 3 days), reset the checkout to GitHub, reboot. Plus, on
+the touchscreen only, cycle the Wi-Fi. None changes a setting or a key.
+
+Setup, once: run `device_doctor.sql` in Supabase, deploy Caliban, then on the
+Pi `bash ~/caliban/rig/inline/install-doctor.sh`. `update.sh` restarts the
+doctor after every pull from then on; the sudo rules are root-owned copies
+and only change when that script is run again.
+
 ## Getting out of the kiosk
 
 With a USB keyboard, Alt+F4 closes the browser, but `lwrespawn` reopens it. To

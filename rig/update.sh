@@ -93,3 +93,11 @@ if systemctl list-unit-files caliban-inline-screen.service >/dev/null 2>&1; then
     echo
     systemctl --no-pager --lines=0 status caliban-inline-screen
 fi
+
+# The inline rig's diagnostic (inline/doctor.py). Restarted last, so a doctor
+# that comes back broken has not stopped the two services above from updating.
+if systemctl list-unit-files caliban-doctor.service >/dev/null 2>&1; then
+    sudo systemctl try-restart caliban-doctor
+    echo
+    systemctl --no-pager --lines=0 status caliban-doctor
+fi

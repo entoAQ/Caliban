@@ -12,13 +12,22 @@
 # through git like everything else, instead of being retyped on the device.
 
 URL="http://127.0.0.1:8090/"
+DOCTOR_URL="http://127.0.0.1:8091/?from=screen"
 
 # The desktop can come up before screen.py does. Chromium given a dead address
 # shows an error page and never retries, so wait for the server first.
+#
+# If it never comes, open the diagnostic (doctor.py) instead: it can restart
+# the screen with a button, and goes back to it by itself once it answers.
+# An error page would just sit there.
+up=""
 for _ in $(seq 1 60); do
-    curl -s -o /dev/null "$URL" && break
+    curl -s -o /dev/null "$URL" && { up=1; break; }
     sleep 1
 done
+if [ -z "$up" ] && curl -s -o /dev/null "http://127.0.0.1:8091/"; then
+    URL="$DOCTOR_URL"
+fi
 
 BROWSER="$(command -v chromium || command -v chromium-browser)"
 

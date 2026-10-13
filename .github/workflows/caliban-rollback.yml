@@ -1,0 +1,121 @@
+name: "Caliban — revenir à la version précédente"
+
+# A button: Actions -> this workflow -> Run workflow. Puts back the build that
+# was live before the current one, and waits until Caliban reports it.
+#
+# The first move when Caliban breaks right after a deploy, before any
+# diagnosis (2026-09-22: an hour of Azure Portal archaeology for an outage a
+# rollback fixed at once). Every build is already in ghcr.io under its commit
+# SHA, so going back is a deploy of an older tag -- no rebuild.
+#
+# It does not change main. The next push redeploys whatever main holds, so
+# the bad commit still has to be reverted or fixed -- the summary says so.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Version à remettre (SHA). Vide = celle d'avant la version en ligne."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+# One deploy at a time, shared with the build-and-deploy workflow, so a
+# rollback and a push cannot race each other onto App Service.
+concurrency:
+  group: caliban-deploy
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    env:
+      HEALTH: https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net/health
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      # Through env, never pasted into the script: an input is text anyone
+      # running the workflow chose.
+      WANTED: ${{ inputs.sha }}
+      AZURE_PUBLISH_PROFILE: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+    steps:
+      - name: Choose the version to put back
+        id: pick
+        run: |
+          live=$(curl -fsS --max-time 30 "$HEALTH" | jq -r '.build_sha // empty') || live=""
+          echo "Live now: ${live:-unreachable}"
+          # Builds that succeeded, newest first. Each one pushed its image.
+          gh api "repos/$REPO/actions/workflows/main_caliban_docker.yml/runs?branch=main&status=success&per_page=50" \
+            --jq '.workflow_runs[].head_sha' | awk '!seen[$0]++' > builds.txt
+
+          if [ -n "$WANTED" ]; then
+            target=$(gh api "repos/$REPO/commits/$WANTED" --jq .sha) || { echo "::error::Version inconnue : $WANTED"; exit 1; }
+            grep -qx "$target" builds.txt || { echo "::error::Aucune image construite pour $target"; exit 1; }
+          elif [ -n "$live" ] && grep -qx "$live" builds.txt; then
+            # The build just before the live one.
+            target=$(grep -A1 -x "$live" builds.txt | sed -n 2p)
+          else
+            # Caliban is down, so it cannot say what it runs: assume the
+            # newest build is the broken one and take the one before it.
+            target=$(sed -n 2p builds.txt)
+          fi
+          [ -n "$target" ] || { echo "::error::Pas de version précédente trouvée."; exit 1; }
+          [ "$target" != "$live" ] || { echo "::error::$target est déjà en ligne."; exit 1; }
+          msg=$(gh api "repos/$REPO/commits/$target" --jq '.commit.message | split("\n")[0]')
+          echo "Putting back $target: $msg"
+          {
+            echo "target=$target"
+            echo "live=$live"
+            echo "msg=$msg"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check the deploy secret
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+        run: |
+          if [ -z "$AZURE_PUBLISH_PROFILE" ]; then
+            echo "::error::Secret AZURE_WEBAPP_PUBLISH_PROFILE absent : retour en arrière à faire à la main dans Cloud Shell."
+            echo "az webapp config container set --name Caliban --resource-group Caliban_group --container-image-name ghcr.io/entoaq/caliban:$TARGET"
+            exit 1
+          fi
+
+      - name: Deploy the older image
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: Caliban
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          images: ghcr.io/entoaq/caliban:${{ steps.pick.outputs.target }}
+
+      - name: Wait until it is live
+        env:
+          TARGET: ${{ steps.pick.outputs.target }}
+          LIVE_BEFORE: ${{ steps.pick.outputs.live }}
+          MSG: ${{ steps.pick.outputs.msg }}
+        run: |
+          S=$GITHUB_STEP_SUMMARY
+          for i in $(seq 1 60); do
+            live=$(curl -fsS --max-time 10 "$HEALTH" | jq -r '.build_sha // empty') || live=""
+            if [ "$live" = "$TARGET" ]; then
+              {
+                echo "## ✅ Caliban remis à la version \`${TARGET:0:7}\`"
+                echo
+                echo "> $MSG"
+                echo
+                echo "En ligne après $((i * 10)) s. Version retirée : \`${LIVE_BEFORE:0:7}\`."
+                echo
+                echo "**À faire ensuite :** le prochain push sur \`main\` redéploiera la version retirée."
+                echo "Annuler (\`git revert\`) ou corriger le commit fautif avant tout autre push."
+              } >> "$S"
+              exit 0
+            fi
+            echo "waiting $((i * 10))s -- live=${live:-unreachable}"
+            sleep 10
+          done
+          {
+            echo "## ⚠️ Déployé, mais Caliban ne rapporte pas encore \`${TARGET:0:7}\` après 10 minutes"
+            echo
+            echo "Relancer **Caliban — vérifier** dans quelques minutes. Si toujours rien : Azure Portal → Caliban → Restart."
+          } >> "$S"
+          exit 1

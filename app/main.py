@@ -270,6 +270,10 @@ def _check_vision_endpoint():
 
 
 def _check_sharepoint():
+    # Not configured on the live service (2026-10-13): unused, not broken. A
+    # permanent warning for it would teach everyone to ignore the colour.
+    if not sharepoint_client.MS_TENANT_ID:
+        return "non configuré (non utilisé)"
     sharepoint_client._get_access_token()
     return "jeton obtenu"
 

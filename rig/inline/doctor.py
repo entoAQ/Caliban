@@ -1,0 +1,733 @@
+#!/usr/bin/env python3
+"""Ariel's doctor -- find what is wrong with the inline rig, and fix it with a button.
+
+The people who see the destoner screen go wrong are on the line, not at a
+terminal. Everything that has broken on this rig so far has had a known fix --
+restart the loop, restart the screen, wake the flash, cycle the Wi-Fi, pull
+the code again, reboot -- and every one of them needed someone with SSH.
+This puts each check next to its fix, in French, as a button.
+
+Two ways in, one set of checks and fixes:
+
+    On the touchscreen     http://127.0.0.1:8091/ -- a long press on the
+                           Caméra/Flash/Réseau chips opens it, and the
+                           destoner screen falls back to it on its own when
+                           screen.py stops answering.
+    From a desk            every minute this posts its checks to Caliban
+                           (/inline/doctor/report) and runs whatever repair
+                           SGSC's diagnostic page queued for it in reply.
+                           Outbound only, like loop.py: nothing calls in.
+
+It is its own service (caliban-doctor), separate from screen.py and loop.py,
+precisely so that it is still running when they are not. Standard library
+only, for the same reason: a broken Python package must not take the repair
+tool down with the thing it repairs.
+
+Only the fixes named in FIXES can run, from either side, and none of them
+edits a setting or a key. Root is reached through the scoped sudo rules in
+caliban-doctor.sudoers, never by running this as root.
+
+    python3 doctor.py              # serve the page and report to Caliban
+    python3 doctor.py check        # print every check once (SSH / Pi Connect)
+    python3 doctor.py fix ACTION   # run one fix by name, e.g. restart_loop
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+from http import server
+from socketserver import ThreadingMixIn
+
+PORT = 8091
+HOME = os.path.expanduser("~")
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+PAGE_FILE = os.path.join(HERE, "doctor.html")
+STATE_FILE = os.path.join(HOME, "inline_state.json")
+CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
+TEST_PHOTO = os.path.join(CAPTURE_DIR, "TEST.jpg")
+AUTOSTART = os.path.join(HOME, ".config", "labwc", "autostart")
+DEMO_DROPIN = "/etc/systemd/system/caliban-inline-screen.service.d/demo.conf"
+
+CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
+INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
+
+LOOP = "caliban-inline"
+SCREEN = "caliban-inline-screen"
+UPDATE_TIMER = "caliban-rig-update.timer"
+
+REPORT_EVERY_S = 60
+# The loop writes its state at least once per reading or idle recheck -- every
+# minute while the line is stopped, every interval (5 min) while it runs. Past
+# this, it has stopped doing its job even if systemd says it is running.
+STATE_STALE_S = 15 * 60
+GIT_FETCH_EVERY_S = 10 * 60
+# Freed down to this much free space; never touching anything newer than
+# KEEP_DAYS -- the full-resolution originals are the only copy of a reading.
+DISK_WARN_PCT, DISK_FAIL_PCT, DISK_TARGET_PCT = 20, 10, 25
+KEEP_DAYS = 3
+
+
+def log(message):
+    print(f"{datetime.now().isoformat(timespec='seconds')}  {message}", flush=True)
+
+
+def run(cmd, timeout=20, cwd=None):
+    """(returncode, combined output). Never raises: a missing tool is an
+    answer (127), not a crash of the doctor."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except FileNotFoundError:
+        return 127, f"{cmd[0]} introuvable"
+    except subprocess.TimeoutExpired:
+        return 124, f"{' '.join(cmd[:3])} : pas de réponse après {timeout} s"
+
+
+def sudo_systemctl(verb, unit):
+    # Exactly the forms listed in the sudoers files; -n so a missing rule
+    # fails at once instead of waiting for a password nobody will type.
+    return run(["sudo", "-n", "/usr/bin/systemctl", verb, unit], timeout=60)
+
+
+def is_active(unit):
+    return run(["systemctl", "is-active", unit])[1] == "active"
+
+
+def http_get(url, timeout=15, headers=None):
+    """(status or None, parsed JSON or text). None = could not connect."""
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+            status = r.status
+    except urllib.error.HTTPError as e:
+        body, status = e.read().decode("utf-8", "replace"), e.code
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, str(getattr(e, "reason", e))
+    try:
+        return status, json.loads(body)
+    except ValueError:
+        return status, body[:300]
+
+
+def http_post_json(url, obj, timeout=30, headers=None):
+    data = json.dumps(obj).encode()
+    h = {"Content-Type": "application/json", **(headers or {})}
+    req = urllib.request.Request(url, data=data, headers=h, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")[:300]
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return None, str(getattr(e, "reason", e))
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def age_s(iso):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def minutes(seconds):
+    return f"{int(seconds // 60)} min" if seconds is not None else "?"
+
+
+# --- Checks -------------------------------------------------------------------
+#
+# Each returns {id, label, status, detail, fix?, manual?}:
+#   status   ok | warn | fail | off (not applicable / not set up)
+#   detail   one line saying what was found, in plain French
+#   fix      the FIXES key that should cure it, if a button can
+#   manual   what a person has to do with their hands, when a button cannot
+#
+# `full` is False for the minute-by-minute report to Caliban: the slow or
+# intrusive parts (listing the cameras, git fetch) only run when someone is
+# actually looking.
+
+def check(id, label, status, detail, fix=None, manual=None):
+    return {"id": id, "label": label, "status": status, "detail": detail,
+            "fix": fix, "manual": manual}
+
+
+def check_power(full):
+    rc, out = run(["vcgencmd", "get_throttled"])
+    if rc != 0 or "=" not in out:
+        return check("power", "Alimentation", "off", "Mesure indisponible.")
+    bits = int(out.split("=")[1], 16)
+    rc, temp = run(["vcgencmd", "measure_temp"])
+    t = temp.replace("temp=", "").replace("'C", " °C") if rc == 0 else "?"
+    if bits & 0x1:
+        return check("power", "Alimentation", "fail", f"Tension trop basse en ce moment ({t}).",
+                     manual="Vérifier que le bloc d'alimentation officiel 27 W est branché, et pas une rallonge USB.")
+    if bits & 0x10000:
+        return check("power", "Alimentation", "warn", f"La tension a été trop basse depuis le démarrage ({t}).",
+                     manual="Vérifier le bloc d'alimentation et son câble.")
+    try:
+        if float(t.split()[0]) >= 80:
+            return check("power", "Alimentation", "warn", f"Le Pi chauffe : {t}.",
+                         manual="Dégager les aérations du boîtier.")
+    except ValueError:
+        pass
+    return check("power", "Alimentation", "ok", f"Tension correcte, {t}.")
+
+
+def check_disk(full):
+    u = shutil.disk_usage("/")
+    free_pct = 100 * u.free / u.total
+    detail = f"{u.free / 1e9:.1f} Go libres ({free_pct:.0f} %)."
+    if free_pct < DISK_FAIL_PCT:
+        return check("disk", "Espace disque", "fail", detail, fix="free_disk")
+    if free_pct < DISK_WARN_PCT:
+        return check("disk", "Espace disque", "warn", detail, fix="free_disk")
+    return check("disk", "Espace disque", "ok", detail)
+
+
+def check_clock(full):
+    rc, out = run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"])
+    if rc != 0:
+        return check("clock", "Horloge", "off", "État inconnu.")
+    if out.strip() != "yes":
+        # A wrong clock breaks HTTPS to Caliban outright; it fixes itself once
+        # the network is back, and a reboot forces it.
+        return check("clock", "Horloge", "warn", "Heure non synchronisée avec Internet.", fix="reboot")
+    return check("clock", "Horloge", "ok", "Synchronisée.")
+
+
+def check_wifi(full):
+    rc, out = run(["nmcli", "-t", "-f", "TYPE,STATE,CONNECTION", "device"])
+    if rc != 0:
+        return check("wifi", "Wi-Fi", "off", "État inconnu.")
+    wifi = [l.split(":") for l in out.splitlines() if l.startswith("wifi:")]
+    up = [w for w in wifi if len(w) >= 3 and w[1] == "connected"]
+    if not up:
+        return check("wifi", "Wi-Fi", "fail", "Pas connecté au Wi-Fi de l'usine.", fix="cycle_wifi",
+                     manual="Si ça ne revient pas : le Wi-Fi de l'usine est-il en panne ailleurs aussi ?")
+    status, _ = http_get("https://www.google.com/generate_204", timeout=10)
+    if status is None:
+        return check("wifi", "Wi-Fi", "fail", f"Connecté à « {up[0][2]} », mais pas d'accès à Internet.",
+                     fix="cycle_wifi")
+    return check("wifi", "Wi-Fi", "ok", f"Connecté à « {up[0][2]} ».")
+
+
+def check_caliban(full):
+    if not CALIBAN_URL:
+        return check("caliban", "Caliban (nuage)", "fail", "Adresse de Caliban absente sur ce Pi.",
+                     manual="Installation incomplète : prévenir l'AQ (fichier /etc/caliban-inline.env).")
+    status, body = http_get(f"{CALIBAN_URL}/health", timeout=20)
+    if status is None:
+        return check("caliban", "Caliban (nuage)", "fail", "Caliban ne répond pas.",
+                     manual="Si le Wi-Fi est bon, la panne est dans le nuage, pas ici : prévenir l'AQ.")
+    if status != 200:
+        return check("caliban", "Caliban (nuage)", "fail", f"Caliban répond en erreur ({status}).",
+                     manual="La panne est dans le nuage, pas ici : prévenir l'AQ.")
+    sha = (body.get("build_sha") or "")[:7] if isinstance(body, dict) else ""
+    return check("caliban", "Caliban (nuage)", "ok", f"Répond (version {sha or '?'}).")
+
+
+def check_key(full):
+    if not INLINE_API_KEY:
+        return check("key", "Clé d'accès", "fail", "Clé absente sur ce Pi.",
+                     manual="Installation incomplète : prévenir l'AQ (fichier /etc/caliban-inline.env).")
+    status, body = http_get(f"{CALIBAN_URL}/inline/ping", timeout=20, headers={"X-API-Key": INLINE_API_KEY})
+    if status is None:
+        return check("key", "Clé d'accès", "off", "Non vérifiable sans Caliban.")
+    if status == 401:
+        return check("key", "Clé d'accès", "fail", "Caliban refuse la clé de ce Pi.",
+                     manual="La clé a changé dans Azure : prévenir l'AQ.")
+    if status != 200:
+        return check("key", "Clé d'accès", "off", f"Non vérifiable ({status}).")
+    return check("key", "Clé d'accès", "ok", "Acceptée.")
+
+
+_git_fetched_at = 0
+
+
+def check_update(full):
+    global _git_fetched_at
+    if not os.path.isdir(os.path.join(REPO, ".git")):
+        return check("update", "Logiciel", "off", "Pas un dépôt git.")
+    if full and time.time() - _git_fetched_at > GIT_FETCH_EVERY_S:
+        if run(["git", "fetch", "--quiet"], timeout=60, cwd=REPO)[0] == 0:
+            _git_fetched_at = time.time()
+    head = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO)[1]
+    rc, behind = run(["git", "rev-list", "--count", "HEAD..@{u}"], cwd=REPO)
+    dirty = run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO)[1]
+    timer = run(["systemctl", "is-enabled", UPDATE_TIMER])[1]
+    if dirty:
+        return check("update", "Logiciel", "warn",
+                     f"Version {head}, modifiée à la main sur ce Pi : les mises à jour sont bloquées.",
+                     fix="update_code")
+    if rc == 0 and behind.isdigit() and int(behind) > 0 and full:
+        return check("update", "Logiciel", "warn",
+                     f"Version {head}, {behind} mise(s) à jour en attente.", fix="update_code")
+    if timer != "enabled":
+        return check("update", "Logiciel", "warn",
+                     f"Version {head}. Les mises à jour automatiques ne sont pas activées.",
+                     manual="Installation incomplète : prévenir l'AQ (caliban-rig-update.timer).")
+    return check("update", "Logiciel", "ok", f"Version {head}, à jour.")
+
+
+def check_screen(full):
+    if not is_active(SCREEN):
+        return check("screen", "Écran destoner", "fail", "Le service de l'écran est arrêté.", fix="restart_screen")
+    status, _ = http_get("http://127.0.0.1:8090/state", timeout=5)
+    if status != 200:
+        return check("screen", "Écran destoner", "fail", "Le service de l'écran ne répond pas.", fix="restart_screen")
+    if os.path.exists(DEMO_DROPIN):
+        return check("screen", "Écran destoner", "warn", "L'écran est en mode DÉMO : il n'affiche pas les vraies lectures.",
+                     manual="Prévenir l'AQ (retirer demo.conf).")
+    return check("screen", "Écran destoner", "ok", "Répond.")
+
+
+def kiosk_running():
+    return run(["pgrep", "-f", "--", "--kiosk"])[0] == 0
+
+
+def check_kiosk(full):
+    try:
+        with open(AUTOSTART) as f:
+            autostart = "kiosk.sh" in f.read()
+    except OSError:
+        autostart = False
+    if not autostart:
+        return check("kiosk", "Navigateur plein écran", "fail",
+                     "Le plein écran n'est plus lancé au démarrage.", fix="restore_kiosk")
+    if not kiosk_running():
+        return check("kiosk", "Navigateur plein écran", "fail", "Le navigateur n'est pas ouvert.", fix="reboot")
+    return check("kiosk", "Navigateur plein écran", "ok", "Ouvert.")
+
+
+def check_loop(full):
+    state = load_state()
+    if not is_active(LOOP):
+        enabled = run(["systemctl", "is-enabled", LOOP])[1]
+        return check("loop", "Lectures automatiques", "fail",
+                     "Arrêtées." + (" (Pas lancées au démarrage non plus.)" if enabled != "enabled" else
+                                    " Peut-être volontairement, pour un réglage de la caméra."),
+                     fix="restart_loop")
+    age = age_s(state.get("updated_at"))
+    if age is None or age > STATE_STALE_S:
+        return check("loop", "Lectures automatiques", "fail",
+                     f"En marche, mais rien de nouveau depuis {minutes(age)}.", fix="restart_loop")
+    r = state.get("reading") or {}
+    line = state.get("line") or {}
+    if line.get("running") is False:
+        what = "ligne arrêtée, en attente"
+    elif line.get("product") is False:
+        what = "pas de produit sur la chute"
+    else:
+        what = f"dernière lecture il y a {minutes(age_s(r.get('at')))}" if r.get("at") else "pas encore de lecture"
+    return check("loop", "Lectures automatiques", "ok", f"En marche : {what}.")
+
+
+def check_camera(full):
+    h = (load_state().get("health") or {})
+    cam = h.get("camera", "ok")
+    if full and not is_active(LOOP):
+        # Only while the loop is off: it holds the camera otherwise, and
+        # nothing here should touch the camera underneath a reading.
+        rc, out = run(["rpicam-hello", "--list-cameras"], timeout=20)
+        if rc == 0 and "Available cameras" not in out:
+            return check("camera", "Caméra", "fail", "Aucune caméra détectée.", fix="reboot",
+                         manual="Vérifier que la nappe de la caméra est bien enfoncée des deux côtés (Pi éteint).")
+    if cam == "low":
+        return check("camera", "Caméra", "warn", h.get("message") or "Trop de lumière sous la couverture.",
+                     manual="Vérifier que le bac de couverture est bien en place sur la caméra.")
+    if cam not in ("ok", None):
+        return check("camera", "Caméra", "fail", "Pas de photo à la dernière lecture.", fix="restart_loop",
+                     manual="Si ça revient : vérifier la nappe de la caméra (Pi éteint), puis redémarrer le Pi.")
+    return check("camera", "Caméra", "ok", "Photos normales.")
+
+
+def check_flash(full):
+    state = load_state()
+    h = state.get("health") or {}
+    flash = h.get("flash", "ok")
+    levels = state.get("flash_levels") or []
+    lvl = f" (force {levels[-1]:.2f})" if levels and isinstance(levels[-1], (int, float)) else ""
+    if flash == "low":
+        return check("flash", "Flash", "warn", f"Plus faible que d'habitude{lvl}.",
+                     manual="Changer les 4 piles AA du flash (piles rechargeables chargées).")
+    if flash not in ("ok", None):
+        return check("flash", "Flash", "fail", "Ne se déclenche pas.", fix="test_flash",
+                     manual="1. Appuyer sur un bouton du flash pour le réveiller. "
+                            "2. S'il ne s'allume pas : changer les piles. 3. Puis « Tester le flash ».")
+    last = age_s(state.get("last_flash_at"))
+    return check("flash", "Flash", "ok", f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK.")
+
+
+CHECKS = [check_power, check_disk, check_clock, check_wifi, check_caliban, check_key,
+          check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash]
+
+
+def _safe(fn, full):
+    try:
+        return fn(full)
+    except Exception as e:
+        name = fn.__name__.removeprefix("check_")
+        return check(name, name, "off", f"Vérification impossible : {type(e).__name__}: {e}")
+
+
+def run_checks(full=True):
+    # In parallel: with the network down, the Wi-Fi, Caliban and key checks
+    # each wait out their timeout, and one after the other that is most of a
+    # minute of blank page for someone standing at the screen.
+    with ThreadPoolExecutor(max_workers=len(CHECKS)) as pool:
+        out = list(pool.map(lambda fn: _safe(fn, full), CHECKS))
+    worst = "fail" if any(c["status"] == "fail" for c in out) else \
+            "warn" if any(c["status"] == "warn" for c in out) else "ok"
+    return {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "overall": worst, "checks": out}
+
+
+# --- Fixes --------------------------------------------------------------------
+#
+# Each returns (ok, French sentence saying what happened). Run one at a time
+# (fix_lock): two repairs racing each other over the same service is a fault
+# of its own.
+
+fix_lock = threading.Lock()
+
+
+def fix_restart_screen():
+    rc, out = sudo_systemctl("restart", SCREEN)
+    if rc != 0:
+        return False, f"Échec du redémarrage de l'écran : {out[:200]}"
+    time.sleep(3)
+    return is_active(SCREEN), "Écran redémarré." if is_active(SCREEN) else "L'écran ne repart pas."
+
+
+def fix_restart_loop():
+    rc, out = sudo_systemctl("restart", LOOP)
+    if rc != 0:
+        return False, f"Échec du redémarrage des lectures : {out[:200]}"
+    time.sleep(3)
+    return (True, "Lectures redémarrées : la prochaine photo est prise tout de suite.") if is_active(LOOP) \
+        else (False, "Les lectures ne repartent pas : voir le journal (prévenir l'AQ).")
+
+
+def fix_restart_kiosk():
+    if not kiosk_running():
+        return False, "Le navigateur n'est pas ouvert : redémarrer le Pi."
+    # lwrespawn (from the autostart line) reopens it at once.
+    run(["pkill", "-f", "chromium"])
+    return True, "Navigateur fermé : il se rouvre tout seul dans quelques secondes."
+
+
+def fix_restore_kiosk():
+    line = "/usr/bin/lwrespawn /home/ttownshend/caliban/rig/inline/kiosk.sh &\n"
+    os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+    with open(AUTOSTART, "w") as f:
+        f.write(line)
+    return True, "Lancement automatique rétabli. Redémarrer le Pi pour qu'il prenne effet."
+
+
+def fix_cycle_wifi():
+    rc1, o1 = run(["sudo", "-n", "/usr/bin/nmcli", "radio", "wifi", "off"])
+    time.sleep(5)
+    rc2, o2 = run(["sudo", "-n", "/usr/bin/nmcli", "radio", "wifi", "on"])
+    if rc1 or rc2:
+        return False, f"Impossible de relancer le Wi-Fi : {(o1 or o2)[:200]}"
+    for _ in range(12):
+        time.sleep(5)
+        if check_wifi(False)["status"] == "ok":
+            return True, "Wi-Fi relancé et reconnecté."
+    return False, "Wi-Fi relancé, mais toujours pas de connexion."
+
+
+def fix_update_code():
+    if run(["git", "fetch", "--quiet"], timeout=90, cwd=REPO)[0] != 0:
+        return False, "Impossible de joindre GitHub : vérifier le Wi-Fi."
+    # The Pi only ever consumes this repo. Anything changed by hand here is
+    # what is blocking update.sh's --ff-only pull, and is not worth keeping on
+    # a device nobody edits on purpose. Calibration lives in ~, not the repo.
+    rc, out = run(["git", "reset", "--hard", "@{u}"], cwd=REPO)
+    if rc != 0:
+        return False, f"Échec de la mise à jour : {out[:200]}"
+    head = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO)[1]
+    sudo_systemctl("try-restart", LOOP)
+    sudo_systemctl("try-restart", SCREEN)
+    # This process is now running the old code; systemd restarts it on the new.
+    threading.Timer(5, lambda: os._exit(0)).start()
+    return True, f"Logiciel remis à la version {head} de GitHub ; services redémarrés."
+
+
+def fix_free_disk():
+    u = shutil.disk_usage("/")
+    need = u.total * DISK_TARGET_PCT / 100 - u.free
+    if need <= 0:
+        return True, "Assez d'espace, rien à effacer."
+    cutoff = time.time() - KEEP_DAYS * 86400
+    files = []
+    for root, _, names in os.walk(CAPTURE_DIR):
+        for n in names:
+            p = os.path.join(root, n)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if st.st_mtime < cutoff:
+                files.append((st.st_mtime, st.st_size, p))
+    freed = count = 0
+    for _, size, p in sorted(files):
+        if freed >= need:
+            break
+        try:
+            os.remove(p)
+            freed += size
+            count += 1
+        except OSError:
+            pass
+    ok = shutil.disk_usage("/").free >= u.total * DISK_WARN_PCT / 100
+    return ok, f"{count} vieille(s) photo(s) effacée(s), {freed / 1e6:.0f} Mo libérés." + \
+        ("" if ok else " Toujours trop plein : prévenir l'AQ.")
+
+
+TEST_SCRIPT = """
+import json, sys
+sys.path.insert(0, %r)
+import flashcam
+try:
+    m = flashcam.capture(%r, dict(flashcam.load_settings(), attempts=3))
+    print(json.dumps({"ok": True, "flash_level": m.get("flash_level"), "clipped_pct": m.get("clipped_pct")}))
+except flashcam.FlashNotFired as e:
+    print(json.dumps({"ok": False, "why": "nofire", "error": str(e)}))
+except Exception as e:
+    print(json.dumps({"ok": False, "why": "camera", "error": type(e).__name__ + ": " + str(e)}))
+""" % (HERE, TEST_PHOTO)
+
+
+def fix_test_flash():
+    # The loop holds the camera and the flash's GPIO; it has to let go first,
+    # and is put back only if it was running -- a loop stopped on purpose for
+    # bench work stays stopped.
+    was_running = is_active(LOOP)
+    if was_running:
+        sudo_systemctl("stop", LOOP)
+        time.sleep(2)
+    try:
+        rc, out = run([sys.executable, "-c", TEST_SCRIPT], timeout=120, cwd=HERE)
+    finally:
+        if was_running:
+            sudo_systemctl("start", LOOP)
+    try:
+        res = json.loads(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return False, f"Test impossible : {out[-200:]}"
+    if res.get("ok"):
+        lvl = res.get("flash_level")
+        return True, "Le flash fonctionne." + (f" Force {lvl:.2f} (1,00 = normal)." if lvl else "")
+    if res.get("why") == "nofire":
+        return False, "Le flash ne s'est pas déclenché : le réveiller (un bouton) ou changer les piles, puis réessayer."
+    return False, f"La caméra n'a pas pris de photo : {res.get('error', '')[:150]}"
+
+
+def fix_reboot():
+    # Delayed so the answer reaches whoever pressed the button first.
+    threading.Timer(3, lambda: run(["sudo", "-n", "/usr/bin/systemctl", "reboot"])).start()
+    return True, "Redémarrage du Pi : l'écran revient dans environ 1 minute."
+
+
+# Order matters for repair_all: the network before anything that needs it,
+# the services before what they report.
+FIXES = {
+    "cycle_wifi":     ("Relancer le Wi-Fi", fix_cycle_wifi),
+    "free_disk":      ("Libérer de l'espace", fix_free_disk),
+    "update_code":    ("Remettre le logiciel à jour", fix_update_code),
+    "restart_screen": ("Redémarrer l'écran", fix_restart_screen),
+    "restore_kiosk":  ("Rétablir le plein écran", fix_restore_kiosk),
+    "restart_kiosk":  ("Rouvrir le navigateur", fix_restart_kiosk),
+    "restart_loop":   ("Redémarrer les lectures", fix_restart_loop),
+    "test_flash":     ("Tester le flash", fix_test_flash),
+    "reboot":         ("Redémarrer le Pi", fix_reboot),
+}
+
+# Never applied by "Tout réparer": the reboot is its own decision, the flash
+# test only means something after someone has woken the flash by hand, and
+# the code update restarts this process from under the rest of the run.
+NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code"}
+
+
+def repair_all():
+    before = run_checks(full=True)
+    wanted = {c["fix"] for c in before["checks"] if c["status"] in ("fail", "warn") and c.get("fix")}
+    done = []
+    for name, (label, fn) in FIXES.items():
+        if name in wanted and name not in NOT_IN_REPAIR_ALL:
+            ok, msg = fn()
+            done.append(f"{'✓' if ok else '✗'} {msg}")
+    after = run_checks(full=True)
+    still = [c["label"] for c in after["checks"] if c["status"] == "fail"]
+    if not done:
+        summary = "Rien à réparer automatiquement."
+    else:
+        summary = " ".join(done)
+    if still:
+        summary += " Toujours en panne : " + ", ".join(still) + "."
+        left = {c["fix"] for c in after["checks"] if c["status"] == "fail"}
+        if "reboot" in left or any(f in NOT_IN_REPAIR_ALL for f in left):
+            summary += " Voir les boutons ci-dessous."
+    return not still, summary
+
+
+def apply_fix(name):
+    if name == "repair_all":
+        fn = repair_all
+    elif name in FIXES:
+        fn = FIXES[name][1]
+    else:
+        return False, f"Réparation inconnue : {name}"
+    if not fix_lock.acquire(timeout=1):
+        return False, "Une autre réparation est déjà en cours : patientez."
+    try:
+        log(f"fix {name}")
+        ok, msg = fn()
+        log(f"fix {name}: {'ok' if ok else 'FAILED'} -- {msg}")
+        return ok, msg
+    except Exception as e:
+        traceback.print_exc()
+        return False, f"Erreur pendant la réparation : {type(e).__name__}: {e}"
+    finally:
+        fix_lock.release()
+
+
+# --- Remote: report to Caliban, run what SGSC queued ---------------------------
+
+pending_results = []
+results_lock = threading.Lock()
+
+
+def report_once():
+    report = run_checks(full=False)
+    with results_lock:
+        results, pending_results[:] = list(pending_results), []
+    status, body = http_post_json(f"{CALIBAN_URL}/inline/doctor/report",
+                                  {"report": report, "results": results},
+                                  headers={"X-API-Key": INLINE_API_KEY})
+    if status != 200 or not isinstance(body, dict):
+        with results_lock:
+            pending_results[:0] = results     # try them again next time
+        return []
+    return body.get("commands") or []
+
+
+def reporter():
+    if not CALIBAN_URL or not INLINE_API_KEY:
+        log("no CALIBAN_URL / INLINE_API_KEY: not reporting to Caliban")
+        return
+    while True:
+        try:
+            for cmd in report_once():
+                action, cid = cmd.get("action"), cmd.get("id")
+                log(f"remote request #{cid}: {action}")
+                if action in ("reboot", "update_code"):
+                    # These end this process; say "started" before they do.
+                    with results_lock:
+                        pending_results.append({"id": cid, "ok": True, "detail": "Lancé."})
+                    report_once()
+                ok, msg = apply_fix(action)
+                with results_lock:
+                    pending_results.append({"id": cid, "ok": ok, "detail": msg})
+                report_once()
+        except Exception as e:
+            log(f"report failed: {type(e).__name__}: {e}")
+        time.sleep(REPORT_EVERY_S)
+
+
+# --- HTTP (the touchscreen) -----------------------------------------------------
+
+class Handler(server.BaseHTTPRequestHandler):
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code, obj):
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/":
+            try:
+                with open(PAGE_FILE, "rb") as f:
+                    self._send(200, f.read(), "text/html; charset=utf-8")
+            except OSError as e:
+                self._send(500, f"doctor.html unreadable: {e}".encode(), "text/plain")
+        elif path == "/checks":
+            report = run_checks(full=True)
+            report["fixes"] = {k: v[0] for k, v in FIXES.items()}
+            self._json(200, report)
+        elif path == "/test-photo":
+            try:
+                with open(TEST_PHOTO, "rb") as f:
+                    self._send(200, f.read(), "image/jpeg")
+            except OSError:
+                self._send(404, b"no test photo", "text/plain")
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0] != "/fix":
+            return self._send(404, b"not found", "text/plain")
+        try:
+            body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1000)) or b"{}")
+        except ValueError:
+            return self._json(400, {"ok": False, "message": "Requête invalide."})
+        ok, msg = apply_fix(str(body.get("action")))
+        self._json(200, {"ok": ok, "message": msg})
+
+    def log_message(self, *args):
+        pass
+
+
+class Server(ThreadingMixIn, server.HTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["check"]:
+        for c in run_checks(full=True)["checks"]:
+            mark = {"ok": "OK  ", "warn": "!!  ", "fail": "XX  ", "off": "--  "}[c["status"]]
+            print(f"{mark}{c['label']:<24} {c['detail']}" + (f"   [fix: {c['fix']}]" if c.get("fix") else ""))
+            if c.get("manual") and c["status"] != "ok":
+                print(f"{'':28} -> {c['manual']}")
+        return
+    if args[:1] == ["fix"] and len(args) == 2:
+        ok, msg = apply_fix(args[1])
+        print(msg)
+        sys.exit(0 if ok else 1)
+    if args:
+        sys.exit(__doc__)
+
+    threading.Thread(target=reporter, daemon=True).start()
+    log(f"doctor on http://127.0.0.1:{PORT}/ -> reporting to {CALIBAN_URL or '(nowhere)'}")
+    Server(("127.0.0.1", PORT), Handler).serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Diagnostic</title>
+<!--
+  Ariel's diagnostic page, on the destoner's touchscreen (720x1280 portrait,
+  no keyboard). Served by doctor.py on 127.0.0.1:8091; see its docstring.
+
+  Reached two ways: a long press on the destoner screen's health chips, or on
+  its own when the destoner screen stops answering (screen.html sends the
+  kiosk here, and kiosk.sh opens here if screen.py never came up). Either way
+  it goes back by itself once nobody is using it and the screen answers, so a
+  diagnostic left open never hides the destoner instructions for long.
+
+  No confirm()/alert(): a browser dialog on a kiosk with no keyboard blocks
+  the page. Risky buttons ask for a second tap instead.
+-->
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --text: #f8fafc; --muted: #94a3b8;
+    --ok: #10b981; --warn: #f59e0b; --bad: #ef4444; --line: #334155; --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none; touch-action: pan-y; }
+  body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  header { display: flex; align-items: center; gap: 12px; }
+  header h1 { flex: 1; font-size: 28px; margin: 0; }
+  button { font: inherit; font-weight: 700; border: 0; border-radius: 14px; cursor: pointer;
+    color: #fff; background: var(--line); padding: 16px 20px; font-size: 20px; }
+  button:disabled { opacity: .45; }
+  #back { background: var(--blue); }
+  #summary { border-radius: 16px; padding: 22px; font-size: 26px; font-weight: 800; text-align: center; }
+  #summary.ok { background: #064e3b; border: 3px solid var(--ok); }
+  #summary.warn { background: #78350f; border: 3px solid var(--warn); }
+  #summary.fail { background: #7f1d1d; border: 3px solid var(--bad); }
+  #summary.wait { background: var(--panel); border: 3px solid var(--line); color: var(--muted); }
+  #summary small { display: block; font-size: 17px; font-weight: 500; margin-top: 6px; color: #e2e8f0; }
+  #repair-all { background: var(--ok); font-size: 26px; padding: 24px; }
+  #result { border-radius: 12px; padding: 16px; font-size: 19px; background: var(--panel); }
+  #result.ok { border-left: 8px solid var(--ok); }
+  #result.bad { border-left: 8px solid var(--bad); }
+  #result img { width: 100%; border-radius: 8px; margin-top: 10px; }
+  .check { background: var(--panel); border-radius: 14px; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .check .top { display: flex; align-items: center; gap: 12px; }
+  .dot { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; }
+  .ok .dot { background: var(--ok); } .warn .dot { background: var(--warn); }
+  .fail .dot { background: var(--bad); } .off .dot { background: var(--line); }
+  .check .label { font-size: 21px; font-weight: 700; flex: 1; }
+  .check .detail { font-size: 17px; color: var(--muted); }
+  .check .manual { font-size: 18px; color: #fde68a; }
+  .check.fail { border: 2px solid var(--bad); } .check.warn { border: 2px solid var(--warn); }
+  .check button { background: var(--blue); align-self: flex-start; }
+  .ok-list { display: flex; flex-wrap: wrap; gap: 8px; }
+  .ok-list span { background: var(--panel); border-radius: 999px; padding: 8px 14px; font-size: 16px; color: var(--muted); }
+  .ok-list span::before { content: "✓ "; color: var(--ok); font-weight: 800; }
+  h2 { font-size: 18px; color: var(--muted); margin: 10px 0 0; text-transform: uppercase; letter-spacing: .04em; }
+  #more { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #more button { font-size: 18px; padding: 18px 10px; }
+  button.confirm { background: var(--bad) !important; }
+  #busy { position: fixed; inset: 0; background: rgba(15,23,42,.88); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; font-size: 26px; font-weight: 700; z-index: 5; text-align: center; padding: 30px; }
+  #busy span { font-size: 18px; font-weight: 500; color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Diagnostic</h1>
+    <button id="back" onclick="goBack()">← Retour à l'écran</button>
+  </header>
+
+  <div id="summary" class="wait">Vérification en cours…</div>
+  <button id="repair-all" onclick="fix('repair_all', this)" hidden>Tout réparer</button>
+  <div id="result" hidden></div>
+
+  <div id="problems"></div>
+  <h2 id="ok-title" hidden>Fonctionne</h2>
+  <div class="ok-list" id="oks"></div>
+
+  <h2>Autres actions</h2>
+  <div id="more">
+    <button onclick="fix('test_flash', this)">Tester le flash</button>
+    <button onclick="fix('restart_loop', this)">Redémarrer les lectures</button>
+    <button onclick="fix('restart_kiosk', this)">Rouvrir le navigateur</button>
+    <button onclick="fix('update_code', this, true)">Remettre le logiciel à jour</button>
+    <button onclick="fix('reboot', this, true)">Redémarrer le Pi</button>
+    <button onclick="load()">Revérifier</button>
+  </div>
+
+  <div id="busy" hidden><div id="busy-title">Réparation en cours…</div><span>Ne pas éteindre le Pi.</span></div>
+
+<script>
+const SCREEN_URL = 'http://127.0.0.1:8090/';
+// Back to the destoner screen after this long untouched, if it answers.
+const IDLE_RETURN_MS = 5 * 60 * 1000;
+const fromScreen = new URLSearchParams(location.search).has('from');
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+let fixes = {};
+let lastTouch = Date.now();
+let busy = false;
+let armed = null;   // the risky button waiting for its second tap
+
+document.addEventListener('contextmenu', e => e.preventDefault());
+document.addEventListener('pointerdown', () => { lastTouch = Date.now(); });
+
+function goBack() { location.href = SCREEN_URL; }
+
+async function load() {
+  if (busy) return;
+  try {
+    const r = await fetch('/checks', { cache: 'no-store' });
+    render(await r.json());
+  } catch (e) {
+    $('summary').className = 'wait';
+    $('summary').innerHTML = 'Le diagnostic redémarre…<small>Nouvel essai dans quelques secondes.</small>';
+  }
+}
+
+function render(rep) {
+  fixes = rep.fixes || {};
+  const checks = rep.checks || [];
+  const bad = checks.filter(c => c.status === 'fail' || c.status === 'warn');
+  const fails = checks.filter(c => c.status === 'fail');
+  const s = $('summary');
+  s.className = rep.overall;
+  s.innerHTML = rep.overall === 'ok' ? 'Tout fonctionne'
+    : `${fails.length ? fails.length + ' panne(s)' : ''}${fails.length && bad.length > fails.length ? ', ' : ''}${bad.length > fails.length ? (bad.length - fails.length) + ' avertissement(s)' : ''}`
+      + '<small>Commencer par « Tout réparer ». Si ça ne suffit pas, suivre les consignes en jaune.</small>';
+  $('repair-all').hidden = !bad.some(c => c.fix && !['reboot', 'test_flash', 'update_code'].includes(c.fix));
+
+  $('problems').innerHTML = bad.map(c => `
+    <div class="check ${c.status}">
+      <div class="top"><span class="dot"></span><span class="label">${esc(c.label)}</span></div>
+      <div class="detail">${esc(c.detail)}</div>
+      ${c.manual ? `<div class="manual">➜ ${esc(c.manual)}</div>` : ''}
+      ${c.fix ? `<button onclick="fix('${c.fix}', this, ${c.fix === 'reboot' || c.fix === 'update_code'})">${esc(fixes[c.fix] || c.fix)}</button>` : ''}
+    </div>`).join('');
+  const oks = checks.filter(c => c.status === 'ok');
+  $('ok-title').hidden = !oks.length;
+  $('oks').innerHTML = oks.map(c => `<span>${esc(c.label)}</span>`).join('');
+
+  // Came here because the destoner screen stopped answering: go back as soon
+  // as it answers again, nobody needs to tap anything.
+  const screenOk = (checks.find(c => c.id === 'screen') || {}).status === 'ok';
+  if (screenOk && !busy && (fromScreen ? Date.now() - lastTouch > 15000 : Date.now() - lastTouch > IDLE_RETURN_MS)) goBack();
+}
+
+async function fix(action, btn, risky) {
+  if (busy) return;
+  if (risky && armed !== btn) {
+    if (armed) disarm();
+    armed = btn;
+    btn.dataset.label = btn.textContent;
+    btn.textContent = 'Appuyer encore pour confirmer';
+    btn.classList.add('confirm');
+    setTimeout(() => { if (armed === btn) disarm(); }, 5000);
+    return;
+  }
+  disarm();
+  busy = true;
+  $('busy-title').textContent = (fixes[action] || (action === 'repair_all' ? 'Réparation' : action)) + ' en cours…';
+  $('busy').hidden = false;
+  let res;
+  try {
+    const r = await fetch('/fix', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ action }) });
+    res = await r.json();
+  } catch (e) {
+    // A reboot or a code update restarts the service under us -- expected.
+    res = { ok: action === 'reboot' || action === 'update_code',
+            message: action === 'reboot' ? 'Redémarrage du Pi…' : 'Le diagnostic redémarre…' };
+  }
+  busy = false;
+  $('busy').hidden = true;
+  const out = $('result');
+  out.hidden = false;
+  out.className = res.ok ? 'ok' : 'bad';
+  out.innerHTML = esc(res.message) + (action === 'test_flash' ? `<img src="/test-photo?t=${Date.now()}" alt="">` : '');
+  load();
+}
+
+function disarm() {
+  if (!armed) return;
+  armed.textContent = armed.dataset.label;
+  armed.classList.remove('confirm');
+  armed = null;
+}
+
+load();
+setInterval(load, fromScreen ? 10000 : 30000);
+</script>
+</body>
+</html>

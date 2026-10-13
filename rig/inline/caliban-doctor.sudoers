@@ -1,0 +1,14 @@
+# What the diagnostic (doctor.py) may do as root, without a password.
+#
+# Install with:
+#     sudo install -m 440 -o root -g root \
+#         ~/caliban/rig/inline/caliban-doctor.sudoers /etc/sudoers.d/caliban-doctor
+#
+# doctor.py runs as ttownshend and takes repair requests from the touchscreen
+# and, through Caliban, from SGSC's diagnostic page. It gets exactly the fixes
+# it offers -- start/stop/restart of the two inline services (already in
+# caliban-inline.sudoers, which this assumes), the Wi-Fi radio, and a reboot
+# -- and nothing that could change a setting, a key or a file outside ~.
+# Installed as a root-owned copy, not read from the checkout, so a push to the
+# repo cannot widen it.
+ttownshend ALL=(root) NOPASSWD: /usr/bin/systemctl reboot, /usr/bin/nmcli radio wifi off, /usr/bin/nmcli radio wifi on, /usr/bin/systemctl try-restart caliban-doctor
