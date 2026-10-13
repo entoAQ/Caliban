@@ -120,6 +120,13 @@ DEFAULTS = {
     # During a stop, fire the flash this often anyway: the TT520III falls
     # into a sleep only its button wakes after ~10 min without a trigger.
     "keepalive_s": 480,
+    # Flash strength against the reference photo, measured on the tiles that
+    # still look like bare chute. Bare chute is picked by colour -- each
+    # tile's r:g:b proportions within this distance of the reference's --
+    # because brightness is exactly what a tiring flash changes. Needs at
+    # least flash_min_tiles of the view to be bare to say anything.
+    "flash_chroma_tol": 0.03,
+    "flash_min_tiles": 0.15,
 }
 
 REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
@@ -211,8 +218,38 @@ def coverage(array, settings):
     tiles = _tiles(array, settings["coverage_grid"])
     if tiles.shape != ref.shape:
         return None
+    # Corrected for the flash's strength first: as the batteries tire, bare
+    # chute darkens away from the reference and would otherwise count as
+    # product -- an empty chute read 100 % covered at 70 % flash in testing.
+    level = flash_level(array, settings)
+    if level:
+        tiles = tiles / level
     diff = np.abs(tiles - ref).mean(axis=2)
     return round(float((diff > settings["coverage_diff"]).mean()), 3)
+
+
+def flash_level(array, settings):
+    """Flash strength relative to the empty-chute reference: ~1.0 when as
+    bright as then, lower as the batteries tire. None without a reference or
+    without enough bare chute in view to judge by."""
+    import numpy as np
+    try:
+        mtime = os.path.getmtime(REFERENCE_FILE)
+    except OSError:
+        return None
+    if _reference.get("mtime") != mtime:
+        _reference.update(mtime=mtime, tiles=np.load(REFERENCE_FILE))
+    ref = _reference["tiles"]
+    tiles = _tiles(array, settings["coverage_grid"])
+    if tiles.shape != ref.shape:
+        return None
+    lum, ref_lum = tiles.mean(axis=2), ref.mean(axis=2)
+    chroma = tiles / np.maximum(tiles.sum(axis=2, keepdims=True), 1)
+    ref_chroma = ref / np.maximum(ref.sum(axis=2, keepdims=True), 1)
+    bare = (np.abs(chroma - ref_chroma).max(axis=2) < settings["flash_chroma_tol"]) & (ref_lum > 10)
+    if bare.mean() < settings["flash_min_tiles"]:
+        return None
+    return round(float(np.median(lum[bare] / ref_lum[bare])), 3)
 
 
 def save_reference():
@@ -396,6 +433,9 @@ def capture(path, settings=None, log=print, keep=None):
                         # reference exists; the loop skips sending below
                         # min_coverage.
                         "coverage": coverage(array, s),
+                        # Flash strength against the reference: ~1.0 healthy,
+                        # falling as the batteries tire.
+                        "flash_level": flash_level(array, s),
                         # The share of the photo that is room light, i.e. smear.
                         "ambient_share": round(ambient / mean, 2) if mean else None}
             # How late the trigger went out, against a margin of ~3.5 ms: a

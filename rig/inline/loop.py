@@ -17,7 +17,6 @@ Setup (see README.md):
         INLINE_API_KEY=...                 # must match Caliban's INLINE_API_KEY
         INLINE_FAKE_PHOTO=/path/to.jpg     # optional: send this file instead of
                                            # using the camera, to test the chain
-        INLINE_REF_REGION=0.02,0.02,0.10,0.10   # optional, see flash_level()
 
 The photo itself is flashcam.py: a long exposure with the flash fired while
 every row of the rolling shutter is exposing, checked for "lit" and "lit
@@ -27,7 +26,6 @@ evenly" before it is sent anywhere.
 import json
 import os
 import shutil
-import statistics
 import sys
 import threading
 import time
@@ -41,7 +39,6 @@ import flashcam
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
 FAKE_PHOTO = os.environ.get("INLINE_FAKE_PHOTO", "")
-REF_REGION = os.environ.get("INLINE_REF_REGION", "")
 
 HOME = os.path.expanduser("~")
 STATE_FILE = os.path.join(HOME, "inline_state.json")
@@ -152,33 +149,10 @@ def take_photo(reading_id):
     return path, measured
 
 
-def flash_level(path):
-    """Mean brightness of a fixed reference patch in the frame, or None.
-
-    Weakening batteries dim the flash before it stops firing, but the whole
-    frame's brightness also moves with the product -- frass is darker than
-    larvae, so a dirty stretch would read as a tired flash. A patch that never
-    changes (a strip of the tote wall or a white card, chosen once the rig is
-    mounted) measures the flash alone. INLINE_REF_REGION is x0,y0,x1,y1 as
-    fractions of the frame; unset, there is no early warning, only the
-    black-frame refusal when the flash has stopped altogether.
-    """
-    if not REF_REGION:
-        return None
-    try:
-        from PIL import Image, ImageStat
-        x0, y0, x1, y1 = (float(v) for v in REF_REGION.split(","))
-        img = Image.open(path).convert("L")
-        w, h = img.size
-        box = img.crop((int(x0 * w), int(y0 * h), int(x1 * w), int(y1 * h))).resize((32, 32))
-        return round(ImageStat.Stat(box).mean[0], 1)
-    except Exception as e:
-        log(f"flash level unreadable: {e}")
-        return None
-
-
-# Below this fraction of the recent normal level, the flash is getting weak.
-FLASH_LOW_RATIO = 0.85
+# Flash strength (flashcam.flash_level: against the empty-chute reference,
+# ~1.0 healthy) below which the batteries are tiring. Two readings in a row,
+# so one odd frame does not send someone for batteries.
+FLASH_LOW_LEVEL = 0.85
 
 
 def judge_flash(state, level):
@@ -187,11 +161,7 @@ def judge_flash(state, level):
     levels = state.setdefault("flash_levels", [])
     levels.append(level)
     del levels[:-60]
-    if len(levels) < 6:
-        return
-    normal = statistics.median(levels[:-2] or levels)
-    # Two in a row, so one odd frame does not send someone for batteries.
-    if all(v < FLASH_LOW_RATIO * normal for v in levels[-2:]):
+    if len(levels) >= 2 and all(v < FLASH_LOW_LEVEL for v in levels[-2:]):
         set_health(state, flash="low", message="Flash plus faible que d'habitude — changer les piles du flash")
     elif state.get("health", {}).get("flash") == "low":
         set_health(state, flash="ok")
@@ -277,14 +247,26 @@ def line_running(state, cam_settings):
         line.update(running=False, motion=m["score"])
         # The TT520III falls into a sleep only its button wakes after ~10 min
         # with no trigger; a stop must not leave it there for the restart.
+        # A photo rather than a bare trigger: over the stopped (usually empty)
+        # chute it is the cleanest measure of the batteries, and it catches a
+        # flash that has gone to sleep anyway -- before the line restarts.
         last = state.get("last_flash_at")
         if not last or (now_utc() - datetime.fromisoformat(last)).total_seconds() >= cam_settings["keepalive_s"]:
             try:
-                flashcam.keepalive(cam_settings)
+                with watchdog():
+                    m = flashcam.capture(os.path.join(CAPTURE_DIR, "KEEPALIVE.jpg"),
+                                         dict(cam_settings, attempts=2), log=log)
                 state["last_flash_at"] = iso(now_utc())
-                log("keep-alive flash")
+                log(f"keep-alive flash (flash level {m.get('flash_level')})")
+                judge_flash(state, m.get("flash_level"))
+                if state.get("health", {}).get("flash") == "fail":
+                    set_health(state, flash="ok")
+            except flashcam.FlashNotFired:
+                log("keep-alive: the flash did not fire")
+                set_health(state, flash="fail",
+                           message="Le flash ne se déclenche pas — vérifier qu'il est allumé (appuyer sur un bouton) et ses piles")
             except Exception as e:
-                log(f"keep-alive flash failed: {type(e).__name__}: {e}")
+                log(f"keep-alive failed: {type(e).__name__}: {e}")
     else:
         if line.get("running") is False:
             log(f"line running again (motion {m['score']})")
@@ -339,7 +321,7 @@ def take_reading(state):
                    message=f"Trop de lumière sous la couverture ({share:.0%}) — vérifier qu'elle est bien en place")
     else:
         set_health(state, camera="ok")
-    level = flash_level(path)
+    level = measured.get("flash_level")
 
     try:
         reply, error = request_reading(reading_id, path)
@@ -384,7 +366,8 @@ def take_reading(state):
                     "instruction": reply.get("instruction")})
     del history[:-HISTORY_KEEP]
     state["interval_s"] = int(reply.get("next_in_s") or DEFAULT_INTERVAL_S)
-    log(f"{reading_id}: {reply.get('band')} -> {reply.get('instruction')} ({state['mode']})")
+    log(f"{reading_id}: {reply.get('band')} -> {reply.get('instruction')} ({state['mode']}) "
+        f"coverage {cov} flash {level}")
     return state["interval_s"]
 
 

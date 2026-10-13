@@ -121,11 +121,13 @@ capture -- a long exposure with the flash fired while every row is exposing --
 gets written on the bench. `INLINE_FAKE_PHOTO=/path/to.jpg` sends a fixed file
 instead of using the camera, to exercise the whole chain without one.
 
-`INLINE_REF_REGION=x0,y0,x1,y1` (fractions of the frame) names a patch that
-never changes -- tote wall, white card -- for the flash-battery warning: two
-readings in a row under 85 % of its usual brightness show "changer les piles du
-flash". Set it once the rig is mounted; until then only a black frame (flash
-not firing at all) is caught.
+**Flash batteries** are watched against the empty-chute reference
+(`flashcam.py reference`): every photo's bare-chute tiles, picked by colour,
+are compared with the same tiles then. ~1.0 is healthy; two readings in a row
+under 0.85 show "changer les piles du flash". During a stop the 8-minute
+keep-alive is a real flash photo, so a flash that has gone to sleep shows as a
+fault before the line restarts, not after. Coverage is corrected for the
+measured flash strength, so a tiring flash does not read as product.
 
 ## Calibration
 
