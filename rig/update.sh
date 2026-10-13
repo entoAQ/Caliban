@@ -30,6 +30,15 @@ cd "$(dirname "$0")"
 
 BUSY_FILE="${HOME}/.caliban-rig-busy"
 
+# Set by the inline rig's doctor when it rolls back to the last version that
+# ran clean (inline/doctor.py, rollback_code): pulling now would bring the bad
+# version straight back. Cleared by the doctor's update_code once the fix is
+# on GitHub.
+if [ -f "${HOME}/.caliban-update-paused" ]; then
+    echo "Updates paused after a rollback -- not pulling."
+    exit 0
+fi
+
 # A stale busy file, left by a poller that was killed mid-capture, must not
 # block updates forever. Captures take seconds; anything older than this is a
 # leftover rather than work in progress.

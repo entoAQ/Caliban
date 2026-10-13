@@ -1,0 +1,72 @@
+name: "Caliban — redémarrer"
+
+# A button: Actions -> this workflow -> Run workflow. Restarts the App Service
+# and waits until Caliban answers again with a fresh start time.
+#
+# For a Caliban that is up but wedged -- answering slowly, a background task
+# stuck -- where nothing was just deployed. If it broke right after a deploy,
+# "Caliban — revenir à la version précédente" is the button, not this one.
+#
+# Needs AZURE_CREDENTIALS: a service principal limited to the Caliban web app
+# (one-time setup, printed below when it is missing). The deploy secret is a
+# publish profile, which can push images but cannot restart anything.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: caliban-deploy
+  cancel-in-progress: false
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    env:
+      HEALTH: https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net/health
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+    steps:
+      - name: Check the Azure secret
+        run: |
+          if [ -z "$AZURE_CREDENTIALS" ]; then
+            {
+              echo "## ⚙️ Réglage à faire une fois"
+              echo
+              echo "Ce bouton a besoin du secret **AZURE_CREDENTIALS**. Dans Azure Cloud Shell :"
+              echo
+              echo '```'
+              echo 'az ad sp create-for-rbac --name caliban-github-actions --role "Website Contributor" --years 2 \'
+              echo '  --scopes $(az webapp show --name Caliban --resource-group Caliban_group --query id -o tsv) --json-auth'
+              echo '```'
+              echo
+              echo "Copier tout le JSON affiché dans GitHub → Settings → Secrets and variables → Actions →"
+              echo "New repository secret, nom **AZURE_CREDENTIALS**. Il expire dans 2 ans."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Restart and wait
+        run: |
+          before=$(curl -fsS --max-time 20 "$HEALTH" | jq -r '.started_at // empty') || before=""
+          az webapp restart --name Caliban --resource-group Caliban_group
+          for i in $(seq 1 60); do
+            now=$(curl -fsS --max-time 10 "$HEALTH" | jq -r '.started_at // empty') || now=""
+            if [ -n "$now" ] && [ "$now" != "$before" ]; then
+              echo "## ✅ Caliban redémarré — répond de nouveau après $((i * 10)) s" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "waiting $((i * 10))s"
+            sleep 10
+          done
+          {
+            echo "## ⚠️ Redémarrage demandé, mais Caliban ne répond pas après 10 minutes"
+            echo
+            echo "Lancer **Caliban — journaux** pour voir pourquoi il ne démarre pas, ou **Caliban — revenir à la version précédente**."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1

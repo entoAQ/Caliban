@@ -57,6 +57,15 @@ CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 TEST_PHOTO = os.path.join(CAPTURE_DIR, "TEST.jpg")
 AUTOSTART = os.path.join(HOME, ".config", "labwc", "autostart")
 DEMO_DROPIN = "/etc/systemd/system/caliban-inline-screen.service.d/demo.conf"
+# The last commit that ran clean for a while (see note_good_version), and the
+# flag that holds ../update.sh back after a rollback to it.
+GOOD_SHA_FILE = os.path.join(HOME, ".doctor-good-sha")
+UPDATE_PAUSE_FILE = os.path.join(HOME, ".caliban-update-paused")
+# Clean reports in a row (one a minute) before a version counts as good.
+GOOD_AFTER_REPORTS = 30
+LOG_UNITS = ["caliban-inline", "caliban-inline-screen", "caliban-doctor",
+             "caliban-rig-update", "caliban-rig-netwatch"]
+LOG_LINES = 300
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
@@ -188,6 +197,13 @@ def check_power(full):
                          manual="Dégager les aérations du boîtier.")
     except ValueError:
         pass
+    # The hardware watchdog (install-doctor.sh): without it a hard freeze
+    # needs someone on site to pull the plug.
+    wd = run(["systemctl", "show", "-p", "RuntimeWatchdogUSec", "--value"])[1].strip()
+    if wd in ("0", "infinity", ""):
+        return check("power", "Alimentation", "warn",
+                     f"Tension correcte, {t}, mais pas de redémarrage automatique si le Pi se fige.",
+                     manual="Prévenir l'AQ (install-doctor.sh).")
     return check("power", "Alimentation", "ok", f"Tension correcte, {t}.")
 
 
@@ -279,6 +295,11 @@ def check_update(full):
     rc, behind = run(["git", "rev-list", "--count", "HEAD..@{u}"], cwd=REPO)
     dirty = run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=REPO)[1]
     timer = run(["systemctl", "is-enabled", UPDATE_TIMER])[1]
+    if os.path.exists(UPDATE_PAUSE_FILE):
+        return check("update", "Logiciel", "warn",
+                     f"Version {head} : revenu en arrière, mises à jour automatiques en pause.",
+                     fix="update_code",
+                     manual="Une fois le problème corrigé sur GitHub, « Remettre le logiciel à jour » les relance.")
     if dirty:
         return check("update", "Logiciel", "warn",
                      f"Version {head}, modifiée à la main sur ce Pi : les mises à jour sont bloquées.",
@@ -470,6 +491,10 @@ def fix_update_code():
     rc, out = run(["git", "reset", "--hard", "@{u}"], cwd=REPO)
     if rc != 0:
         return False, f"Échec de la mise à jour : {out[:200]}"
+    try:
+        os.remove(UPDATE_PAUSE_FILE)
+    except OSError:
+        pass
     head = run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO)[1]
     sudo_systemctl("try-restart", LOOP)
     sudo_systemctl("try-restart", SCREEN)
@@ -541,11 +566,71 @@ def fix_test_flash():
     except (ValueError, IndexError):
         return False, f"Test impossible : {out[-200:]}"
     if res.get("ok"):
-        lvl = res.get("flash_level")
-        return True, "Le flash fonctionne." + (f" Force {lvl:.2f} (1,00 = normal)." if lvl else "")
+        return True, "Photo prise, le flash fonctionne.", {"attachment_file": TEST_PHOTO}
     if res.get("why") == "nofire":
         return False, "Le flash ne s'est pas déclenché : le réveiller (un bouton) ou changer les piles, puis réessayer."
     return False, f"La caméra n'a pas pris de photo : {res.get('error', '')[:150]}"
+
+
+def fix_send_logs():
+    """The rig's recent journals, for reading from a desk."""
+    cmd = ["journalctl", "--no-pager", "-o", "short-iso", "-n", str(LOG_LINES)]
+    for u in LOG_UNITS:
+        cmd += ["-u", u]
+    rc, out = run(cmd, timeout=30)
+    if rc != 0 or not out.strip():
+        return False, f"Journal illisible : {out[:200]}"
+    head = run(["git", "log", "--oneline", "-3"], cwd=REPO)[1]
+    state = load_state()
+    state.pop("history", None)
+    state.pop("flash_levels", None)
+    text = (f"== Version\n{head}\n\n== État de l'écran (inline_state.json)\n"
+            f"{json.dumps(state, ensure_ascii=False, indent=1)[:4000]}\n\n"
+            f"== Journal, {LOG_LINES} dernières lignes\n{out}")
+    return True, f"{len(out.splitlines())} lignes de journal envoyées.", {"output": text}
+
+
+def note_good_version(report):
+    """Called after every report. A version that has run with no failing
+    check for GOOD_AFTER_REPORTS reports in a row becomes the rollback point."""
+    clean = report.get("overall") != "fail"
+    note_good_version.streak = note_good_version.streak + 1 if clean else 0
+    if note_good_version.streak < GOOD_AFTER_REPORTS:
+        return
+    head = run(["git", "rev-parse", "HEAD"], cwd=REPO)[1].strip()
+    try:
+        with open(GOOD_SHA_FILE) as f:
+            if f.read().strip() == head:
+                return
+    except OSError:
+        pass
+    with open(GOOD_SHA_FILE, "w") as f:
+        f.write(head)
+    log(f"version {head[:7]} ran clean for {GOOD_AFTER_REPORTS} reports: rollback point")
+
+
+note_good_version.streak = 0
+
+
+def fix_rollback_code():
+    try:
+        with open(GOOD_SHA_FILE) as f:
+            good = f.read().strip()
+    except OSError:
+        return False, "Aucune version précédente connue (il faut 30 minutes sans panne pour en retenir une)."
+    head = run(["git", "rev-parse", "HEAD"], cwd=REPO)[1].strip()
+    if good == head:
+        return False, f"La version en place ({head[:7]}) est déjà la dernière qui a bien marché."
+    # Before the reset: update.sh must not pull the bad version straight back.
+    open(UPDATE_PAUSE_FILE, "w").close()
+    rc, out = run(["git", "reset", "--hard", good], cwd=REPO)
+    if rc != 0:
+        return False, f"Échec du retour en arrière : {out[:200]}"
+    sudo_systemctl("try-restart", LOOP)
+    sudo_systemctl("try-restart", SCREEN)
+    threading.Timer(5, lambda: os._exit(0)).start()
+    return True, (f"Revenu à la version {good[:7]} (au lieu de {head[:7]}). Mises à jour automatiques "
+                  "en pause jusqu'à « Remettre le logiciel à jour ».")
 
 
 def fix_reboot():
@@ -565,13 +650,19 @@ FIXES = {
     "restart_kiosk":  ("Rouvrir le navigateur", fix_restart_kiosk),
     "restart_loop":   ("Redémarrer les lectures", fix_restart_loop),
     "test_flash":     ("Tester le flash", fix_test_flash),
+    "test_photo":     ("Photo de contrôle", fix_test_flash),
+    "send_logs":      ("Envoyer le journal", fix_send_logs),
+    "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
     "reboot":         ("Redémarrer le Pi", fix_reboot),
 }
 
 # Never applied by "Tout réparer": the reboot is its own decision, the flash
 # test only means something after someone has woken the flash by hand, and
 # the code update restarts this process from under the rest of the run.
-NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code"}
+NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code",
+                     "test_photo", "send_logs", "rollback_code"}
+# These end this process: say "started" to Caliban before running them.
+ENDS_PROCESS = {"reboot", "update_code", "rollback_code"}
 
 
 def repair_all():
@@ -580,7 +671,7 @@ def repair_all():
     done = []
     for name, (label, fn) in FIXES.items():
         if name in wanted and name not in NOT_IN_REPAIR_ALL:
-            ok, msg = fn()
+            ok, msg = fn()[:2]
             done.append(f"{'✓' if ok else '✗'} {msg}")
     after = run_checks(full=True)
     still = [c["label"] for c in after["checks"] if c["status"] == "fail"]
@@ -602,17 +693,18 @@ def apply_fix(name):
     elif name in FIXES:
         fn = FIXES[name][1]
     else:
-        return False, f"Réparation inconnue : {name}"
+        return False, f"Réparation inconnue : {name}", {}
     if not fix_lock.acquire(timeout=1):
-        return False, "Une autre réparation est déjà en cours : patientez."
+        return False, "Une autre réparation est déjà en cours : patientez.", {}
     try:
         log(f"fix {name}")
-        ok, msg = fn()
+        out = fn()
+        ok, msg, extra = out[0], out[1], (out[2] if len(out) > 2 else {})
         log(f"fix {name}: {'ok' if ok else 'FAILED'} -- {msg}")
-        return ok, msg
+        return ok, msg, extra
     except Exception as e:
         traceback.print_exc()
-        return False, f"Erreur pendant la réparation : {type(e).__name__}: {e}"
+        return False, f"Erreur pendant la réparation : {type(e).__name__}: {e}", {}
     finally:
         fix_lock.release()
 
@@ -623,8 +715,26 @@ pending_results = []
 results_lock = threading.Lock()
 
 
+def upload_attachment(cid, path):
+    """Send a repair's photo to Caliban, which files it against the request."""
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError as e:
+        return f"photo introuvable : {e}"
+    req = urllib.request.Request(f"{CALIBAN_URL}/inline/doctor/attachment?command_id={int(cid)}",
+                                 data=data, method="POST",
+                                 headers={"Content-Type": "image/jpeg", "X-API-Key": INLINE_API_KEY})
+    try:
+        urllib.request.urlopen(req, timeout=60).read()
+        return None
+    except (urllib.error.URLError, OSError) as e:
+        return f"photo non envoyée : {e}"
+
+
 def report_once():
     report = run_checks(full=False)
+    note_good_version(report)
     with results_lock:
         results, pending_results[:] = list(pending_results), []
     status, body = http_post_json(f"{CALIBAN_URL}/inline/doctor/report",
@@ -646,14 +756,20 @@ def reporter():
             for cmd in report_once():
                 action, cid = cmd.get("action"), cmd.get("id")
                 log(f"remote request #{cid}: {action}")
-                if action in ("reboot", "update_code"):
-                    # These end this process; say "started" before they do.
+                if action in ENDS_PROCESS:
                     with results_lock:
                         pending_results.append({"id": cid, "ok": True, "detail": "Lancé."})
                     report_once()
-                ok, msg = apply_fix(action)
+                ok, msg, extra = apply_fix(action)
+                if extra.get("attachment_file"):
+                    problem = upload_attachment(cid, extra["attachment_file"])
+                    if problem:
+                        msg += f" ({problem})"
+                result = {"id": cid, "ok": ok, "detail": msg}
+                if extra.get("output"):
+                    result["output"] = extra["output"][-60000:]
                 with results_lock:
-                    pending_results.append({"id": cid, "ok": ok, "detail": msg})
+                    pending_results.append(result)
                 report_once()
         except Exception as e:
             log(f"report failed: {type(e).__name__}: {e}")
@@ -702,7 +818,7 @@ class Handler(server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 1000)) or b"{}")
         except ValueError:
             return self._json(400, {"ok": False, "message": "Requête invalide."})
-        ok, msg = apply_fix(str(body.get("action")))
+        ok, msg, _ = apply_fix(str(body.get("action")))
         self._json(200, {"ok": ok, "message": msg})
 
     def log_message(self, *args):
@@ -732,8 +848,10 @@ def main():
                 print(f"{'':28} -> {c['manual']}")
         return
     if args[:1] == ["fix"] and len(args) == 2:
-        ok, msg = apply_fix(args[1])
+        ok, msg, extra = apply_fix(args[1])
         print(msg)
+        if extra.get("output"):
+            print(extra["output"])
         sys.exit(0 if ok else 1)
     if args:
         sys.exit(__doc__)

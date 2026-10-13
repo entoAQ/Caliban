@@ -251,8 +251,11 @@ reasoning.
 Fixes it can run, from either side, and nothing else: restart the loop, the
 screen or the browser, restore the kiosk autostart, test the flash (stops the
 loop for the shot, restarts it only if it was running), free disk (oldest
-captures older than 3 days), reset the checkout to GitHub, reboot. Plus, on
-the touchscreen only, cycle the Wi-Fi. None changes a setting or a key.
+captures older than 3 days), reset the checkout to GitHub, roll back to the
+last version that ran 30 minutes clean (pausing updates), send the journal,
+take a control photo, reboot. Plus, on the touchscreen only, cycle the Wi-Fi.
+None changes a setting or a key. `../REMOTE-REPAIR.md` sorts every known
+failure of Caliban and both rigs into fixes-itself / button / desk / site.
 
 **When the network drops.** Both ends notice. On Ariel, the tray rig's
 watchdog (`../netwatch.sh`, installed by `install-doctor.sh`) cycles the

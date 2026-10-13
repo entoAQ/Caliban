@@ -1,0 +1,88 @@
+name: "Caliban — journaux"
+
+# A button: Actions -> this workflow -> Run workflow. Downloads Caliban's
+# container logs and shows the end of them, and every error line, on the
+# run's Summary -- what the Azure Portal's Log Stream shows, without the
+# portal, its permissions, or knowing where to click. The full download is
+# attached to the run for a few days.
+#
+# Needs AZURE_CREDENTIALS, the same one-time secret as "Caliban — redémarrer".
+
+on:
+  workflow_dispatch:
+    inputs:
+      lines:
+        description: "Nombre de lignes à afficher"
+        required: false
+        default: "200"
+
+permissions:
+  contents: read
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    env:
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+      LINES: ${{ inputs.lines }}
+    steps:
+      - name: Check the Azure secret
+        run: |
+          if [ -z "$AZURE_CREDENTIALS" ]; then
+            echo "## ⚙️ Secret AZURE_CREDENTIALS absent — voir le résumé de « Caliban — redémarrer » pour le créer." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Download the logs
+        run: |
+          # Container output only lands in the downloadable logs when this is
+          # on. Idempotent; it keeps 3 days, capped at 35 MB.
+          az webapp log config --name Caliban --resource-group Caliban_group \
+            --docker-container-logging filesystem --output none
+          az webapp log download --name Caliban --resource-group Caliban_group --log-file logs.zip
+          mkdir logs && unzip -q logs.zip -d logs
+
+      - name: Summarise
+        run: |
+          n="${LINES:-200}"
+          case "$n" in ''|*[!0-9]*) n=200 ;; esac
+          # The app's own output: the newest *_default_docker.log, not the
+          # platform's *_docker.log about pulling and starting the container.
+          app=$(find logs -name '*_default_docker.log' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          platform=$(find logs -name '*_docker.log' ! -name '*_default_docker.log' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          {
+            echo "## Journaux de Caliban"
+            if [ -z "$app" ]; then
+              echo
+              echo "Aucun journal d'application trouvé. La journalisation vient d'être activée : relancer dans quelques minutes."
+            else
+              errors=$(grep -n -i -E 'error|failed|traceback|exception' "$app" | tail -40)
+              echo
+              echo "### Erreurs récentes ($(echo "$errors" | grep -c . ) dernières lignes trouvées)"
+              echo '```'
+              echo "${errors:-aucune}"
+              echo '```'
+              echo
+              echo "### Les $n dernières lignes — $(basename "$app")"
+              echo '```'
+              tail -n "$n" "$app"
+              echo '```'
+            fi
+            if [ -n "$platform" ]; then
+              echo
+              echo "### Démarrage du conteneur (plateforme) — 30 dernières lignes"
+              echo '```'
+              tail -n 30 "$platform"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caliban-logs
+          path: logs.zip
+          retention-days: 5

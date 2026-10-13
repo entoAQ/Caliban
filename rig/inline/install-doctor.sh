@@ -31,6 +31,15 @@ sudo install -m 440 -o root -g root caliban-inline.sudoers /etc/sudoers.d/caliba
 sudo install -m 440 -o root -g root caliban-doctor.sudoers /etc/sudoers.d/caliban-doctor
 sudo visudo -c >/dev/null
 
+# Hardware watchdog: systemd pets the Pi's watchdog chip, so a Pi frozen hard
+# -- kernel hung, nothing left to run a repair -- reboots itself within 15 s
+# instead of waiting for someone to pull the plug. The one failure no button
+# could reach.
+sudo mkdir -p /etc/systemd/system.conf.d
+printf '[Manager]\nRuntimeWatchdogSec=15\nRebootWatchdogSec=2min\n' | \
+    sudo tee /etc/systemd/system.conf.d/caliban-watchdog.conf >/dev/null
+sudo systemctl daemon-reexec
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now caliban-doctor caliban-inline-screen caliban-rig-update.timer caliban-rig-netwatch.timer
 sudo systemctl enable caliban-inline

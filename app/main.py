@@ -3739,6 +3739,9 @@ DOCTOR_ACTIONS = {
     "test_flash": "Tester le flash",
     "free_disk": "Libérer de l'espace",
     "update_code": "Remettre le logiciel à jour",
+    "rollback_code": "Revenir à la version précédente",
+    "test_photo": "Photo de contrôle",
+    "send_logs": "Envoyer le journal",
     "reboot": "Redémarrer le Pi",
 }
 # A repair not picked up within this long is dropped, not delivered late --
@@ -3877,10 +3880,12 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
 
     for r in body.get("results") or []:
         if isinstance(r, dict) and isinstance(r.get("id"), int):
-            supabase.table("device_commands").update({
-                "done_at": now.isoformat(), "ok": bool(r.get("ok")),
-                "detail": str(r.get("detail") or "")[:500],
-            }).eq("id", r["id"]).eq("device", DOCTOR_DEVICE).execute()
+            done = {"done_at": now.isoformat(), "ok": bool(r.get("ok")),
+                    "detail": str(r.get("detail") or "")[:500]}
+            if r.get("output"):
+                done["output"] = str(r["output"])[-60000:]
+            supabase.table("device_commands").update(done) \
+                .eq("id", r["id"]).eq("device", DOCTOR_DEVICE).execute()
 
     cutoff = (now - datetime.timedelta(seconds=DOCTOR_COMMAND_TTL_S)).isoformat()
     pending = (
@@ -3894,16 +3899,43 @@ async def inline_doctor_report(request: Request, _: bool = Depends(verify_inline
     return {"commands": pending}
 
 
+DOCTOR_ATTACHMENT_MAX_BYTES = 8_000_000
+
+
+@app.post("/inline/doctor/attachment")
+async def inline_doctor_attachment(command_id: int, request: Request,
+                                   _: bool = Depends(verify_inline_key)):
+    """A repair's photo (test_photo / test_flash), filed against its request
+    so SGSC can show it. Same bucket as the readings' review copies, which
+    any signed-in user can already read."""
+    body = await request.body()
+    if not body or len(body) > DOCTOR_ATTACHMENT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="Photo vide ou trop grande.")
+    path = f"inline/doctor/{command_id}.jpg"
+    supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+        path, review_copy(body), file_options={"content-type": "image/jpeg", "upsert": "true"})
+    supabase.table("device_commands").update({"attachment": path}) \
+        .eq("id", command_id).eq("device", DOCTOR_DEVICE).execute()
+    return {"ok": True, "path": path}
+
+
 @app.get("/admin/devices/{device}")
 def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
     """SGSC's diagnostic page: the device's latest checks and recent repairs."""
     if device != DOCTOR_DEVICE:
         raise HTTPException(status_code=404, detail="Appareil inconnu.")
     status = (supabase.table("device_status").select("*").eq("device", device).limit(1).execute()).data
-    commands = (
-        supabase.table("device_commands").select("*").eq("device", device)
-        .order("requested_at", desc=True).limit(15).execute()
-    ).data or []
+    # Not the output itself: up to 60 kB of journal per row, every 10 s.
+    # Fetched on demand from /admin/devices/{device}/commands/{id}.
+    def recent(columns):
+        return (supabase.table("device_commands").select(columns).eq("device", device)
+                .order("requested_at", desc=True).limit(15).execute()).data or []
+    base = "id, action, requested_by, requested_at, sent_at, done_at, ok, detail"
+    try:
+        commands = recent(base + ", attachment")
+    except Exception:
+        # Before device_commands_v2.sql: the history still shows, without photos.
+        commands = recent(base)
     return {
         "status": status[0] if status else None,
         "commands": commands,
@@ -3911,6 +3943,17 @@ def admin_device(device: str, operator: dict = Depends(require_role("qc"))):
         "command_ttl_s": DOCTOR_COMMAND_TTL_S,
         "actions": DOCTOR_ACTIONS,
     }
+
+
+@app.get("/admin/devices/{device}/commands/{command_id}")
+def admin_device_command_output(device: str, command_id: int,
+                                operator: dict = Depends(require_role("qc"))):
+    """One request's full output -- the journal a send_logs brought back."""
+    rows = (supabase.table("device_commands").select("id, action, output")
+            .eq("device", device).eq("id", command_id).limit(1).execute()).data
+    if not rows:
+        raise HTTPException(status_code=404, detail="Demande introuvable.")
+    return rows[0]
 
 
 @app.post("/admin/devices/{device}/commands")
