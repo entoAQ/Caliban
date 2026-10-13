@@ -413,21 +413,28 @@ def sweep():
     print(f"whole from {best[0]} to {best[-1]} ms before -> saved fire_before_ms {middle} to {SETTINGS_FILE}")
 
 
-def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
+def white_balance(region=(0.3, 0.3, 0.7, 0.7), passes=8):
     """Set colour_gains so a white or grey card under the flash comes out
     neutral, and save them to SETTINGS_FILE.
 
+    Iterates from the camera's usual gains in damped steps rather than
+    measuring once at flat gains (1, 1): through the ISP's colour matrix,
+    flat gains on the HQ camera pushed red below zero, it clipped to 0, and
+    a one-shot ratio overshot to the 8.0 ceiling (2026-10-13). Small steps
+    from a sensible start keep every channel on scale, the same way the tray
+    rig's whitebalance converges.
+
     Measured under the flash because the flash is the light every reading is
-    taken in -- a white balance in room light would be for the wrong light.
-    On the NoIR camera (no infrared filter) it can only partly correct the
-    colour: the flash carries infrared, and how much each material reflects
-    differs, so no single pair of gains is right for all of them. Redo it
-    whenever the camera, the flash, its diffuser or the tote lining changes.
+    taken in. On a NoIR camera it can only partly correct the colour. Redo it
+    whenever the camera, the flash, its diffuser, the tote lining or the
+    flash's angle changes. A white card may need the aperture closed down so
+    it does not white out; the aperture changes how much light, not its
+    colour, so open it again afterwards.
     """
     s = load_settings()
     x0, y0, x1, y1 = region
-    gains = [1.0, 1.0]
-    for step in (1, 2):            # measure with flat gains, then confirm with the result
+    gains = list(CAMERA_DEFAULTS.get(s["camera"], {}).get("colour_gains", [1.8, 1.6]))
+    for step in range(1, passes + 1):
         keep = {}
         capture(os.path.join(HOME, "captures", "inline", "WB.jpg"),
                 dict(s, colour_gains=gains), keep=keep)
@@ -435,12 +442,21 @@ def white_balance(region=(0.3, 0.3, 0.7, 0.7)):
         h, w = a.shape[:2]
         patch = a[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].reshape(-1, 3).mean(axis=0)
         b, g, r = (float(v) for v in patch)
-        print(f"pass {step}: card R {r:.0f}  G {g:.0f}  B {b:.0f}  (gains {gains[0]:.2f}, {gains[1]:.2f})")
+        print(f"pass {step}: card R {r:.0f}  G {g:.0f}  B {b:.0f}  (gains {gains[0]:.2f}, {gains[1]:.2f})", flush=True)
         if max(r, g, b) > 235:
-            print("  the card is close to white-out: the ratio is unreliable. Use a grey card, "
-                  "or add diffusion over the flash, and run this again.")
-        if step == 1:
-            gains = [max(0.5, min(8.0, gains[0] * g / r)), max(0.5, min(8.0, gains[1] * g / b))]
+            print("  the card is whiting out -- close the aperture further and run this again. Nothing saved.")
+            return
+        if min(r, g, b) < 15:
+            print("  a channel is near zero -- the card is too dark or not in the centre of the view. Nothing saved.")
+            return
+        if abs(r - g) <= 0.03 * g and abs(b - g) <= 0.03 * g:
+            break
+        # Half a correction step each pass (square root of the ratio): the
+        # ISP's colour matrix couples the channels, so a full step overshoots.
+        gains = [max(0.5, min(8.0, gains[0] * (g / r) ** 0.5)),
+                 max(0.5, min(8.0, gains[1] * (g / b) ** 0.5))]
+    else:
+        print("  not fully neutral after every pass -- saving the closest; run again to refine.")
     _save_setting("colour_gains", [round(gains[0], 3), round(gains[1], 3)])
     print(f"saved colour_gains {[round(gains[0], 3), round(gains[1], 3)]} to {SETTINGS_FILE}")
 
