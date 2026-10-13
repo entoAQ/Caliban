@@ -711,7 +711,15 @@ class Server(ThreadingMixIn, server.HTTPServer):
 def main():
     args = sys.argv[1:]
     if args[:1] == ["check"]:
-        for c in run_checks(full=True)["checks"]:
+        # Ask the running service first: it has /etc/caliban-inline.env
+        # (root-only, loaded by systemd), and a shell typing this does not --
+        # checked directly, Caliban and the key would read as missing when
+        # they are not (2026-10-13, first install).
+        status, report = http_get(f"http://127.0.0.1:{PORT}/checks", timeout=90)
+        if status != 200 or not isinstance(report, dict):
+            print("(caliban-doctor ne répond pas : vérification directe, sans la clé)\n")
+            report = run_checks(full=True)
+        for c in report["checks"]:
             mark = {"ok": "OK  ", "warn": "!!  ", "fail": "XX  ", "off": "--  "}[c["status"]]
             print(f"{mark}{c['label']:<24} {c['detail']}" + (f"   [fix: {c['fix']}]" if c.get("fix") else ""))
             if c.get("manual") and c["status"] != "ok":
