@@ -622,7 +622,14 @@ def fix_restart_kiosk():
             break
     else:
         run(["kill", "-KILL", *old])
-    return True, "Navigateur fermé : il se rouvre tout seul dans quelques secondes."
+    # Report only once the new one is up: the report sent straight after this
+    # re-runs check_kiosk, which during lwrespawn's 1 s gap read "pas ouvert"
+    # and offered a reboot (2026-10-16).
+    for _ in range(20):
+        time.sleep(1)
+        if kiosk_running():
+            return True, "Navigateur rouvert."
+    return False, "Le navigateur ne s'est pas rouvert : « Redémarrer le Pi »."
 
 
 def fix_restore_kiosk():
