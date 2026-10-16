@@ -126,6 +126,18 @@ def run(cmd, timeout=20, cwd=None):
         return 124, f"{' '.join(cmd[:3])} : pas de réponse après {timeout} s"
 
 
+def last_json(out):
+    """The result line a test script printed. run() puts stderr after stdout,
+    and libcamera logs INFO lines there, so it is not the last line."""
+    for line in reversed(out.splitlines()):
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                pass
+    return None
+
+
 def sudo_systemctl(verb, unit):
     # Exactly the forms listed in the sudoers files; -n so a missing rule
     # fails at once instead of waiting for a password nobody will type.
@@ -683,9 +695,8 @@ def fix_test_flash():
     finally:
         if was_running:
             sudo_systemctl("start", LOOP)
-    try:
-        res = json.loads(out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
+    res = last_json(out)
+    if res is None:
         return False, f"Test impossible : {out[-200:]}"
     if res.get("ok"):
         return True, "Photo prise, le flash fonctionne.", {"attachment_file": TEST_PHOTO}
@@ -804,9 +815,8 @@ def fix_test_photo_tray():
     finally:
         if was_running:
             sudo_systemctl("start", POLLER)
-    try:
-        res = json.loads(out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
+    res = last_json(out)
+    if res is None:
         return False, f"Photo impossible : {out[-200:]}"
     if not res.get("ok"):
         return False, f"Photo impossible : {res.get('error', '')[:200]}"
