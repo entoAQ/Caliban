@@ -568,6 +568,26 @@ def _safe(fn, full):
         return check(name, name, "off", f"Vérification impossible : {type(e).__name__}: {e}")
 
 
+# A report right after a repair catches services still coming back (the
+# browser in lwrespawn's 1 s gap, 2026-10-16) and offered "Redémarrer le Pi"
+# for it. For SETTLE_S after a repair, a failing check waits for the next
+# report instead: shown as "en cours", with no button, not counted.
+SETTLE_S = 75
+last_fix_done = 0.0
+
+
+def settled(report):
+    since = time.monotonic() - last_fix_done
+    if since >= SETTLE_S:
+        return report
+    for c in report["checks"]:
+        if c["status"] in ("fail", "warn"):
+            c.update(status="off", fix=None, manual=None,
+                     detail="Vérification en cours après la réparation (prochain rapport).")
+    report["overall"] = "ok"     # nothing failing or warning is left
+    return report
+
+
 def run_checks(full=True):
     # In parallel: with the network down, the Wi-Fi, Caliban and key checks
     # each wait out their timeout, and one after the other that is most of a
@@ -953,6 +973,7 @@ def repair_all():
 
 
 def apply_fix(name):
+    global last_fix_done
     if name == "repair_all":
         fn = repair_all
     elif name in FIXES:
@@ -971,6 +992,7 @@ def apply_fix(name):
         traceback.print_exc()
         return False, f"Erreur pendant la réparation : {type(e).__name__}: {e}", {}
     finally:
+        last_fix_done = time.monotonic()
         fix_lock.release()
 
 
@@ -998,7 +1020,7 @@ def upload_attachment(cid, path):
 
 
 def report_once():
-    report = run_checks(full=False)
+    report = settled(run_checks(full=False))
     note_good_version(report)
     with results_lock:
         results, pending_results[:] = list(pending_results), []
@@ -1083,7 +1105,7 @@ class Handler(server.BaseHTTPRequestHandler):
         elif path == "/checks":
             global doctor_page_seen
             doctor_page_seen = time.monotonic()
-            report = run_checks(full=True)
+            report = settled(run_checks(full=True))
             report["fixes"] = {k: v[0] for k, v in FIXES.items()}
             report["device"] = DEVICE
             self._json(200, report)
