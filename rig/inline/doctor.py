@@ -88,6 +88,10 @@ ENV_FILE = "/etc/caliban-rig.env" if TRAY else "/etc/caliban-inline.env"
 POLLER = "caliban-rig"
 RIG_DIR = os.path.abspath(os.path.join(HERE, ".."))
 BUSY_FILE = os.path.join(HOME, ".caliban-rig-busy")
+# The remote repair being run right now. update.sh restarts this service every
+# time new code lands, and a repair cut off that way used to stay "en cours"
+# in SGSC for good; the next start reports it as interrupted instead.
+INFLIGHT_FILE = os.path.join(HOME, ".caliban-doctor-inflight")
 BUSY_STALE_S = 180
 RIG_SETTINGS = os.path.join(HOME, "rig_settings.json")
 TRAY_CAPTURES = os.path.join(HOME, "captures")
@@ -953,6 +957,16 @@ def reporter():
     if not CALIBAN_URL or not API_KEY:
         log("no CALIBAN_URL / API_KEY: not reporting to Caliban")
         return
+    try:
+        with open(INFLIGHT_FILE) as f:
+            cut = json.load(f)
+        os.remove(INFLIGHT_FILE)
+        log(f"remote request #{cut['id']} ({cut['action']}) was interrupted by a restart")
+        pending_results.append({"id": cut["id"], "ok": False, "detail":
+            "Interrompu : le diagnostic a redémarré pendant la réparation "
+            "(mise à jour automatique ?). Vérifier l'état ci-dessus, relancer si besoin."})
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
     while True:
         try:
             for cmd in report_once():
@@ -962,6 +976,9 @@ def reporter():
                     with results_lock:
                         pending_results.append({"id": cid, "ok": True, "detail": "Lancé."})
                     report_once()
+                else:
+                    with open(INFLIGHT_FILE, "w") as f:
+                        json.dump({"id": cid, "action": action}, f)
                 ok, msg, extra = apply_fix(action)
                 if extra.get("attachment_file"):
                     problem = upload_attachment(cid, extra["attachment_file"])
@@ -972,6 +989,10 @@ def reporter():
                     result["output"] = extra["output"][-60000:]
                 with results_lock:
                     pending_results.append(result)
+                try:
+                    os.remove(INFLIGHT_FILE)
+                except OSError:
+                    pass
                 report_once()
         except Exception as e:
             log(f"report failed: {type(e).__name__}: {e}")
