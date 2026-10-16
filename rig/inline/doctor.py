@@ -491,8 +491,9 @@ def check_tof(full):
     if rc == 127:
         return check("tof", "Capteur de hauteur", "off", "Vérification indisponible.")
     if TOF_I2C_ADDR[2:] not in out.split("\n", 1)[-1]:
-        return check("tof", "Capteur de hauteur", "warn", "Introuvable : la densité ne sera pas mesurée.",
-                     fix="reboot", manual="Si ça revient : vérifier le câble du capteur (Pi éteint).")
+        # poller.py stopped reading it on 2026-10-08 (1112c50): absent is
+        # unused, not broken. Back to "warn" when shoot() reads it again.
+        return check("tof", "Capteur de hauteur", "off", "Absent (non utilisé par les captures).")
     return check("tof", "Capteur de hauteur", "ok", "Répond.")
 
 
