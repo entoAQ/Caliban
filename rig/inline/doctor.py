@@ -366,6 +366,13 @@ def check_screen(full):
     return check("screen", "Écran destoner", "ok", "Répond.")
 
 
+# The touchscreen polls screen.py every 2 s, or this page every 10 s when it
+# fell back here; a minute of neither with Chromium running is a frozen screen
+# (2026-10-16: stuck on 13 h 16 after a screen restart, every check green).
+PAGE_FROZEN_S = 60
+doctor_page_seen = None
+
+
 def kiosk_running():
     return run(["pgrep", "-f", "--", "--kiosk"])[0] == 0
 
@@ -381,6 +388,13 @@ def check_kiosk(full):
                      "Le plein écran n'est plus lancé au démarrage.", fix="restore_kiosk")
     if not kiosk_running():
         return check("kiosk", "Navigateur plein écran", "fail", "Le navigateur n'est pas ouvert.", fix="reboot")
+    status, body = http_get("http://127.0.0.1:8090/state", timeout=5)
+    seen = (body.get("server") or {}).get("page_seen_s") if status == 200 and isinstance(body, dict) else None
+    here = doctor_page_seen is not None and time.monotonic() - doctor_page_seen < PAGE_FROZEN_S
+    if isinstance(seen, (int, float)) and seen > PAGE_FROZEN_S and not here:
+        return check("kiosk", "Navigateur plein écran", "fail",
+                     f"Ouvert, mais l'écran ne bouge plus depuis {round(seen / 60)} min (figé).",
+                     fix="restart_kiosk", manual="Si ça ne revient pas : « Redémarrer le Pi ».")
     return check("kiosk", "Navigateur plein écran", "ok", "Ouvert.")
 
 
@@ -1022,6 +1036,8 @@ class Handler(server.BaseHTTPRequestHandler):
             except OSError as e:
                 self._send(500, f"doctor.html unreadable: {e}".encode(), "text/plain")
         elif path == "/checks":
+            global doctor_page_seen
+            doctor_page_seen = time.monotonic()
             report = run_checks(full=True)
             report["fixes"] = {k: v[0] for k, v in FIXES.items()}
             report["device"] = DEVICE

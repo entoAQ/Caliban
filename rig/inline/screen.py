@@ -53,6 +53,11 @@ ACK_FILE = os.path.join(HOME, "inline_acks.jsonl")
 # and a state file is not something to trust with arbitrary filesystem reads.
 CAPTURE_DIR = os.path.realpath(os.path.join(HOME, "captures"))
 PAGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "screen.html")
+# When the touchscreen's page last asked for /state (it adds ?page=1; the
+# doctor's probe does not). A browser that is open but frozen stops asking,
+# and nothing else shows it: Chromium is still running. Starts as "now" so a
+# fresh restart is not taken for a frozen page before it has had a chance.
+page_seen = time.monotonic()
 
 # What an operator can answer. 'adjusted' and 'clean_rejects' are the two
 # outcomes the tray operator screen already offers after DIMINUER; 'adjusted'
@@ -190,12 +195,16 @@ class Handler(server.BaseHTTPRequestHandler):
             except OSError as e:
                 self._send(500, f"screen.html unreadable: {e}".encode(), "text/plain")
         elif path == "/state":
+            global page_seen
+            if "page=1" in self.path:
+                page_seen = time.monotonic()
             state = read_state()
             reading = state.get("reading") or {}
             by_reading, setting = summarise_acks(read_acks())
             state["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
             state["setting"] = setting
-            state["server"] = {"version": page_version(), "now": now_iso()}
+            state["server"] = {"version": page_version(), "now": now_iso(),
+                               "page_seen_s": round(time.monotonic() - page_seen)}
             state["connection"] = read_connection()
             self._json(200, state)
         elif path == "/photo":

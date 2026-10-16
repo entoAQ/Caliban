@@ -97,7 +97,7 @@ for (const id of ['chips', 'health-msg', 'overlay']) {
 
 rep('''async function poll() {
   try {
-    const r = await fetch('/state', { cache: 'no-store' });
+    const r = await fetch('/state?page=1', { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status);
     const s = await r.json();
     failures = 0;
