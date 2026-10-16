@@ -596,8 +596,19 @@ def fix_restart_loop():
 def fix_restart_kiosk():
     if not kiosk_running():
         return False, "Le navigateur n'est pas ouvert : redémarrer le Pi."
-    # lwrespawn (from the autostart line) reopens it at once.
+    # lwrespawn (from the autostart line) reopens it at once. A frozen browser
+    # may never act on a polite TERM -- a stopped one cannot -- so KILL what is
+    # still there after a few seconds. Only those PIDs: lwrespawn's new one
+    # may already be up.
+    old = run(["pgrep", "-f", "chromium"])[1].split()
     run(["pkill", "-f", "chromium"])
+    for _ in range(5):
+        time.sleep(1)
+        old = [p for p in old if os.path.exists(f"/proc/{p}")]
+        if not old:
+            break
+    else:
+        run(["kill", "-KILL", *old])
     return True, "Navigateur fermé : il se rouvre tout seul dans quelques secondes."
 
 
