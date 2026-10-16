@@ -73,6 +73,8 @@ GOOD_KEPT = 5
 UPDATE_PAUSE_FILE = os.path.join(HOME, ".caliban-update-paused")
 # Clean reports in a row (one a minute) before a version counts as good.
 GOOD_AFTER_REPORTS = 30
+# After a boot the clock is unsynced until NTP answers; not a fault before this.
+CLOCK_GRACE_S = 15 * 60
 LOG_UNITS = ["caliban-inline", "caliban-inline-screen", "caliban-doctor",
              "caliban-rig-update", "caliban-rig-netwatch"]
 LOG_UNITS_TRAY = ["caliban-rig", "caliban-doctor", "caliban-rig-update", "caliban-rig-netwatch"]
@@ -265,6 +267,17 @@ def check_clock(full):
     if rc != 0:
         return check("clock", "Horloge", "off", "État inconnu.")
     if out.strip() != "yes":
+        # The Pi has no clock battery: every boot starts unsynced until NTP
+        # answers. Offering "Redémarrer le Pi" then just started it over
+        # (2026-10-16, right after a reboot), so not before CLOCK_GRACE_S.
+        try:
+            with open("/proc/uptime") as f:
+                up = float(f.read().split()[0])
+        except (OSError, ValueError, IndexError):
+            up = None
+        if up is not None and up < CLOCK_GRACE_S:
+            return check("clock", "Horloge", "ok",
+                         f"Synchronisation en cours (Pi démarré il y a {max(1, round(up / 60))} min).")
         # A wrong clock breaks HTTPS to Caliban outright; it fixes itself once
         # the network is back, and a reboot forces it.
         return check("clock", "Horloge", "warn", "Heure non synchronisée avec Internet.", fix="reboot")
