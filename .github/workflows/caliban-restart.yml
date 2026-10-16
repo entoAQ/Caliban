@@ -53,11 +53,22 @@ jobs:
 
       - name: Restart and wait
         run: |
-          before=$(curl -fsS --max-time 20 "$HEALTH" | jq -r '.started_at // empty') || before=""
+          # Each gunicorn worker has its own started_at, a few ms apart, so
+          # "different from before" was met by reaching the other worker
+          # (2026-10-16: reported a restart that never happened). Only a start
+          # after the request counts. ISO-8601 UTC compares as text.
+          asked=$(date -u +%Y-%m-%dT%H:%M:%S)
           az webapp restart --name Caliban --resource-group Caliban_group
           for i in $(seq 1 60); do
+            if [ "$i" = 18 ]; then
+              # Three minutes and still the old process: the soft restart did
+              # not take. Stop/start always replaces the container.
+              echo "restart did not take; stop + start"
+              az webapp stop --name Caliban --resource-group Caliban_group
+              az webapp start --name Caliban --resource-group Caliban_group
+            fi
             now=$(curl -fsS --max-time 10 "$HEALTH" | jq -r '.started_at // empty') || now=""
-            if [ -n "$now" ] && [ "$now" != "$before" ]; then
+            if [ -n "$now" ] && [[ "$now" > "$asked" ]]; then
               echo "## ✅ Prospero redémarré — répond de nouveau après $((i * 10)) s" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
