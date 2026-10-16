@@ -65,9 +65,11 @@ AUTOSTART = os.path.join(HOME, ".config", "labwc", "autostart")
 # Demo mode is gone from screen.py; a drop-in left from it passes --demo, which
 # screen.py now refuses, so the screen crash-loops and a restart cannot help.
 DEMO_DROPIN = "/etc/systemd/system/caliban-inline-screen.service.d/demo.conf"
-# The last commit that ran clean for a while (see note_good_version), and the
-# flag that holds ../update.sh back after a rollback to it.
+# The last commits that ran clean for a while, oldest first, one per line (see
+# note_good_version), and the flag that holds ../update.sh back after a
+# rollback. A single line -- the older format -- reads as a list of one.
 GOOD_SHA_FILE = os.path.join(HOME, ".doctor-good-sha")
+GOOD_KEPT = 5
 UPDATE_PAUSE_FILE = os.path.join(HOME, ".caliban-update-paused")
 # Clean reports in a row (one a minute) before a version counts as good.
 GOOD_AFTER_REPORTS = 30
@@ -756,36 +758,48 @@ def note_good_version(report):
     if note_good_version.streak < GOOD_AFTER_REPORTS:
         return
     head = run(["git", "rev-parse", "HEAD"], cwd=REPO)[1].strip()
-    try:
-        with open(GOOD_SHA_FILE) as f:
-            if f.read().strip() == head:
-                return
-    except OSError:
-        pass
-    with open(GOOD_SHA_FILE, "w") as f:
-        f.write(head)
+    good = read_good_versions()
+    if good[-1:] == [head]:
+        return
+    write_good_versions([s for s in good if s != head] + [head])
     log(f"version {head[:7]} ran clean for {GOOD_AFTER_REPORTS} reports: rollback point")
 
 
 note_good_version.streak = 0
 
 
+def read_good_versions():
+    try:
+        with open(GOOD_SHA_FILE) as f:
+            return [line.strip() for line in f if line.strip()]
+    except OSError:
+        return []
+
+
+def write_good_versions(good):
+    with open(GOOD_SHA_FILE, "w") as f:
+        f.write("".join(sha + "\n" for sha in good[-GOOD_KEPT:]))
+
+
 def fix_rollback_code():
     if TRAY and tray_busy():
         return False, BUSY_MESSAGE
-    try:
-        with open(GOOD_SHA_FILE) as f:
-            good = f.read().strip()
-    except OSError:
-        return False, "Aucune version précédente connue (il faut 30 minutes sans panne pour en retenir une)."
+    # Back past the version in place even when it has itself run clean: a
+    # version can pass every check and still be wrong (2026-10-16: the only
+    # remembered version was the current one, so the button refused).
     head = run(["git", "rev-parse", "HEAD"], cwd=REPO)[1].strip()
-    if good == head:
-        return False, f"La version en place ({head[:7]}) est déjà la dernière qui a bien marché."
+    earlier = [s for s in read_good_versions() if s != head]
+    if not earlier:
+        return False, "Aucune version précédente connue (il faut 30 minutes sans panne pour en retenir une)."
+    good = earlier[-1]
     # Before the reset: update.sh must not pull the bad version straight back.
     open(UPDATE_PAUSE_FILE, "w").close()
     rc, out = run(["git", "reset", "--hard", good], cwd=REPO)
     if rc != 0:
         return False, f"Échec du retour en arrière : {out[:200]}"
+    # Left on purpose: never offered as a rollback point again. If it comes
+    # back through an update and runs clean, it is remembered afresh.
+    write_good_versions(earlier)
     restart_rig_services()
     threading.Timer(5, lambda: os._exit(0)).start()
     return True, (f"Revenu à la version {good[:7]} (au lieu de {head[:7]}). Mises à jour automatiques "
