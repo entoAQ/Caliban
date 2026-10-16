@@ -423,7 +423,6 @@ def main():
     log(f"inline loop -> {CALIBAN_URL}" + (f"  (fake photo {FAKE_PHOTO})" if FAKE_PHOTO else ""))
 
     state = load_state()
-    state.pop("demo", None)
     # A "low" left in the state file from before FLASH_LOW_WARN was turned off
     # would otherwise stay on the screen until a usable level came in.
     if not FLASH_LOW_WARN and state.get("health", {}).get("flash") == "low":

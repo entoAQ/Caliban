@@ -78,7 +78,7 @@ page needs Caliban up to reach Ariel.
 - Change `/etc/caliban-inline.env` (key rotation) — by design no button edits keys.
 - `bash ~/caliban/rig/inline/install-doctor.sh` — reinstalls every unit, rule and watchdog.
 - Calibrations needing no hands: `flashcam.py daylight`, `flashcam.py motion`, and `flashcam.py reference` if the chute is empty and the line stopped.
-- Demo mode on/off (`demo.conf`).
+- Remove a leftover `demo.conf` drop-in (demo mode no longer exists; the screen won't start with it).
 
 **Needs someone there**
 

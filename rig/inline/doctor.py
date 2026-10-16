@@ -62,6 +62,8 @@ STATE_FILE = os.path.join(HOME, "inline_state.json")
 CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 TEST_PHOTO = os.path.join(CAPTURE_DIR, "TEST.jpg")
 AUTOSTART = os.path.join(HOME, ".config", "labwc", "autostart")
+# Demo mode is gone from screen.py; a drop-in left from it passes --demo, which
+# screen.py now refuses, so the screen crash-loops and a restart cannot help.
 DEMO_DROPIN = "/etc/systemd/system/caliban-inline-screen.service.d/demo.conf"
 # The last commit that ran clean for a while (see note_good_version), and the
 # flag that holds ../update.sh back after a rollback to it.
@@ -337,14 +339,14 @@ def check_update(full):
 
 
 def check_screen(full):
+    if os.path.exists(DEMO_DROPIN):
+        return check("screen", "Écran destoner", "fail", "Ancien réglage DÉMO resté en place : l'écran ne peut pas démarrer.",
+                     manual="Prévenir l'AQ (retirer demo.conf).")
     if not is_active(SCREEN):
         return check("screen", "Écran destoner", "fail", "Le service de l'écran est arrêté.", fix="restart_screen")
     status, _ = http_get("http://127.0.0.1:8090/state", timeout=5)
     if status != 200:
         return check("screen", "Écran destoner", "fail", "Le service de l'écran ne répond pas.", fix="restart_screen")
-    if os.path.exists(DEMO_DROPIN):
-        return check("screen", "Écran destoner", "warn", "L'écran est en mode DÉMO : il n'affiche pas les vraies lectures.",
-                     manual="Prévenir l'AQ (retirer demo.conf).")
     return check("screen", "Écran destoner", "ok", "Répond.")
 
 

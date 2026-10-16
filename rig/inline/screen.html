@@ -81,7 +81,7 @@
     flex: 0 0 auto; display: flex; flex-direction: column; }
   #trend-box h2, #bottom h2 { font-size: 16px; margin: 0 0 6px; color: var(--muted); font-weight: 700;
     text-transform: uppercase; letter-spacing: .06em; }
-  #trend { width: 100%; height: 110px; display: block; }
+  #trend { width: 100%; height: 124px; display: block; }
 
   #bottom { display: flex; gap: 14px; align-items: stretch; }
   #photo-box { flex: 0 0 46%; background: var(--panel); border-radius: 14px; padding: 10px;
@@ -99,7 +99,6 @@
     padding: 40px; gap: 16px; z-index: 10; }
   #overlay b { font-size: 40px; }
   #overlay span { font-size: 22px; color: var(--muted); }
-  #demo-tag { position: fixed; right: 10px; bottom: 6px; font-size: 13px; color: var(--warn); }
   /* No connection: above everything, overlay included, so it shows during a
      stop as well. Only ever present while the network watchdog says offline. */
   #offline { position: fixed; top: 0; left: 0; right: 0; z-index: 11; background: #7f1d1d;
@@ -165,7 +164,6 @@
   <div id="offline" hidden><b id="offline-title"></b><span id="offline-what"></span>
     <span>Les lectures reprennent seules au retour du réseau. En attendant, l'instruction affichée peut être périmée.</span></div>
   <div id="overlay" hidden><b id="overlay-title"></b><span id="overlay-text"></span></div>
-  <div id="demo-tag" hidden>DÉMO</div>
 
 <script>
 // Same keys and colours as OP_INSTRUCTIONS in sgsc-app/operator-capture.js.
@@ -274,7 +272,6 @@ function chip(id, label, status) {
 
 function render() {
   const s = state || {};
-  $('demo-tag').hidden = !s.demo;
   const h = s.health || {};
   chip('chip-camera', 'Caméra', h.camera || 'ok');
   chip('chip-flash', 'Flash', h.flash || 'ok');
@@ -302,7 +299,8 @@ function render() {
   const card = $('card');
   card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
   $('title').textContent = ins.title;
-  // Caliban's labels carry their own % ("8-10%"); the demo's do not.
+  // Caliban's labels carry their own % ("8-10%"); strip it and add one, so
+  // a label without it still reads right.
   $('band').textContent = r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
 
@@ -420,29 +418,76 @@ async function sendAck(readingId, choice) {
 // Recent readings against the two lines the instruction is decided on:
 // below 3 % the destoner comes down, from 8 % it goes up. Values, not bands,
 // so a drift towards a line shows before it crosses it.
+//
+// On a clock, not one slot per reading: a stretch with no readings (line
+// stopped, empty chute, no network) shows as a shaded gap with the line broken
+// across it, instead of the readings either side being joined as if the
+// product had gone smoothly from one to the other.
+const TREND_SLOTS = 36;        // the window is this many reading intervals: 3 h at 5 min
+const GAP_INTERVALS = 2.5;     // a late reading or a network retry is not a gap
 function renderTrend(history) {
   const svg = $('trend');
   // Drawn in the box's own pixels, so the dots stay round however tall the
   // layout leaves it.
   const W = Math.round(svg.clientWidth) || 680, H = Math.round(svg.clientHeight) || 150, TOP = 16;
+  const AXIS = 16, X0 = 8, X1 = W - 50;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  const y = v => H - 6 - Math.min(v, TOP) / TOP * (H - 12);
+  const y = v => H - AXIS - 6 - Math.min(v, TOP) / TOP * (H - AXIS - 12);
+
+  const intervalMs = ((state && state.interval_s) || 300) * 1000;
+  const gapMs = Math.max(GAP_INTERVALS * intervalMs, 12 * 60000);
+  const now = Date.now(), from = now - TREND_SLOTS * intervalMs;
+  const x = t => X0 + (t - from) / (now - from) * (X1 - X0);
+
   let out = '';
+  // Gaps first, so the thresholds and readings draw over them.
+  const pts = history.filter(p => p.estimate_pct != null && p.at)
+    .map(p => ({ ...p, t: new Date(p.at).getTime() }))
+    .filter(p => p.t >= from).sort((a, b) => a.t - b.t);
+  const edges = pts.length ? [from, ...pts.map(p => p.t), now] : [];
+  for (let i = 1; i < edges.length; i++) {
+    // Before the first reading in the window, half an interval of grace: the
+    // window edge falls between readings, not on one.
+    const a = edges[i - 1], b = edges[i];
+    if (b - a < (i === 1 || i === edges.length - 1 ? gapMs - intervalMs / 2 : gapMs)) continue;
+    const xa = x(i === 1 ? a : a + intervalMs / 2), xb = x(i === edges.length - 1 ? b : b - intervalMs / 2);
+    out += `<rect x="${xa}" y="0" width="${Math.max(xb - xa, 2)}" height="${H - AXIS}" fill="#475569" opacity=".35"/>`;
+    if (xb - xa >= 76)
+      out += `<text x="${(xa + xb) / 2}" y="${(H - AXIS) / 2 + 5}" fill="#cbd5e1" font-size="14"
+        text-anchor="middle">sans lecture</text>`;
+  }
+
   for (const [v, label] of [[3, '3 %'], [8, '8 %']]) {
     out += `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#475569" stroke-dasharray="6 6"/>`;
     out += `<text x="${W - 4}" y="${y(v) - 5}" fill="#94a3b8" font-size="15" text-anchor="end">${label}</text>`;
   }
-  const pts = history.filter(p => p.estimate_pct != null).slice(-36);
+
+  // Hours along the bottom, now that the x axis is time.
+  const hour = new Date(from); hour.setMinutes(0, 0, 0);
+  for (let t = hour.getTime() + 3600000; t <= now; t += 3600000) {
+    out += `<line x1="${x(t)}" x2="${x(t)}" y1="${H - AXIS}" y2="${H - AXIS + 4}" stroke="#64748b"/>`;
+    out += `<text x="${x(t)}" y="${H - 2}" fill="#94a3b8" font-size="12" text-anchor="middle">${hhmm(new Date(t).toISOString())}</text>`;
+  }
+
   if (pts.length) {
-    const x = i => pts.length === 1 ? W / 2 : 12 + i * (W - 60) / (pts.length - 1);
-    out += `<polyline fill="none" stroke="#e2e8f0" stroke-width="3" points="${
-      pts.map((p, i) => `${x(i)},${y(p.estimate_pct)}`).join(' ')}"/>`;
+    // One polyline per run of readings with no gap between them.
+    let run = [];
+    const flush = () => {
+      if (run.length > 1) out += `<polyline fill="none" stroke="#e2e8f0" stroke-width="3" points="${
+        run.map(p => `${x(p.t)},${y(p.estimate_pct)}`).join(' ')}"/>`;
+      run = [];
+    };
     pts.forEach((p, i) => {
-      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
-      out += `<circle cx="${x(i)}" cy="${y(p.estimate_pct)}" r="6" fill="${c}"/>`;
+      if (i && p.t - pts[i - 1].t >= gapMs) flush();
+      run.push(p);
     });
+    flush();
+    for (const p of pts) {
+      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
+      out += `<circle cx="${x(p.t)}" cy="${y(p.estimate_pct)}" r="6" fill="${c}"/>`;
+    }
   } else {
-    out += `<text x="${W / 2}" y="${H / 2}" fill="#94a3b8" font-size="18" text-anchor="middle">Aucun historique</text>`;
+    out += `<text x="${(X0 + X1) / 2}" y="${(H - AXIS) / 2 + 6}" fill="#94a3b8" font-size="18" text-anchor="middle">Aucune lecture depuis ${Math.round(TREND_SLOTS * intervalMs / 3600000)} h</text>`;
   }
   svg.innerHTML = out;
 }

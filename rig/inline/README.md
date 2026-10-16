@@ -212,13 +212,6 @@ sudo systemctl enable --now caliban-inline-screen
 # Only once the camera is fitted (or INLINE_FAKE_PHOTO is set in the env file):
 sudo systemctl enable --now caliban-inline
 
-# Demo mode (no loop, cycles through sample states) is a drop-in override:
-#   /etc/systemd/system/caliban-inline-screen.service.d/demo.conf
-#   [Service]
-#   ExecStart=
-#   ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/screen.py --demo
-# Remove that file, then `sudo systemctl daemon-reload` and restart the
-# screen, when the loop takes over.
 
 chmod +x ~/caliban/rig/inline/kiosk.sh
 echo '/usr/bin/lwrespawn /home/ttownshend/caliban/rig/inline/kiosk.sh &' > ~/.config/labwc/autostart

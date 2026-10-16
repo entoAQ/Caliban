@@ -33,7 +33,6 @@ acknowledgement must come from someone standing at the destoner, not from
 anything else on the plant network.
 
     python3 screen.py            # serve ~/inline_state.json
-    python3 screen.py --demo     # cycle through sample states, no files touched
 """
 
 import argparse
@@ -42,7 +41,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http import server
 from socketserver import ThreadingMixIn
 
@@ -167,81 +166,9 @@ def append_ack(ack):
             f.write(json.dumps(ack, ensure_ascii=False) + "\n")
 
 
-# --- Demo -------------------------------------------------------------------
-#
-# Cycles through the states the screen has to handle, so the layout can be
-# judged on the real display before the camera exists. Acks are kept in memory
-# and forgotten on restart; nothing is written.
-
-DEMO_SECONDS = 15
-demo_acks = []
-
-
-def _ago(minutes):
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
-
-
-def _history(values):
-    out = []
-    for i, v in enumerate(values):
-        ins = "increase_minor" if v >= 8 else "decrease" if v < 3 else "hold"
-        out.append({"at": _ago(5 * (len(values) - i)), "estimate_pct": v, "instruction": ins})
-    return out
-
-
-def demo_state():
-    scenes = [
-        ("hold", dict(band="3-8", estimate_pct=4.6, instruction="hold")),
-        ("increase", dict(band="8-10", estimate_pct=8.9, instruction="increase_minor")),
-        ("increase_target", dict(band="10-13", estimate_pct=11.2, instruction="increase_medium",
-                                 target={"value": 4.2, "unit": "psi"})),
-        ("decrease", dict(band="<3", estimate_pct=1.8, instruction="decrease")),
-        ("decrease_target", dict(band="<3", estimate_pct=1.6, instruction="decrease",
-                                 target={"value": 3.6, "unit": "psi"})),
-        ("alert", dict(band=">13", estimate_pct=14.5, instruction="increase_major",
-                       alert=True, alert_reason="streak", alert_streak=2)),
-        ("stale", None),
-        ("flash_low", dict(band="3-8", estimate_pct=5.1, instruction="hold")),
-        ("trial", dict(band="8-10", estimate_pct=8.7, instruction="increase_minor")),
-        ("stopped", dict(band="3-8", estimate_pct=4.4, instruction="hold")),
-        ("empty", dict(band="3-8", estimate_pct=4.4, instruction="hold")),
-    ]
-    tick = int(time.time() // DEMO_SECONDS)
-    name, reading = scenes[tick % len(scenes)]
-    health = {"camera": "ok", "flash": "ok", "network": "ok"}
-    history = _history([3.2, 4.1, 5.0, 6.4, 7.2, 7.9, 8.6, 9.1, 6.0, 4.8, 3.9, 4.6])
-
-    if name == "stale":
-        reading = dict(band="3-8", estimate_pct=5.0, instruction="hold")
-        reading["at"] = _ago(38)
-        health["network"] = "down"
-        health["message"] = "Pas de connexion à Caliban"
-    else:
-        reading["at"] = _ago(1)
-    if name == "flash_low":
-        health["flash"] = "low"
-        health["message"] = "Piles du flash faibles — changer les piles"
-
-    reading["id"] = f"DEMO-{tick}-{name}"
-    line = ({"running": False} if name == "stopped"
-            else {"running": True, "product": False} if name == "empty" else {"running": True, "product": True})
-    return {
-        "line": line,
-        "mode": "shadow" if name == "trial" else "live",
-        "reading": reading,
-        "history": history,
-        "health": health,
-        "next_at": (datetime.now(timezone.utc) + timedelta(seconds=DEMO_SECONDS - time.time() % DEMO_SECONDS)).isoformat(timespec="seconds"),
-        "updated_at": now_iso(),
-        "demo": True,
-    }
-
-
 # --- HTTP -------------------------------------------------------------------
 
 class Handler(server.BaseHTTPRequestHandler):
-    demo = False
-
     def _send(self, code, body, ctype):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -263,13 +190,13 @@ class Handler(server.BaseHTTPRequestHandler):
             except OSError as e:
                 self._send(500, f"screen.html unreadable: {e}".encode(), "text/plain")
         elif path == "/state":
-            state = demo_state() if self.demo else read_state()
+            state = read_state()
             reading = state.get("reading") or {}
-            by_reading, setting = summarise_acks(demo_acks if self.demo else read_acks())
+            by_reading, setting = summarise_acks(read_acks())
             state["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
             state["setting"] = setting
             state["server"] = {"version": page_version(), "now": now_iso()}
-            state["connection"] = None if self.demo else read_connection()
+            state["connection"] = read_connection()
             self._json(200, state)
         elif path == "/photo":
             self._photo()
@@ -277,7 +204,7 @@ class Handler(server.BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain")
 
     def _photo(self):
-        photo = ((read_state() if not self.demo else {}).get("reading") or {}).get("photo")
+        photo = (read_state().get("reading") or {}).get("photo")
         if not photo:
             return self._send(404, b"no photo", "text/plain")
         real = os.path.realpath(photo)
@@ -306,7 +233,7 @@ class Handler(server.BaseHTTPRequestHandler):
         # Only the reading on screen can be answered. A tap that lands just as
         # a new reading replaces the old one would otherwise confirm an
         # instruction the operator never saw.
-        state = demo_state() if self.demo else read_state()
+        state = read_state()
         current = (state.get("reading") or {}).get("id")
         if not reading_id or reading_id != current:
             return self._json(409, {"error": "Lecture remplacée — vérifiez l'écran."})
@@ -321,10 +248,7 @@ class Handler(server.BaseHTTPRequestHandler):
             ack["setting"] = target["value"]
             ack["unit"] = target.get("unit") or ""
 
-        if self.demo:
-            demo_acks.append(ack)
-        else:
-            append_ack(ack)
+        append_ack(ack)
         log(f"ack {choice} for {reading_id}")
         self._json(200, {"ok": True, "ack": ack})
 
@@ -341,12 +265,10 @@ class Server(ThreadingMixIn, server.HTTPServer):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--demo", action="store_true", help="cycle through sample states")
     parser.add_argument("--port", type=int, default=PORT)
     args = parser.parse_args()
 
-    Handler.demo = args.demo
-    log(f"destoner screen on http://127.0.0.1:{args.port}/" + ("  (demo)" if args.demo else ""))
+    log(f"destoner screen on http://127.0.0.1:{args.port}/")
     try:
         Server(("127.0.0.1", args.port), Handler).serve_forever()
     except KeyboardInterrupt:
