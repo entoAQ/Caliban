@@ -35,7 +35,10 @@ BROWSER="$(command -v chromium || command -v chromium-browser)"
 # --disable-pinch                 a two-finger brush does not zoom the page
 # --overscroll-history-navigation=0   a sideways swipe does not go "back"
 # --password-store=basic          no keyring prompt on a screen with no keyboard
-# --disable-features=Translate    no "translate this page?" bar over French text
+# --disable-features=Translate    no "translate this page?" bar over French text --
+#                                 ignored by newer Chromium, so also --lang=fr-CA
+#                                 (the UI in the pages' language) and
+#                                 translate="no" in both pages (2026-10-16)
 # --noerrdialogs --disable-infobars --no-first-run   nothing pops up over the page
 exec "$BROWSER" \
     --kiosk \
@@ -43,6 +46,7 @@ exec "$BROWSER" \
     --overscroll-history-navigation=0 \
     --password-store=basic \
     --disable-features=Translate \
+    --lang=fr-CA \
     --noerrdialogs \
     --disable-infobars \
     --no-first-run \
