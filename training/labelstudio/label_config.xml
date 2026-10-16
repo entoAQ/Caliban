@@ -1,0 +1,23 @@
+<!--
+  Label Studio labeling interface for the inline (chute) photos.
+
+  Same taxonomy as the CVAT tray labeling (see training/CVAT_SETUP.md and the
+  tray model notes): Larves and Frass as region polygons, background left
+  unlabeled on purpose. Polygons only (no boxes or brushes) because
+  export_yolo_seg.py writes YOLO-seg polygons, which is what
+  training/augment_rotations.py and a YOLO-seg trainer read.
+
+  The class order here is the YOLO class id order (Larves = 0, Frass = 1).
+  Append new labels at the end; never reorder, or existing exports change
+  meaning.
+-->
+<View>
+  <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="false"/>
+  <PolygonLabels name="label" toName="image" strokeWidth="2" pointSize="small" opacity="0.35">
+    <Label value="Larves" background="#2f80ed"/>
+    <Label value="Frass" background="#eb5757"/>
+  </PolygonLabels>
+  <Choices name="photo" toName="image" choice="single" showInline="true">
+    <Choice value="Inutilisable" hint="Blurred, flash missed, empty chute: kept out of the training set"/>
+  </Choices>
+</View>
