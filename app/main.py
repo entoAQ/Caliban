@@ -340,10 +340,12 @@ def health_deep():
         "checks": checks,
         # Set or not, never the value: a missing app setting after a portal
         # edit is the other outage that /health cannot see.
+        # The SharePoint/Power Automate pair only counts once that pipeline
+        # is configured, for the same reason as _check_sharepoint.
         "config": {k: bool(os.environ.get(k)) for k in (
             "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
-            "AZURE_OPENAI_DEPLOYMENT", "RIG_API_KEY", "INLINE_API_KEY", "POWER_AUTOMATE_API_KEY",
-            "TEAMS_ALERT_WEBHOOK_URL", "MS_CLIENT_SECRET")},
+            "AZURE_OPENAI_DEPLOYMENT", "RIG_API_KEY", "INLINE_API_KEY", "TEAMS_ALERT_WEBHOOK_URL",
+            *(("POWER_AUTOMATE_API_KEY", "MS_CLIENT_SECRET") if sharepoint_client.MS_TENANT_ID else ()))},
     }
     _deep_health_cache.update(at=time.time(), body=body)
     return body
@@ -3754,7 +3756,7 @@ DOCTOR_DEVICES = {
         "back_text": "Les lectures reprennent toutes seules.",
     },
     "prosperos": {
-        "name": "Banc à plateau (Prosperos)",
+        "name": "Banc à plateau (Caliban)",
         "actions": {
             "repair_all": "Tout réparer",
             "restart_poller": "Redémarrer le service du banc",

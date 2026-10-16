@@ -1,4 +1,4 @@
-name: "Caliban — journaux"
+name: "Prospero — journaux"
 
 # A button: Actions -> this workflow -> Run workflow. Downloads Caliban's
 # container logs and shows the end of them, and every error line, on the
@@ -29,7 +29,7 @@ jobs:
       - name: Check the Azure secret
         run: |
           if [ -z "$AZURE_CREDENTIALS" ]; then
-            echo "## ⚙️ Secret AZURE_CREDENTIALS absent — voir le résumé de « Caliban — redémarrer » pour le créer." >> "$GITHUB_STEP_SUMMARY"
+            echo "## ⚙️ Secret AZURE_CREDENTIALS absent — voir le résumé de « Prospero — redémarrer » pour le créer." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
 
@@ -55,7 +55,7 @@ jobs:
           app=$(find logs -name '*_default_docker.log' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
           platform=$(find logs -name '*_docker.log' ! -name '*_default_docker.log' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
           {
-            echo "## Journaux de Caliban"
+            echo "## Journaux de Prospero"
             if [ -z "$app" ]; then
               echo
               echo "Aucun journal d'application trouvé. La journalisation vient d'être activée : relancer dans quelques minutes."

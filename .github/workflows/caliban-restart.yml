@@ -1,4 +1,4 @@
-name: "Caliban — redémarrer"
+name: "Prospero — redémarrer"
 
 # A button: Actions -> this workflow -> Run workflow. Restarts the App Service
 # and waits until Caliban answers again with a fresh start time.
@@ -58,15 +58,15 @@ jobs:
           for i in $(seq 1 60); do
             now=$(curl -fsS --max-time 10 "$HEALTH" | jq -r '.started_at // empty') || now=""
             if [ -n "$now" ] && [ "$now" != "$before" ]; then
-              echo "## ✅ Caliban redémarré — répond de nouveau après $((i * 10)) s" >> "$GITHUB_STEP_SUMMARY"
+              echo "## ✅ Prospero redémarré — répond de nouveau après $((i * 10)) s" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             echo "waiting $((i * 10))s"
             sleep 10
           done
           {
-            echo "## ⚠️ Redémarrage demandé, mais Caliban ne répond pas après 10 minutes"
+            echo "## ⚠️ Redémarrage demandé, mais Prospero ne répond pas après 10 minutes"
             echo
-            echo "Lancer **Caliban — journaux** pour voir pourquoi il ne démarre pas, ou **Caliban — revenir à la version précédente**."
+            echo "Lancer **Prospero — journaux** pour voir pourquoi il ne démarre pas, ou **Prospero — revenir à la version précédente**."
           } >> "$GITHUB_STEP_SUMMARY"
           exit 1

@@ -1,4 +1,4 @@
-name: "Caliban — vérifier"
+name: "Prospero — vérifier"
 
 # A button: Actions -> "Caliban — vérifier" -> Run workflow. Says in plain
 # words whether Caliban is up, which version is live, and which of the things
@@ -35,12 +35,12 @@ jobs:
 
           if [ "$code" != "200" ]; then
             {
-              echo "## ❌ Caliban ne répond pas (code $code)"
+              echo "## ❌ Prospero ne répond pas (code $code)"
               echo
               echo "Si une nouvelle version vient d'être déployée, c'est presque toujours elle :"
-              echo "lancer **[Caliban — revenir à la version précédente]($ROLLBACK)**."
+              echo "lancer **[Prospero — revenir à la version précédente]($ROLLBACK)**."
               echo
-              echo "Sinon : Azure Portal → App Service *Caliban* → **Restart**, puis relancer cette vérification."
+              echo "Sinon : Azure Portal → App Service *Caliban* (Prospero) → **Restart**, puis relancer cette vérification."
             } >> "$S"
             exit 1
           fi
@@ -52,9 +52,9 @@ jobs:
 
           {
             if [ "$status" = "ok" ]; then
-              echo "## ✅ Caliban fonctionne"
+              echo "## ✅ Prospero fonctionne"
             else
-              echo "## ⚠️ Caliban répond, mais quelque chose ne va pas ($status)"
+              echo "## ⚠️ Prospero répond, mais quelque chose ne va pas ($status)"
             fi
             echo
             echo "Version en ligne : \`${live:0:7}\` — démarré le $started (UTC)"
@@ -78,7 +78,7 @@ jobs:
             if [ "$status" != "ok" ]; then
               echo
               echo "Une vérification essentielle échoue. Si c'est arrivé juste après un déploiement :"
-              echo "**[Caliban — revenir à la version précédente]($ROLLBACK)**. Sinon, prévenir Tim."
+              echo "**[Prospero — revenir à la version précédente]($ROLLBACK)**. Sinon, prévenir Tim."
             fi
           } >> "$S"
           [ "$status" = "ok" ]

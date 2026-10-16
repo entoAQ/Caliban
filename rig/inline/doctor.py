@@ -277,17 +277,17 @@ def check_wifi(full):
 
 def check_caliban(full):
     if not CALIBAN_URL:
-        return check("caliban", "Caliban (nuage)", "fail", "Adresse de Caliban absente sur ce Pi.",
+        return check("caliban", "Prospero (nuage)", "fail", "Adresse de Prospero absente sur ce Pi.",
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
     status, body = http_get(f"{CALIBAN_URL}/health", timeout=20)
     if status is None:
-        return check("caliban", "Caliban (nuage)", "fail", "Caliban ne répond pas.",
+        return check("caliban", "Prospero (nuage)", "fail", "Prospero ne répond pas.",
                      manual="Si le Wi-Fi est bon, la panne est dans le nuage, pas ici : prévenir l'AQ.")
     if status != 200:
-        return check("caliban", "Caliban (nuage)", "fail", f"Caliban répond en erreur ({status}).",
+        return check("caliban", "Prospero (nuage)", "fail", f"Prospero répond en erreur ({status}).",
                      manual="La panne est dans le nuage, pas ici : prévenir l'AQ.")
     sha = (body.get("build_sha") or "")[:7] if isinstance(body, dict) else ""
-    return check("caliban", "Caliban (nuage)", "ok", f"Répond (version {sha or '?'}).")
+    return check("caliban", "Prospero (nuage)", "ok", f"Répond (version {sha or '?'}).")
 
 
 def check_key(full):
@@ -296,9 +296,9 @@ def check_key(full):
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
     status, body = http_get(f"{CALIBAN_URL}/doctor/ping", timeout=20, headers={"X-API-Key": API_KEY})
     if status is None:
-        return check("key", "Clé d'accès", "off", "Non vérifiable sans Caliban.")
+        return check("key", "Clé d'accès", "off", "Non vérifiable sans Prospero.")
     if status == 401:
-        return check("key", "Clé d'accès", "fail", "Caliban refuse la clé de ce Pi.",
+        return check("key", "Clé d'accès", "fail", "Prospero refuse la clé de ce Pi.",
                      manual="La clé a changé dans Azure : prévenir l'AQ.")
     if status != 200:
         return check("key", "Clé d'accès", "off", f"Non vérifiable ({status}).")

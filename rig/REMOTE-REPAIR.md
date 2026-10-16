@@ -10,14 +10,19 @@ tray rig) are known or expected to fail, sorted by who fixes it:
 
 Written 2026-10-13. When a tool changes, change its row here.
 
+**Names on screen** (since 2026-10-16): the App Service is shown as
+**Prospero** and the tray rig as **Caliban**, in SGSC's diagnostic page, the
+GitHub buttons and the Pi screens. This file, the code, the database
+(`device = 'prosperos'`) and Azure (App Service `Caliban`) keep the old names.
+
 ## Where the buttons are
 
 | Button | Where | Reaches |
 |---|---|---|
-| **Caliban — vérifier** | GitHub → Actions | Caliban health, each dependency, last deploys |
-| **Caliban — revenir à la version précédente** | GitHub → Actions | Redeploys the build before the live one |
-| **Caliban — redémarrer** | GitHub → Actions | Restarts the App Service (needs `AZURE_CREDENTIALS`, below) |
-| **Caliban — journaux** | GitHub → Actions | Container logs, errors first (needs `AZURE_CREDENTIALS`) |
+| **Prospero — vérifier** | GitHub → Actions | Caliban health, each dependency, last deploys |
+| **Prospero — revenir à la version précédente** | GitHub → Actions | Redeploys the build before the live one |
+| **Prospero — redémarrer** | GitHub → Actions | Restarts the App Service (needs `AZURE_CREDENTIALS`, below) |
+| **Prospero — journaux** | GitHub → Actions | Container logs, errors first (needs `AZURE_CREDENTIALS`) |
 | **Diagnostic des bancs** | SGSC menu (QC+) | Caliban's status; each rig's checks and every repair it offers |
 | **Diagnostic** | Destoner touchscreen, 2 s press on the chips | Ariel's checks and repairs, plus Wi-Fi restart |
 
@@ -136,10 +141,10 @@ trays); camera ribbon or a dead camera; the height sensor's cable ("Capteur de
 hauteur" yellow -- density only); the LED light; an unplugged Pi; a corrupt
 SD card.
 
-## One-time setup still to do
+## Setting up `AZURE_CREDENTIALS`
 
-**`AZURE_CREDENTIALS`** for *Caliban — redémarrer* and *Caliban — journaux*.
-In Azure Cloud Shell:
+Used by *Prospero — redémarrer* and *Prospero — journaux*. Done 2026-10-16;
+it expires 2028-10, so redo it before then. In Azure Cloud Shell:
 
 ```
 az ad sp create-for-rbac --name caliban-github-actions --role "Website Contributor" --years 2 \

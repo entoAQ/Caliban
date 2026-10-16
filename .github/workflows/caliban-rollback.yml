@@ -1,4 +1,4 @@
-name: "Caliban — revenir à la version précédente"
+name: "Prospero — revenir à la version précédente"
 
 # A button: Actions -> this workflow -> Run workflow. Puts back the build that
 # was live before the current one, and waits until Caliban reports it.
@@ -99,7 +99,7 @@ jobs:
             live=$(curl -fsS --max-time 10 "$HEALTH" | jq -r '.build_sha // empty') || live=""
             if [ "$live" = "$TARGET" ]; then
               {
-                echo "## ✅ Caliban remis à la version \`${TARGET:0:7}\`"
+                echo "## ✅ Prospero remis à la version \`${TARGET:0:7}\`"
                 echo
                 echo "> $MSG"
                 echo
@@ -114,8 +114,8 @@ jobs:
             sleep 10
           done
           {
-            echo "## ⚠️ Déployé, mais Caliban ne rapporte pas encore \`${TARGET:0:7}\` après 10 minutes"
+            echo "## ⚠️ Déployé, mais Prospero ne rapporte pas encore \`${TARGET:0:7}\` après 10 minutes"
             echo
-            echo "Relancer **Caliban — vérifier** dans quelques minutes. Si toujours rien : Azure Portal → Caliban → Restart."
+            echo "Relancer **Prospero — vérifier** dans quelques minutes. Si toujours rien : Azure Portal → App Service *Caliban* (Prospero) → Restart."
           } >> "$S"
           exit 1
