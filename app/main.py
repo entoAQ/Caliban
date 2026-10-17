@@ -1173,6 +1173,7 @@ def prompt_registry():
                 # boundaries, so fall back rather than trust it.
                 "band_scale": scale if scale in BAND_SCALES else "standard",
                 "uses_references": bool(row.get("uses_references")),
+                "crop": _valid_crop(row.get("crop")),
                 "archived": bool(row.get("archived")),
                 "source": "db",
             }
@@ -1191,6 +1192,38 @@ def prompt_text(label):
     return prompt_registry()[label]["text"]
 
 
+def _valid_crop(raw):
+    """A prompt's crop as {top, bottom, left, right} fractions, or None.
+
+    A crop is part of what the prompt sees, so it lives on the prompt's row
+    (vision_prompts.crop, rig/prompt_chute_m1.sql) rather than on a rig: every
+    reading and every re-score made with that label sees the same view, and the
+    stored photo stays whole so the line can be moved and the photos re-scored.
+    Anything malformed, or a crop leaving under half the frame either way, is
+    ignored rather than trusted -- the photo then goes whole.
+    """
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    try:
+        crop = {k: float(raw.get(k) or 0.0) for k in ("top", "bottom", "left", "right")}
+    except (TypeError, ValueError):
+        return None
+    if any(v < 0 for v in crop.values()):
+        return None
+    if crop["top"] + crop["bottom"] > 0.5 or crop["left"] + crop["right"] > 0.5:
+        return None
+    return crop if any(crop.values()) else None
+
+
+def prompt_crop(label):
+    return prompt_registry().get(label, {}).get("crop")
+
+
 def prompt_hash(label):
     """Identifies the exact text, wherever it came from.
 
@@ -1198,7 +1231,11 @@ def prompt_hash(label):
     change without the process restarting -- a hash frozen at startup would
     quietly label new text with the old prompt's identity.
     """
-    return hashlib.md5(prompt_text(label).encode("utf-8")).hexdigest()[:8]
+    # The crop is part of what the model is shown, so a moved crop line is a
+    # different prompt. Uncropped prompts hash their text alone, as before.
+    crop = prompt_crop(label)
+    ident = prompt_text(label) + (json.dumps(crop, sort_keys=True) if crop else "")
+    return hashlib.md5(ident.encode("utf-8")).hexdigest()[:8]
 
 
 def prompt_scale(label):
@@ -1288,6 +1325,65 @@ def _attach_plastic(result, runs):
     )
 
 
+# A measuring prompt (rig/prompt_chute_m1.sql) answers a few lines before the
+# band: an anchored 0-100 frass score and the MEO share of the product area as
+# numbers, clump counts by size and the amount of fine material as
+# a word each, and how thick the stream is. Each word maps to an ordinal score
+# so the rotations can be averaged; None means the field is a number.
+#
+# The measures make the answer longer, hence BAND_MAX_TOKENS at 300 rather than
+# the 200 every band call used before. A cap only cuts; an answer that already
+# fitted in 200 comes back exactly as before.
+BAND_MAX_TOKENS = 300
+
+MEASURE_FIELDS = {
+    "SCORE_MEO": None,
+    "AIRE_MEO": None,
+    "AMAS_PETITS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
+    "AMAS_MOYENS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
+    "AMAS_GROS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
+    "FINES": {"aucun": 0, "peu": 1, "moyen": 2, "beaucoup": 3},
+    "FLUX": {"clairseme": 0, "clairsemé": 0, "moyen": 1, "dense": 2},
+}
+
+
+def _measure_value(field, raw):
+    """One rotation's answer to a measure as a number, or None if unreadable."""
+    text = (raw or "").strip().strip("[]").strip()
+    scale = MEASURE_FIELDS[field]
+    if scale is None:
+        m = re.search(r"\d+(?:[.,]\d+)?", text)
+        if not m:
+            return None
+        value = float(m.group(0).replace(",", "."))
+        return value if 0.0 <= value <= 100.0 else None
+    head = text.split()[0].lower().strip(" .,;:-—") if text else ""
+    return scale.get(head)
+
+
+def _attach_measures(result, runs):
+    """Collapse a measuring prompt's rotations into result["measures"].
+
+    Each measure gets the mean over the rotations that answered it readably,
+    and the list of every rotation's raw answer, so a mean of 1.5 can still be
+    read back as "peu, plusieurs". Prompts that measure nothing leave no key --
+    absence means "not asked", as with plastic.
+    """
+    if not any(r.get("measures") for r in runs):
+        result.pop("measures", None)
+        return
+    out = {}
+    for field in MEASURE_FIELDS:
+        key = field.lower()
+        raws = [(r.get("measures") or {}).get(key) for r in runs]
+        if all(v is None for v in raws):
+            continue
+        values = [v for v in (_measure_value(field, raw) for raw in raws) if v is not None]
+        out[key] = round(sum(values) / len(values), 2) if values else None
+        out[key + "_rotations"] = raws
+    result["measures"] = out
+
+
 def parse_band_response(text):
     """Extracts the structured band/confidence fields from BAND_PROMPT's
     response -- falls back to returning the raw text untouched if the
@@ -1299,6 +1395,9 @@ def parse_band_response(text):
     # None when the prompt does not ask about plastic at all, which is every
     # variant except the plastic ones -- so absence means "not asked", never "no".
     plastic = plastic_desc = None
+    # Raw answers to a measuring prompt's extra lines (chute-m1), keyed by
+    # lower-case field name; empty for every other prompt.
+    measures = {}
     for line in text.strip().splitlines():
         if line.upper().startswith("BANDE:"):
             band = line.split(":", 1)[1].strip()
@@ -1313,6 +1412,10 @@ def parse_band_response(text):
             justification = line.split(":", 1)[1].strip()
         elif line.upper().startswith("PLASTIQUE:"):
             plastic, plastic_desc = _plastic_vote(line.split(":", 1)[1])
+        else:
+            key = line.split(":", 1)[0].strip().upper()
+            if key in MEASURE_FIELDS and ":" in line:
+                measures[key.lower()] = line.split(":", 1)[1].strip()
     return {
         "band": band,
         "confidence": confidence,
@@ -1321,6 +1424,7 @@ def parse_band_response(text):
         "density_est": density,
         "plastic": plastic,
         "plastic_desc": plastic_desc,
+        "measures": measures,
         "raw": text,
     }
 
@@ -2837,16 +2941,30 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
         img.save(buf, format="JPEG", quality=95)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    rotated_b64 = {"0": _encode(original)}
-    if repeats > 1:
-        for angle, mirror in transforms[1:]:
+    # One encoded image per (crop, rotation), made on first use. Most prompts
+    # have no crop and share the whole photo; a cropping prompt (prompt_crop)
+    # is cut once, before rotating, so every rotation shows the same region.
+    rotated_b64 = {}
+
+    def _view(variant_label, angle, mirror):
+        crop = prompt_crop(variant_label)
+        ck = json.dumps(crop, sort_keys=True) if crop else ""
+        k = (ck, _key(angle, mirror))
+        if k not in rotated_b64:
+            img = original
+            if crop:
+                w, h = img.size
+                img = img.crop((round(w * crop["left"]), round(h * crop["top"]),
+                                round(w * (1 - crop["right"])), round(h * (1 - crop["bottom"]))))
             # expand=True keeps the whole frame at 90/270 on a non-square
             # image; cropping instead would hand each rotation a different
             # sample, which is precisely what must not vary.
-            img = original.rotate(angle, expand=True)
+            if angle:
+                img = img.rotate(angle, expand=True)
             if mirror:
                 img = img.transpose(Image.FLIP_LEFT_RIGHT)
-            rotated_b64[_key(angle, mirror)] = _encode(img)
+            rotated_b64[k] = _encode(img)
+        return rotated_b64[k]
 
     # Few-shot grounding: real reference photos with known values, judged
     # alongside the new photo rather than asked to reason about density
@@ -2883,14 +3001,14 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
                 content.append({"type": "text", "text": label + " :"})
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
             content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{rotated_b64[_key(angle, mirror)]}"}})
+        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{_view(variant_label, angle, mirror)}"}})
 
         start = time.time()
         if model_entry is DEFAULT_VISION_MODEL:
             try:
                 response = client.chat.completions.create(
                     model=AZURE_OPENAI_DEPLOYMENT,
-                    max_completion_tokens=200,
+                    max_completion_tokens=BAND_MAX_TOKENS,
                     temperature=0,
                     seed=CALIBAN_SEED,
                     messages=[{"role": "user", "content": content}],
@@ -2904,7 +3022,7 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
                 # whatever model AZURE_OPENAI_DEPLOYMENT currently points at.
                 response = client.chat.completions.create(
                     model=AZURE_OPENAI_DEPLOYMENT,
-                    max_completion_tokens=200,
+                    max_completion_tokens=BAND_MAX_TOKENS,
                     messages=[{"role": "user", "content": content}],
                 )
             text = response.choices[0].message.content or ""
@@ -3058,13 +3176,6 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
         )
         extra = TRANSFORMS[repeats:max(repeats, escalate_settings["escalate_repeats"])]
         if actionable and extra:
-            for angle, mirror in extra:
-                k = _key(angle, mirror)
-                if k not in rotated_b64:
-                    img = original.rotate(angle, expand=True)
-                    if mirror:
-                        img = img.transpose(Image.FLIP_LEFT_RIGHT)
-                    rotated_b64[k] = _encode(img)
             more = await asyncio.gather(*[
                 loop.run_in_executor(None, call_variant, variant, a, m) for a, m in extra
             ])
@@ -3074,6 +3185,7 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
     parsed_results = [aggregate(v, by_variant[v]) for v in requested_variants]
     for v, result in zip(requested_variants, parsed_results):
         _attach_plastic(result, by_variant[v])
+        _attach_measures(result, by_variant[v])
 
     return parsed_results, escalated, photo_mean, photo_std
 
