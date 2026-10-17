@@ -183,12 +183,25 @@ def judge_flash(state, level):
 def request_reading(reading_id, path):
     """POST the photo. Returns (reply or None, http_error_detail or None).
     Raises requests.RequestException when Caliban could not be reached."""
+    # The operator's last confirmation, so Caliban starts its decision window
+    # after it (app/main.py inline_decision): the readings from before an
+    # adjustment describe a setting that is gone. Sent as seconds ago on this
+    # Pi's own clock, so it is right even while the clock itself is not.
+    data = {"reading_id": reading_id}
+    acks = screen.read_acks()
+    if acks:
+        try:
+            at = datetime.fromisoformat(acks[-1]["at"])
+            data["since_ack_s"] = str(max(0, int((now_utc() - at).total_seconds())))
+            data["last_ack_instruction"] = acks[-1].get("instruction") or ""
+        except (KeyError, TypeError, ValueError):
+            pass
     with open(path, "rb") as f:
         resp = requests.post(
             f"{CALIBAN_URL}/inline/readings",
             headers=headers(),
             files={"file": (os.path.basename(path), f, "image/jpeg")},
-            data={"reading_id": reading_id},
+            data=data,
             timeout=REQUEST_TIMEOUT,
         )
     if resp.ok:
@@ -243,10 +256,12 @@ _mirror = {"sig": None, "at": 0.0, "failing": False}
 
 
 def mirror_state(state):
-    by_reading, setting = screen.summarise_acks(screen.read_acks())
+    acks = screen.read_acks()
+    by_reading, setting = screen.summarise_acks(acks)
     payload = {k: v for k, v in state.items() if k not in ("flash_levels", "updated_at")}
-    reading = payload.get("reading") or {}
-    payload["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
+    shown = screen.shown_reading(state, by_reading, acks[-1] if acks else None)
+    payload["shown"] = shown
+    payload["ack"] = by_reading.get(shown.get("id")) if shown.get("id") else None
     payload["setting"] = setting
     sig = json.dumps(payload, sort_keys=True, default=str)
     if sig == _mirror["sig"] and time.monotonic() - _mirror["at"] < MIRROR_EVERY_S:
@@ -405,10 +420,25 @@ def take_reading(state):
         "alert_streak": reply.get("alert_streak"),
         "target": reply.get("target"),
         "photo": path,
+        # What the instruction was decided on: the median of the last few
+        # readings (Caliban inline_decision), over decision_n of them, and
+        # whether that is enough to act on (decision_min).
+        "decision_pct": reply.get("decision_pct"),
+        "decision_n": reply.get("decision_n"),
+        "decision_min": reply.get("decision_min"),
     }
     state["mode"] = reply.get("mode") or "shadow"
+    state["thresholds"] = reply.get("thresholds") or state.get("thresholds")
+    # An instruction stays on screen until someone confirms it, even after the
+    # readings settle back: someone walking past five minutes later still has
+    # to see that the destoner was meant to be changed. screen.shown_reading
+    # decides when this has expired or been answered.
+    instruction = reply.get("instruction") or ""
+    if instruction.startswith("increase") or instruction == "decrease":
+        state["pending"] = dict(state["reading"])
     history = state.setdefault("history", [])
-    history.append({"at": iso(taken), "estimate_pct": reply.get("estimate_pct"),
+    history.append({"id": reading_id, "at": iso(taken), "estimate_pct": reply.get("estimate_pct"),
+                    "decision_pct": reply.get("decision_pct"),
                     "instruction": reply.get("instruction")})
     del history[:-HISTORY_KEEP]
     state["interval_s"] = int(reply.get("next_in_s") or DEFAULT_INTERVAL_S)

@@ -3591,6 +3591,15 @@ INLINE_DEFAULTS = {
     "mode": "shadow",
     "interval_min": 5,
     "alert_consecutive_increase": 3,
+    # How an instruction is decided (inline_decision). With a reading a minute,
+    # one photo is too noisy to act on: the instruction comes from the median
+    # of the last decision_readings readings, no older than
+    # decision_max_age_min and none from before the operator's last
+    # confirmation, and needs at least decision_min_readings of them before it
+    # asks for anything. 1 / 1 decides on the latest reading alone, as before.
+    "decision_readings": 1,
+    "decision_min_readings": 1,
+    "decision_max_age_min": 30,
 }
 
 
@@ -3610,20 +3619,104 @@ def inline_settings():
         for key in ("variant", "high_variant", "low_variant", "mode"):
             if isinstance(overrides.get(key), str):
                 settings[key] = overrides[key].strip()
-        for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase"):
+        for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
+                    "decision_readings", "decision_min_readings", "decision_max_age_min"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
-        if isinstance(overrides.get("offline_alert"), bool):
-            settings["offline_alert"] = overrides["offline_alert"]
+        # The inline rig's own thresholds. Its readings are on their own scale
+        # (chute prompts, uncalibrated: about half the lab ME% on 2026-10-16),
+        # so the tray's limits -- and the clamps operator_settings puts on
+        # them -- do not carry over. Only their order is enforced, below.
+        for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at"):
+            try:
+                settings[key] = float(overrides[key])
+            except (KeyError, TypeError, ValueError):
+                pass
+        for key in ("offline_alert", "teams"):
+            if isinstance(overrides.get(key), bool):
+                settings[key] = overrides[key]
     if settings["mode"] not in ("shadow", "live"):
         settings["mode"] = "shadow"
+    # Teams follows live mode unless told otherwise: live with teams=false is
+    # the operator acting on the screen while AQ watches the line in person.
+    settings.setdefault("teams", settings["mode"] == "live")
+    settings["decrease_below"] = max(0.0, settings["decrease_below"])
+    settings["increase_at"] = max(settings["increase_at"], settings["decrease_below"])
+    settings["increase_medium_at"] = max(settings["increase_medium_at"], settings["increase_at"])
+    settings["alert_at"] = max(settings["alert_at"], settings["increase_medium_at"])
+    settings["decision_readings"] = max(1, min(30, settings["decision_readings"]))
+    settings["decision_min_readings"] = max(1, min(settings["decision_readings"], settings["decision_min_readings"]))
+    settings["decision_max_age_min"] = max(5, min(240, settings["decision_max_age_min"]))
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["interval_min"] = max(1, min(60, settings["interval_min"]))
     settings["alert_consecutive_increase"] = max(0, min(10, settings["alert_consecutive_increase"]))
     return settings
+
+
+def inline_decision(estimate_pct, prompt_version, settings, since_ack_s=None):
+    """(decision_pct, n) -- the value the instruction is decided on.
+
+    The median of this reading and the ones just before it from the same
+    prompt: at most decision_readings of them, none older than
+    decision_max_age_min, and none taken before the operator last confirmed an
+    instruction (since_ack_s, measured on the Pi's own clock so a clock that
+    is off does not matter). After a confirmation the destoner has been
+    changed, and the readings from before describe a setting that no longer
+    exists; counting them would ask for the same change again straight away.
+
+    n is how many readings the median is over. Fewer than
+    decision_min_readings means "too soon to say" -- the caller holds.
+    A lookup failure falls back to this reading alone.
+    """
+    if estimate_pct is None:
+        return None, 0
+    values = [float(estimate_pct)]
+    want = settings["decision_readings"] - 1
+    if want > 0:
+        horizon = settings["decision_max_age_min"] * 60
+        if since_ack_s is not None:
+            horizon = min(horizon, max(0, since_ack_s))
+        start = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=horizon)
+        try:
+            rows = (
+                supabase.table("vision_band_estimates")
+                .select("estimate_pct")
+                .eq("source", "inline")
+                .eq("prompt_version", prompt_version)
+                .not_.is_("operator_instruction", "null")
+                .is_("excluded_reason", "null")
+                .gte("created_at", start.isoformat())
+                .order("created_at", desc=True)
+                .limit(want)
+                .execute()
+            ).data or []
+            values += [float(r["estimate_pct"]) for r in rows if r.get("estimate_pct") is not None]
+        except Exception as e:
+            print(f"[inline decision lookup failed] {type(e).__name__}: {e}")
+    return round(statistics.median(values), 2), len(values)
+
+
+def inline_instruction(decision_pct, n, settings, last_ack_instruction=None):
+    """(instruction, alert, reason) for the inline rig from its decision value.
+
+    Too few readings since a start or a confirmation: hold. AQ is alerted on
+    the threshold (alert_at), or when AUGMENTER comes back once the readings
+    after a confirmed AUGMENTER are in -- the adjustment did not suffice. That
+    replaces the tray's count of consecutive AUGMENTER here: with a reading a
+    minute and a median over ten, any real episode is ten in a row before
+    anyone could have reacted.
+    """
+    if decision_pct is None or n < settings["decision_min_readings"]:
+        return "hold", False, None
+    instruction, alert = operator_instruction(decision_pct, settings)
+    if alert:
+        return instruction, True, "threshold"
+    if (instruction or "").startswith("increase") and (last_ack_instruction or "").startswith("increase"):
+        return instruction, True, "streak"
+    return instruction, False, None
 
 
 def _inline_response(reading_id, decider, settings, recorded_id=None):
@@ -3640,6 +3733,14 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "alert": bool(decider.get("instruction_alert")),
         "alert_reason": decider.get("alert_reason"),
         "alert_streak": settings["alert_consecutive_increase"],
+        # The median the instruction was decided on, and over how many
+        # readings; absent on a retry (not recorded, only the instruction is).
+        "decision_pct": decider.get("decision_pct"),
+        "decision_n": decider.get("decision_n"),
+        "decision_min": settings["decision_min_readings"],
+        # The lines the instruction is decided against, for the screen's trend.
+        "thresholds": {"decrease_below": settings["decrease_below"],
+                       "increase_at": settings["increase_at"]},
         "target": None,
         "photo_mean": decider.get("photo_mean"),
         "photo_std": decider.get("photo_std"),
@@ -3652,6 +3753,11 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
 async def inline_reading(
     file: UploadFile = File(...),
     reading_id: str = Form(...),
+    # From the Pi: seconds since the operator last confirmed an instruction,
+    # and which instruction that was. Both optional; an older loop.py sends
+    # neither and gets the window without a restart.
+    since_ack_s: str = Form(""),
+    last_ack_instruction: str = Form(""),
     _: bool = Depends(verify_inline_key),
 ):
     """Judge one inline photo and say what the destoner screen should show.
@@ -3696,14 +3802,25 @@ async def inline_reading(
         escalate_settings=settings, refuse_unusable_as=reading_id,
     )
 
+    try:
+        since_ack = float(since_ack_s) if since_ack_s.strip() else None
+    except ValueError:
+        since_ack = None
     if pair and len(results) == 2:
         instruction, alert, decider = combined_instruction(results[0], results[1], settings)
+        # The streak is worked out in shadow mode too, so the record says what live
+        # would have done -- that is what the trial is for. Only live tells Teams.
+        alert, reason, notify = _apply_streak(instruction, alert, settings, source="inline")
     else:
         decider = results[0]
-        instruction, alert = operator_instruction(decider.get("estimate_pct"), settings)
-    # The streak is worked out in shadow mode too, so the record says what live
-    # would have done -- that is what the trial is for. Only live tells Teams.
-    alert, reason, notify = _apply_streak(instruction, alert, settings, source="inline")
+        decision_pct, decision_n = inline_decision(
+            decider.get("estimate_pct"), decider.get("prompt_version"), settings, since_ack)
+        decider["decision_pct"], decider["decision_n"] = decision_pct, decision_n
+        instruction, alert, reason = inline_instruction(
+            decision_pct, decision_n, settings, last_ack_instruction.strip() or None)
+        # Teams for the inline rig waits for a card written for this rule; the
+        # tray's "n AUGMENTER in a row" message would misdescribe it.
+        notify = None
     decider["instruction"], decider["instruction_alert"], decider["alert_reason"] = instruction, alert, reason
     decider["photo_mean"], decider["photo_std"] = photo_mean, photo_std
 
@@ -3760,7 +3877,7 @@ async def inline_reading(
         except Exception as e:
             print(f"[inline recording failed] {reading_id}: {type(e).__name__}: {e}")
 
-    if notify is not None and recorded_id and settings["mode"] == "live":
+    if notify is not None and recorded_id and settings["mode"] == "live" and settings["teams"]:
         notify_increase_streak(settings["alert_consecutive_increase"],
                                notify + [{"operator_instruction": instruction,
                                           "estimate_pct": decider.get("estimate_pct")}],
@@ -3943,7 +4060,8 @@ def _offline_alerts_on(device):
         print(f"[device_offline_alerts lookup failed] {type(e).__name__}: {e}")
     if device == "ariel":
         s = inline_settings()
-        return s.get("offline_alert", s["mode"] == "live")
+        # teams already follows live mode unless switched off on its own.
+        return s.get("offline_alert", s["teams"])
     return True
 
 

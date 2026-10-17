@@ -40,17 +40,40 @@
   #health-msg { font-size: 18px; font-weight: 700; color: var(--warn); min-height: 0; }
   #health-msg:empty { display: none; }
 
-  /* The instruction is what the operator acts on, from a few metres away: it takes the
-     space the graph gives up (the graph is context, not an instruction). */
-  #card { border-radius: 18px; border: 4px solid; padding: 30px 22px; text-align: center;
-    flex: 1; display: flex; flex-direction: column; justify-content: center; }
-  #title { font-size: 88px; font-weight: 900; line-height: 1.05; letter-spacing: .01em; }
-  #sub { font-size: 32px; font-weight: 700; margin-top: 14px; }
-  #steps { text-align: left; font-size: 28px; font-weight: 700; line-height: 1.45;
-    margin: 14px 0 0; padding-left: 30px; }
-  #reading { display: flex; justify-content: center; gap: 18px; margin-top: 18px;
+  /* Two looks, as different as possible, so the state reads from across the
+     floor before a single word does.
+     Calm (body.calm / body.idle): dark screen, a modest status card, the trend
+     and photo given the room -- nothing to do, so nothing shouts.
+     Action (body.act): the whole screen turns the instruction's colour, a
+     white frame pulses round it, and a giant arrow says which way. Trend and
+     photo go; only the instruction and the buttons that answer it remain. It
+     stays like that until someone confirms (screen.py shown_reading). */
+  body.act { background: var(--act-bg); color: var(--act-fg); }
+  body.act::before { content: ""; position: fixed; inset: 0; border: 16px solid #fff;
+    pointer-events: none; animation: pulse 1.2s ease-in-out infinite; z-index: 5; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .15; } }
+  body.act header h1, body.act #clock { color: var(--act-fg); }
+  body.act #trend-box, body.act #bottom { display: none; }
+  body.act #setting { background: rgba(0,0,0,.22); color: var(--act-fg); }
+  body.act #setting b { color: var(--act-fg); }
+
+  #card { border-radius: 18px; border: 4px solid; padding: 22px; text-align: center;
+    display: flex; flex-direction: column; justify-content: center; }
+  body.act #card { flex: 1; border: none; background: transparent !important; color: inherit !important; padding: 10px 6px; }
+  #arrow { font-size: 260px; line-height: .9; font-weight: 900; }
+  #arrow:empty { display: none; }
+  #title { font-size: 52px; font-weight: 900; line-height: 1.05; letter-spacing: .01em; }
+  body.act #title { font-size: 104px; }
+  #sub { font-size: 24px; font-weight: 700; margin-top: 10px; }
+  body.act #sub { font-size: 34px; }
+  #pending-note { font-size: 24px; font-weight: 800; margin-top: 14px; padding: 10px 14px;
+    border-radius: 12px; background: rgba(0,0,0,.22); }
+  #pending-note:empty { display: none; }
+  #steps { text-align: left; font-size: 30px; font-weight: 800; line-height: 1.45;
+    margin: 14px 0 0; padding-left: 34px; }
+  #reading { display: flex; justify-content: center; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px;
     font-size: 20px; font-weight: 600; opacity: .85; }
-  #band { font-size: 32px; font-weight: 800; }
+  #band { font-size: 26px; font-weight: 800; }
 
   #alert { background: var(--bad); color: #fff; border-radius: 14px; padding: 18px;
     text-align: center; font-size: 28px; font-weight: 900; }
@@ -79,10 +102,10 @@
   #ack-error:empty { display: none; }
 
   #trend-box { background: var(--panel); border-radius: 14px; padding: 10px 14px;
-    flex: 0 0 auto; display: flex; flex-direction: column; }
+    flex: 1 1 auto; display: flex; flex-direction: column; min-height: 180px; }
   #trend-box h2, #bottom h2 { font-size: 16px; margin: 0 0 6px; color: var(--muted); font-weight: 700;
     text-transform: uppercase; letter-spacing: .06em; }
-  #trend { width: 100%; height: 124px; display: block; }
+  #trend { width: 100%; flex: 1; min-height: 150px; display: block; }
 
   #bottom { display: flex; gap: 14px; align-items: stretch; }
   #photo-box { flex: 0 0 46%; background: var(--panel); border-radius: 14px; padding: 10px;
@@ -126,10 +149,13 @@
     <span id="setting-at"></span></div>
 
   <div id="card">
+    <div id="arrow"></div>
     <div id="title">—</div>
     <div id="sub"></div>
     <ol id="steps" hidden></ol>
-    <div id="reading"><span>Lecture <span id="band">—</span></span><span id="age"></span></div>
+    <div id="pending-note"></div>
+    <div id="reading"><span>Lecture <span id="band">—</span></span><span id="age"></span>
+      <span id="decision"></span></div>
   </div>
 
   <div id="alert" hidden></div>
@@ -145,7 +171,7 @@
   <div id="ack-error"></div>
 
   <div id="trend-box">
-    <h2>Dernières lectures</h2>
+    <h2>Dernières lectures — ligne : médiane décisive</h2>
     <svg id="trend"></svg>
   </div>
 
@@ -167,14 +193,17 @@
   <div id="overlay" hidden><b id="overlay-title"></b><span id="overlay-text"></span></div>
 
 <script>
-// Same keys and colours as OP_INSTRUCTIONS in sgsc-app/operator-capture.js.
+// Same keys and hues as OP_INSTRUCTIONS in sgsc-app/operator-capture.js, so an
+// operator who moves between the two never re-learns what a colour means.
+// actBg/actFg are the full-screen colours of the action look: the same hues,
+// saturated, because this screen is read from metres away, not held in a hand.
 const INSTRUCTIONS = {
-  increase_minor:  { title: 'AUGMENTER', sev: 'léger',  bg: '#fef3c7', border: '#f59e0b', fg: '#78350f' },
-  increase_medium: { title: 'AUGMENTER', sev: 'modéré', bg: '#fde68a', border: '#d97706', fg: '#78350f' },
-  increase_major:  { title: 'AUGMENTER', sev: 'majeur', bg: '#fecaca', border: '#dc2626', fg: '#7f1d1d' },
-  increase:        { title: 'AUGMENTER', sev: '',       bg: '#fef3c7', border: '#f59e0b', fg: '#78350f' },
-  hold:            { title: 'AUCUN CHANGEMENT', sev: '', bg: '#ecfdf5', border: '#10b981', fg: '#064e3b' },
-  decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a' },
+  increase_minor:  { title: 'AUGMENTER', sev: 'léger',  bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917' },
+  increase_medium: { title: 'AUGMENTER', sev: 'modéré', bg: '#fde68a', border: '#d97706', fg: '#78350f', arrow: '▲', actBg: '#ea580c', actFg: '#ffffff' },
+  increase_major:  { title: 'AUGMENTER', sev: 'majeur', bg: '#fecaca', border: '#dc2626', fg: '#7f1d1d', arrow: '▲', actBg: '#dc2626', actFg: '#ffffff' },
+  increase:        { title: 'AUGMENTER', sev: '',       bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917' },
+  hold:            { title: 'AUCUN CHANGEMENT', sev: '', bg: '#064e3b', border: '#10b981', fg: '#ecfdf5' },
+  decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a', arrow: '▼', actBg: '#2563eb', actFg: '#ffffff' },
 };
 const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748b', fg: '#f8fafc' };
 // Trial mode (Caliban's inline_settings.mode = 'shadow'): the reading is real
@@ -285,27 +314,41 @@ function render() {
   const idle = line.running === false ? 'stopped' : line.product === false ? 'empty' : null;
   const r = s.reading;
   if (!r || !r.at) {
+    setLook('idle');
     overlay(idle ? IDLE[idle].title : 'En attente de la première lecture',
             idle ? IDLE[idle].sub : "Le banc n'a encore rien photographié.");
     return;
   }
   overlay(null);
 
-  // A stop or an empty chute withdraws the last instruction the same way an
-  // old reading does: it no longer describes what is going past.
+  // The instruction on screen is not always the latest reading's: one nobody
+  // has confirmed stays up after the readings settle (screen.py shown_reading).
+  const shown = (s.shown && s.shown.id) ? s.shown : r;
+  const fromEarlier = shown.id !== r.id;
+
+  // A stop or an empty chute withdraws the instruction the same way an old
+  // reading does: it no longer describes what is going past.
   const stale = minsAgo(r.at) > STALE_MIN || !!idle;
   const trial = !stale && s.mode === 'shadow';
-  const read = INSTRUCTIONS[r.instruction];
+  const read = INSTRUCTIONS[shown.instruction];
   const ins = idle ? { ...STALE, title: IDLE[idle].title } : stale ? STALE : trial ? TRIAL : (read || STALE);
+  const actionable = !stale && !trial && (isIncrease(shown.instruction) || shown.instruction === 'decrease');
+  const act = actionable && !s.ack;
+  setLook(act ? 'act' : (stale || idle) ? 'idle' : 'calm', ins);
+
   const card = $('card');
   card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
-  $('title').textContent = ins.title;
+  $('arrow').textContent = act ? (ins.arrow || '') : '';
+  $('title').textContent = (!act && actionable ? '✓ ' : !act && shown.instruction === 'hold' && !stale && !trial ? '✓ ' : '') + ins.title;
   // Caliban's labels carry their own % ("8-10%"); strip it and add one, so
   // a label without it still reads right.
   $('band').textContent = r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
+  $('decision').textContent = r.decision_pct != null && r.decision_n > 1
+    ? `Médiane ${r.decision_n} lectures : ${num(r.decision_pct)} %` : '';
 
   let sub = '', steps = [];
+  const warming = r.decision_min && r.decision_n != null && r.decision_n < r.decision_min;
   if (idle) {
     sub = IDLE[idle].sub;
   } else if (stale) {
@@ -313,38 +356,55 @@ function render() {
   } else if (trial) {
     sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') : '—'}. `
         + "Ne rien régler d'après cet écran : suivre l'échantillonnage au plateau.";
-  } else if (r.instruction === 'hold') {
-    sub = 'Garder le réglage actuel du destoner';
-  } else if (r.instruction === 'decrease') {
+  } else if (actionable && s.ack) {
+    sub = 'Réglage confirmé — vérification des lectures suivantes';
+  } else if (shown.instruction === 'hold') {
+    sub = warming
+      ? `Vérification en cours : ${r.decision_n}/${r.decision_min} lectures depuis le démarrage ou le dernier réglage`
+      : 'Garder le réglage actuel du destoner';
+  } else if (shown.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
              'Peu ou pas de larves dans les rejets : aucun réglage',
-             r.target ? `Sinon : régler à la valeur ci-dessous` : "Sinon : diminuer l'agressivité du destoner"];
-  } else if (isIncrease(r.instruction)) {
+             shown.target ? `Sinon : régler à la valeur ci-dessous` : "Sinon : diminuer l'agressivité du destoner"];
+  } else if (isIncrease(shown.instruction)) {
     // With a value to set, the value box below says what to do; the card
     // keeps only how far out the reading is.
-    sub = r.target ? (ins.sev ? `Écart ${ins.sev}` : '')
-                   : "l'agressivité du destoner" + (ins.sev ? ` — ${ins.sev}` : '');
+    sub = shown.target ? (ins.sev ? `Écart ${ins.sev}` : '')
+                       : "l'agressivité du destoner" + (ins.sev ? ` — ${ins.sev}` : '');
   }
   $('sub').textContent = sub;
   $('sub').hidden = !sub;
   $('steps').hidden = !steps.length;
   $('steps').innerHTML = steps.map(t => `<li>${esc(t)}</li>`).join('');
+  // Still asked for although the latest readings have settled: nobody has
+  // confirmed it, and the product only looks better because time passed.
+  $('pending-note').textContent = act && fromEarlier
+    ? `Demandé à ${hhmm(shown.at)} — toujours à confirmer` : '';
 
   // AQ is told by Caliban, not by this screen; this only says that it was.
-  const alert = !stale && !trial && r.alert;
+  const alert = !stale && !trial && shown.alert;
   $('alert').hidden = !alert;
   if (alert) {
-    $('alert').innerHTML = "⚠ Aviser l'AQ immédiatement" + (r.alert_reason === 'streak'
-      ? `<small>${esc(r.alert_streak || 2)} AUGMENTER de suite — l'ajustement n'a pas suffi</small>` : '');
+    $('alert').innerHTML = "⚠ Aviser l'AQ immédiatement" + (shown.alert_reason === 'streak'
+      ? `<small>Encore AUGMENTER après le réglage — l'ajustement n'a pas suffi</small>` : '');
   }
 
-  const actionable = !stale && !trial && (isIncrease(r.instruction) || r.instruction === 'decrease');
   // Once confirmed, the value lives in the setting bar at the top; the box
   // asking for it would only repeat it.
-  renderTarget(actionable && !s.ack ? r.target : null, s.setting);
-  renderActions(actionable, r, s.ack);
-  renderTrend(s.history || []);
+  renderTarget(act ? shown.target : null, s.setting);
+  renderActions(actionable, shown, s.ack);
+  renderTrend(s.history || [], s.thresholds);
   renderBottom(s, r);
+}
+
+// The look of the whole screen: 'act' (full-screen instruction colour,
+// pulsing frame), 'calm' or 'idle' (dark). See the CSS above body.act.
+function setLook(look, ins) {
+  document.body.className = look;
+  if (look === 'act' && ins) {
+    document.body.style.setProperty('--act-bg', ins.actBg || ins.border);
+    document.body.style.setProperty('--act-fg', ins.actFg || '#fff');
+  }
 }
 
 function renderSetting(setting) {
@@ -416,28 +476,33 @@ async function sendAck(readingId, choice) {
   }
 }
 
-// Recent readings against the two lines the instruction is decided on:
-// below 3 % the destoner comes down, from 8 % it goes up. Values, not bands,
-// so a drift towards a line shows before it crosses it.
+// Recent readings against the two lines the instruction is decided on (from
+// Caliban, inline_settings: below decrease_below the destoner comes down, from
+// increase_at it goes up). Values, not bands, so a drift towards a line shows
+// before it crosses it. Dots are single photos; the line is the median the
+// instruction is actually decided on (Caliban inline_decision).
 //
 // On a clock, not one slot per reading: a stretch with no readings (line
 // stopped, empty chute, no network) shows as a shaded gap with the line broken
 // across it, instead of the readings either side being joined as if the
 // product had gone smoothly from one to the other.
-const TREND_SLOTS = 36;        // the window is this many reading intervals: 3 h at 5 min
+const TREND_MS = 2 * 3600000;  // two hours, whatever the reading interval
 const GAP_INTERVALS = 2.5;     // a late reading or a network retry is not a gap
-function renderTrend(history) {
+function renderTrend(history, thresholds) {
   const svg = $('trend');
+  if (!svg.clientWidth) return;   // hidden in the action look
+  const lo = (thresholds && thresholds.decrease_below != null) ? +thresholds.decrease_below : 3;
+  const hi = (thresholds && thresholds.increase_at != null) ? +thresholds.increase_at : 8;
   // Drawn in the box's own pixels, so the dots stay round however tall the
   // layout leaves it.
-  const W = Math.round(svg.clientWidth) || 680, H = Math.round(svg.clientHeight) || 150, TOP = 16;
+  const W = Math.round(svg.clientWidth) || 680, H = Math.round(svg.clientHeight) || 150, TOP = Math.max(8, hi * 2);
   const AXIS = 16, X0 = 8, X1 = W - 50;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const y = v => H - AXIS - 6 - Math.min(v, TOP) / TOP * (H - AXIS - 12);
 
   const intervalMs = ((state && state.interval_s) || 300) * 1000;
   const gapMs = Math.max(GAP_INTERVALS * intervalMs, 12 * 60000);
-  const now = Date.now(), from = now - TREND_SLOTS * intervalMs;
+  const now = Date.now(), from = now - TREND_MS;
   const x = t => X0 + (t - from) / (now - from) * (X1 - X0);
 
   let out = '';
@@ -458,7 +523,7 @@ function renderTrend(history) {
         text-anchor="middle">sans lecture</text>`;
   }
 
-  for (const [v, label] of [[3, '3 %'], [8, '8 %']]) {
+  for (const [v, label] of [[lo, `${num(lo, lo % 1 ? 1 : 0)} %`], [hi, `${num(hi, hi % 1 ? 1 : 0)} %`]]) {
     out += `<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="#475569" stroke-dasharray="6 6"/>`;
     out += `<text x="${W - 4}" y="${y(v) - 5}" fill="#94a3b8" font-size="15" text-anchor="end">${label}</text>`;
   }
@@ -471,11 +536,19 @@ function renderTrend(history) {
   }
 
   if (pts.length) {
-    // One polyline per run of readings with no gap between them.
+    // Single photos first, small, coloured by the instruction of their time.
+    for (const p of pts) {
+      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
+      out += `<circle cx="${x(p.t)}" cy="${y(p.estimate_pct)}" r="4" fill="${c}" opacity=".8"/>`;
+    }
+    // Then the decision median over them, one polyline per run of readings
+    // with no gap between them. Readings from before the median existed fall
+    // back to their own value.
     let run = [];
+    const dv = p => p.decision_pct != null ? p.decision_pct : p.estimate_pct;
     const flush = () => {
-      if (run.length > 1) out += `<polyline fill="none" stroke="#e2e8f0" stroke-width="3" points="${
-        run.map(p => `${x(p.t)},${y(p.estimate_pct)}`).join(' ')}"/>`;
+      if (run.length > 1) out += `<polyline fill="none" stroke="#f8fafc" stroke-width="4" points="${
+        run.map(p => `${x(p.t)},${y(dv(p))}`).join(' ')}"/>`;
       run = [];
     };
     pts.forEach((p, i) => {
@@ -483,12 +556,8 @@ function renderTrend(history) {
       run.push(p);
     });
     flush();
-    for (const p of pts) {
-      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
-      out += `<circle cx="${x(p.t)}" cy="${y(p.estimate_pct)}" r="6" fill="${c}"/>`;
-    }
   } else {
-    out += `<text x="${(X0 + X1) / 2}" y="${(H - AXIS) / 2 + 6}" fill="#94a3b8" font-size="18" text-anchor="middle">Aucune lecture depuis ${Math.round(TREND_SLOTS * intervalMs / 3600000)} h</text>`;
+    out += `<text x="${(X0 + X1) / 2}" y="${(H - AXIS) / 2 + 6}" fill="#94a3b8" font-size="18" text-anchor="middle">Aucune lecture depuis ${TREND_MS / 3600000} h</text>`;
   }
   svg.innerHTML = out;
 }

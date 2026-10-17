@@ -165,6 +165,46 @@ def summarise_acks(acks):
     return by_reading, setting
 
 
+# How long an unconfirmed instruction stays on screen after the readings have
+# settled back. Long enough that someone passing on a round still sees it; not
+# so long that a change nobody made is still demanded an hour later.
+PENDING_MAX_S = 20 * 60
+
+
+def _actionable(instruction):
+    return isinstance(instruction, str) and (instruction.startswith("increase") or instruction == "decrease")
+
+
+def _age_s(iso_at):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(iso_at)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def shown_reading(state, by_reading, last_ack):
+    """The reading whose instruction is on screen -- the one a tap answers.
+
+    The latest reading when it asks for something. Otherwise the last reading
+    that did (state["pending"], kept by loop.py), as long as nobody has
+    confirmed it or anything since, and it is under PENDING_MAX_S old: the
+    readings settling back is not the same as someone having changed the
+    destoner. Otherwise the latest reading, whatever it says.
+    """
+    latest = state.get("reading") or {}
+    if _actionable(latest.get("instruction")):
+        return latest
+    pending = state.get("pending") or {}
+    if not pending.get("id") or pending["id"] in by_reading:
+        return latest
+    age = _age_s(pending.get("at"))
+    if age is None or age > PENDING_MAX_S:
+        return latest
+    if last_ack and (_age_s(last_ack.get("at")) or 0) <= age:
+        return latest
+    return pending
+
+
 def append_ack(ack):
     with ack_lock:
         with open(ACK_FILE, "a") as f:
@@ -199,9 +239,11 @@ class Handler(server.BaseHTTPRequestHandler):
             if "page=1" in self.path:
                 page_seen = time.monotonic()
             state = read_state()
-            reading = state.get("reading") or {}
-            by_reading, setting = summarise_acks(read_acks())
-            state["ack"] = by_reading.get(reading.get("id")) if reading.get("id") else None
+            acks = read_acks()
+            by_reading, setting = summarise_acks(acks)
+            shown = shown_reading(state, by_reading, acks[-1] if acks else None)
+            state["shown"] = shown
+            state["ack"] = by_reading.get(shown.get("id")) if shown.get("id") else None
             state["setting"] = setting
             state["server"] = {"version": page_version(), "now": now_iso(),
                                "page_seen_s": round(time.monotonic() - page_seen)}
@@ -239,19 +281,23 @@ class Handler(server.BaseHTTPRequestHandler):
         if choice not in ACK_CHOICES:
             return self._json(400, {"error": f"choix inconnu : {choice!r}"})
 
-        # Only the reading on screen can be answered. A tap that lands just as
-        # a new reading replaces the old one would otherwise confirm an
-        # instruction the operator never saw.
+        # Only the instruction on screen can be answered. A tap that lands just
+        # as a new reading replaces it would otherwise confirm an instruction
+        # the operator never saw.
         state = read_state()
-        current = (state.get("reading") or {}).get("id")
-        if not reading_id or reading_id != current:
+        acks = read_acks()
+        shown = shown_reading(state, summarise_acks(acks)[0], acks[-1] if acks else None)
+        if not reading_id or reading_id != shown.get("id"):
             return self._json(409, {"error": "Lecture remplacée — vérifiez l'écran."})
 
-        ack = {"reading_id": reading_id, "choice": choice, "at": now_iso()}
+        # Which instruction this answers travels with the ack: loop.py tells
+        # Caliban, so AUGMENTER again after a confirmed AUGMENTER can alert AQ.
+        ack = {"reading_id": reading_id, "choice": choice, "at": now_iso(),
+               "instruction": shown.get("instruction")}
         if choice == "set":
             # The value comes from the instruction on screen, never from the
             # request: the operator confirms the number they were shown.
-            target = (state.get("reading") or {}).get("target") or {}
+            target = shown.get("target") or {}
             if target.get("value") is None:
                 return self._json(409, {"error": "Aucune valeur à régler pour cette lecture."})
             ack["setting"] = target["value"]
