@@ -342,10 +342,14 @@ function render() {
   $('title').textContent = (!act && actionable ? '✓ ' : !act && shown.instruction === 'hold' && !stale && !trial ? '✓ ' : '') + ins.title;
   // Caliban's labels carry their own % ("8-10%"); strip it and add one, so
   // a label without it still reads right.
-  $('band').textContent = r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
+  // Calibrated (Caliban inline_settings.calibration): the reading in
+  // approximate lab ME%, which is what the thresholds are in. Otherwise the
+  // prompt's own band.
+  $('band').textContent = r.calibrated_pct != null ? `≈ ${num(r.calibrated_pct)} % ME`
+    : r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
   $('decision').textContent = r.decision_pct != null && r.decision_n > 1
-    ? `Médiane ${r.decision_n} lectures : ${num(r.decision_pct)} %` : '';
+    ? `Médiane ${r.decision_n} lectures : ${num(r.decision_pct)} %${r.calibrated_pct != null ? ' ME' : ''}` : '';
 
   let sub = '', steps = [];
   const warming = r.decision_min && r.decision_n != null && r.decision_n < r.decision_min;

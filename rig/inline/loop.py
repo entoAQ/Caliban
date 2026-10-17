@@ -454,6 +454,9 @@ def take_reading(state):
         "decision_pct": reply.get("decision_pct"),
         "decision_n": reply.get("decision_n"),
         "decision_min": reply.get("decision_min"),
+        # On the lab ME% scale through Caliban's calibration line, when set;
+        # the screen shows this rather than the prompt's band.
+        "calibrated_pct": reply.get("calibrated_pct"),
     }
     state["mode"] = reply.get("mode") or "shadow"
     state["thresholds"] = reply.get("thresholds") or state.get("thresholds")
@@ -468,7 +471,11 @@ def take_reading(state):
     if instruction.startswith("increase") or instruction == "decrease":
         state["pending"] = dict(state["reading"])
     history = state.setdefault("history", [])
-    history.append({"id": reading_id, "at": iso(taken), "estimate_pct": reply.get("estimate_pct"),
+    # The trend's dots on the same scale as its decision line and thresholds:
+    # calibrated when Caliban calibrates, the raw value otherwise.
+    shown_pct = reply.get("calibrated_pct")
+    history.append({"id": reading_id, "at": iso(taken),
+                    "estimate_pct": shown_pct if shown_pct is not None else reply.get("estimate_pct"),
                     "decision_pct": reply.get("decision_pct"),
                     "instruction": reply.get("instruction")})
     del history[:-HISTORY_KEEP]

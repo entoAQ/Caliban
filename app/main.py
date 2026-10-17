@@ -3686,6 +3686,17 @@ def inline_settings():
         for key in ("offline_alert", "teams"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
+        # A straight line from the prompt's value to lab ME%, fitted on lots
+        # with lab results ({"slope": 6.11, "intercept": -20.75} for chute-g1
+        # on 2026-10-16). With it, thresholds, the decision and the screen are
+        # all in approximate lab ME%; the raw value is still what is recorded
+        # in estimate_pct, so the line can be refitted on any day's readings.
+        cal = overrides.get("calibration")
+        if isinstance(cal, dict):
+            try:
+                settings["calibration"] = {"slope": float(cal["slope"]), "intercept": float(cal["intercept"])}
+            except (KeyError, TypeError, ValueError):
+                pass
     if settings["mode"] not in ("shadow", "live"):
         settings["mode"] = "shadow"
     # Teams follows live mode unless told otherwise: live with teams=false is
@@ -3750,6 +3761,16 @@ def inline_decision(estimate_pct, prompt_version, settings, since_ack_s=None):
     return round(statistics.median(values), 2), len(values)
 
 
+def inline_calibrated(value, settings):
+    """value on the lab ME% scale through inline_settings.calibration, or
+    unchanged without one. Never below 0: a line fitted on a handful of lots
+    runs negative below its lowest lot, and a negative ME% means nothing."""
+    cal = settings.get("calibration")
+    if value is None or not cal:
+        return value
+    return round(max(0.0, cal["slope"] * float(value) + cal["intercept"]), 2)
+
+
 def inline_instruction(decision_pct, n, settings, last_ack_instruction=None):
     """(instruction, alert, reason) for the inline rig from its decision value.
 
@@ -3789,6 +3810,10 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "decision_pct": decider.get("decision_pct"),
         "decision_n": decider.get("decision_n"),
         "decision_min": settings["decision_min_readings"],
+        # This reading on the lab scale, and the line that put it there (None
+        # without a calibration: the screen then shows the band).
+        "calibrated_pct": decider.get("calibrated_pct"),
+        "calibration": settings.get("calibration"),
         # How the Pi should take the next reading: a burst of group_size photos.
         "group_size": settings["group_size"],
         "group_spacing_s": settings["group_spacing_s"],
@@ -3875,6 +3900,10 @@ async def inline_reading(
         decider = results[0]
         decision_pct, decision_n = inline_decision(
             decider.get("estimate_pct"), decider.get("prompt_version"), settings, since_ack)
+        # The line is straight and rising, so the median of calibrated values
+        # is the calibrated median: calibrating after the median is the same.
+        decision_pct = inline_calibrated(decision_pct, settings)
+        decider["calibrated_pct"] = inline_calibrated(decider.get("estimate_pct"), settings)
         decider["decision_pct"], decider["decision_n"] = decision_pct, decision_n
         instruction, alert, reason = inline_instruction(
             decision_pct, decision_n, settings, last_ack_instruction.strip() or None)
@@ -3947,6 +3976,12 @@ async def inline_reading(
         mesures = dict(parsed.get("measures") or {})
         if len(group_paths) > 1:
             mesures["groupe"] = group_paths
+        if is_decider and settings.get("calibration"):
+            # What the operator was shown, and the line that produced it, so a
+            # later refit can tell readings made under different lines apart.
+            mesures["calibre"] = {"pct": decider.get("calibrated_pct"),
+                                  "decision_pct": decider.get("decision_pct"),
+                                  **settings["calibration"]}
         if mesures:
             row["mesures"] = mesures
         try:
