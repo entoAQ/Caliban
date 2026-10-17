@@ -180,9 +180,10 @@ def judge_flash(state, level):
 
 # --- Caliban ------------------------------------------------------------------
 
-def request_reading(reading_id, paths):
+def request_reading(reading_id, paths, covers=None):
     """POST the photo, or a burst of them (the first as `file`, the rest as
-    `more`, judged together by a group prompt). Returns (reply or None,
+    `more`, judged together by a group prompt), with each photo's product
+    coverage when measured. Returns (reply or None,
     http_error_detail or None). Raises requests.RequestException when
     Caliban could not be reached."""
     paths = [paths] if isinstance(paths, str) else list(paths)
@@ -191,6 +192,8 @@ def request_reading(reading_id, paths):
     # adjustment describe a setting that is gone. Sent as seconds ago on this
     # Pi's own clock, so it is right even while the clock itself is not.
     data = {"reading_id": reading_id}
+    if covers and any(c is not None for c in covers):
+        data["couverture"] = ",".join("" if c is None else f"{c:.3f}" for c in covers)
     acks = screen.read_acks()
     if acks:
         try:
@@ -397,8 +400,27 @@ def take_reading(state):
     # back with every reply): more photos of the same stream a few seconds
     # apart, judged together as one tray-sized sample. A photo that fails, or
     # shows too little product, is left out; the rest still go.
-    paths = [path]
-    for k in range(2, int(state.get("group_size") or 1) + 1):
+    # Flow-sized (group_target_cover set): after group_size photos it keeps
+    # going until the photos' summed product coverage reaches the target, up
+    # to group_max -- so light flow gets more photos and heavy flow fewer, and
+    # every reading is about the same amount of product. A photo whose
+    # coverage cannot be measured ends the extension: the burst then stays
+    # at group_size, as before.
+    paths, covers = [path], [cov]
+    n_min = int(state.get("group_size") or 1)
+    n_max = max(n_min, int(state.get("group_max") or 0))
+    target = float(state.get("group_target_cover") or 0)
+
+    def more_wanted():
+        if len(paths) < n_min:
+            return True
+        if not target or len(paths) >= n_max or any(c is None for c in covers):
+            return False
+        return sum(covers) < target
+
+    k = 1
+    while more_wanted() and k < n_max + 2:
+        k += 1
         time.sleep(int(state.get("group_spacing_s") or 12))
         try:
             p, m_k = take_photo(f"{reading_id}-{k}")
@@ -410,10 +432,14 @@ def take_reading(state):
             log(f"{reading_id}-{k}: product covers {c_k:.0%} -- left out of the burst")
             continue
         paths.append(p)
+        covers.append(c_k)
+    if target:
+        known = [c for c in covers if c is not None]
+        log(f"{reading_id}: burst of {len(paths)}, product cover {sum(known):.2f} (target {target:.2f})")
     state["last_flash_at"] = iso(now_utc())
 
     try:
-        reply, error = request_reading(reading_id, paths)
+        reply, error = request_reading(reading_id, paths, covers)
     except requests.RequestException as e:
         log(f"Caliban unreachable for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, network="down", message="Pas de connexion à Caliban — lecture non analysée")
@@ -463,6 +489,8 @@ def take_reading(state):
     # How to take the next reading. An older Caliban sends neither: one photo.
     state["group_size"] = int(reply.get("group_size") or 1)
     state["group_spacing_s"] = int(reply.get("group_spacing_s") or 12)
+    state["group_max"] = int(reply.get("group_max") or 0)
+    state["group_target_cover"] = float(reply.get("group_target_cover") or 0)
     # An instruction stays on screen until someone confirms it, even after the
     # readings settle back: someone walking past five minutes later still has
     # to see that the destoner was meant to be changed. screen.shown_reading

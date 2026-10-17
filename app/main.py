@@ -3648,6 +3648,16 @@ INLINE_DEFAULTS = {
     # (chute-g1) to judge as one tray-sized sample -- see rig/prompt_chute_g1.sql.
     "group_size": 1,
     "group_spacing_s": 12,
+    # Flow-sized bursts. A fixed burst holds more product when the flow is
+    # heavy, and a group prompt reads a busier sample as a dirtier one
+    # (2026-10-17: clean product read 19% ME at full flow). With
+    # group_target_cover set, the Pi keeps shooting after group_size photos
+    # until the product coverage of the burst, summed over its photos (each
+    # 0-1, measured against the empty chute), reaches the target -- up to
+    # group_max photos. Every reading then judges about the same amount of
+    # product, light flow or heavy. 0 = a fixed burst of group_size.
+    "group_max": 0,
+    "group_target_cover": 0.0,
 }
 
 
@@ -3669,7 +3679,7 @@ def inline_settings():
                 settings[key] = overrides[key].strip()
         for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
                     "decision_readings", "decision_min_readings", "decision_max_age_min",
-                    "group_size", "group_spacing_s"):
+                    "group_size", "group_spacing_s", "group_max"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3678,7 +3688,7 @@ def inline_settings():
         # (chute prompts, uncalibrated: about half the lab ME% on 2026-10-16),
         # so the tray's limits -- and the clamps operator_settings puts on
         # them -- do not carry over. Only their order is enforced, below.
-        for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at"):
+        for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at", "group_target_cover"):
             try:
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3711,6 +3721,8 @@ def inline_settings():
     settings["decision_max_age_min"] = max(5, min(240, settings["decision_max_age_min"]))
     settings["group_size"] = max(1, min(8, settings["group_size"]))
     settings["group_spacing_s"] = max(3, min(60, settings["group_spacing_s"]))
+    settings["group_max"] = max(settings["group_size"], min(8, settings["group_max"]))
+    settings["group_target_cover"] = max(0.0, min(8.0, settings["group_target_cover"]))
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["interval_min"] = max(1, min(60, settings["interval_min"]))
@@ -3817,6 +3829,10 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         # How the Pi should take the next reading: a burst of group_size photos.
         "group_size": settings["group_size"],
         "group_spacing_s": settings["group_spacing_s"],
+        # ...extended up to group_max photos until the burst's summed product
+        # coverage reaches group_target_cover (0 = fixed group_size).
+        "group_max": settings["group_max"],
+        "group_target_cover": settings["group_target_cover"],
         # The lines the instruction is decided against, for the screen's trend.
         "thresholds": {"decrease_below": settings["decrease_below"],
                        "increase_at": settings["increase_at"]},
@@ -3840,6 +3856,10 @@ async def inline_reading(
     # The rest of a burst (inline_settings.group_size > 1): judged with file
     # in one call by a group prompt, as one sample.
     more: list[UploadFile] | None = File(None),
+    # Product coverage of each photo of the burst (0-1, comma-separated, in
+    # order; empty where the Pi could not measure it), as the Pi measured it
+    # against the empty chute. Kept with the reading: it is the flow.
+    couverture: str = Form(""),
     _: bool = Depends(verify_inline_key),
 ):
     """Judge one inline photo and say what the destoner screen should show.
@@ -3879,6 +3899,16 @@ async def inline_reading(
 
     extra = [await f.read() for f in (more or [])]
     group = [contents] + extra
+
+    covers = []
+    for part in (couverture or "").split(",")[:len(group)]:
+        try:
+            v = float(part)
+            covers.append(round(v, 3) if 0.0 <= v <= 1.0 else None)
+        except ValueError:
+            covers.append(None)
+    if not any(c is not None for c in covers):
+        covers = []
 
     # A black, blank or blown-out frame is refused with a 422 before any call
     # is spent -- on this rig that usually means the flash did not fire.
@@ -3976,6 +4006,11 @@ async def inline_reading(
         mesures = dict(parsed.get("measures") or {})
         if len(group_paths) > 1:
             mesures["groupe"] = group_paths
+        if covers:
+            mesures["couverture"] = covers
+            known = [c for c in covers if c is not None]
+            if known:
+                mesures["couverture_totale"] = round(sum(known), 3)
         if is_decider and settings.get("calibration"):
             # What the operator was shown, and the line that produced it, so a
             # later refit can tell readings made under different lines apart.
