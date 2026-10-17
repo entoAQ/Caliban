@@ -1329,7 +1329,10 @@ def _attach_plastic(result, runs):
 # band: an anchored 0-100 frass score and the MEO share of the product area as
 # numbers, clump counts by size and the amount of fine material as
 # a word each, and how thick the stream is. Each word maps to an ordinal score
-# so the rotations can be averaged; None means the field is a number.
+# so the rotations can be averaged; a (low, high) pair means the field is a
+# number in that range. A group prompt (rig/prompt_chute_g1.sql) adds counts
+# over its whole group of photos -- larvae and clumps by size, NB_* -- which,
+# unlike bands, add up across groups into one clumps-per-larva ratio.
 #
 # The measures make the answer longer, hence BAND_MAX_TOKENS at 300 rather than
 # the 200 every band call used before. A cap only cuts; an answer that already
@@ -1337,8 +1340,12 @@ def _attach_plastic(result, runs):
 BAND_MAX_TOKENS = 300
 
 MEASURE_FIELDS = {
-    "SCORE_MEO": None,
-    "AIRE_MEO": None,
+    "SCORE_MEO": (0.0, 100.0),
+    "AIRE_MEO": (0.0, 100.0),
+    "NB_LARVES": (0.0, 50000.0),
+    "NB_PETITS": (0.0, 5000.0),
+    "NB_MOYENS": (0.0, 5000.0),
+    "NB_GROS": (0.0, 5000.0),
     "AMAS_PETITS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
     "AMAS_MOYENS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
     "AMAS_GROS": {"aucun": 0, "peu": 1, "plusieurs": 2, "beaucoup": 3},
@@ -1351,12 +1358,18 @@ def _measure_value(field, raw):
     """One rotation's answer to a measure as a number, or None if unreadable."""
     text = (raw or "").strip().strip("[]").strip()
     scale = MEASURE_FIELDS[field]
-    if scale is None:
+    if isinstance(scale, tuple):
+        low, high = scale
+        if high > 100:
+            # A count: "1 200", "1,200" and "1.200" are all twelve hundred,
+            # never 1.2 -- the prompt asks for digits only, but a model
+            # writing French or English thousands is not wrong, just formatted.
+            text = re.sub(r"(?<=\d)[\s,.  ](?=\d{3}(?!\d))", "", text)
         m = re.search(r"\d+(?:[.,]\d+)?", text)
         if not m:
             return None
         value = float(m.group(0).replace(",", "."))
-        return value if 0.0 <= value <= 100.0 else None
+        return value if low <= value <= high else None
     head = text.split()[0].lower().strip(" .,;:-—") if text else ""
     return scale.get(head)
 
@@ -2921,9 +2934,19 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
     # rotations carried a little encoding difference along with it.
     from PIL import Image
 
-    original = Image.open(io.BytesIO(contents)).convert("RGB")
-    if max(original.size) > MODEL_MAX_EDGE:
-        original.thumbnail((MODEL_MAX_EDGE, MODEL_MAX_EDGE), Image.LANCZOS)
+    # Several photos judged in ONE call (a group prompt, e.g. chute-g1): each
+    # one chute photo holds a few hundred larvae, a third of a tray, so a
+    # group of consecutive photos is what makes a tray-sized sample. They go
+    # as separate images, not a mosaic, so none is shrunk to fit beside the
+    # others. A single photo, as every other caller sends, is a group of one.
+    group = contents if isinstance(contents, (list, tuple)) else [contents]
+    originals = []
+    for raw in group:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        if max(img.size) > MODEL_MAX_EDGE:
+            img.thumbnail((MODEL_MAX_EDGE, MODEL_MAX_EDGE), Image.LANCZOS)
+        originals.append(img)
+    original = originals[0]
 
     # Refused rather than analysed: nothing recorded, no Azure calls spent, and
     # the operator screen shows an error, which never reads as an instruction.
@@ -2931,10 +2954,11 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
     # can be deliberate.
     photo_mean, photo_std = photo_stats(original)
     if refuse_unusable_as:
-        why = unusable_photo(original)
-        if why:
-            print(f"[capture refused] {refuse_unusable_as}: {why}")
-            raise HTTPException(status_code=422, detail=why)
+        for img in originals:
+            why = unusable_photo(img)
+            if why:
+                print(f"[capture refused] {refuse_unusable_as}: {why}")
+                raise HTTPException(status_code=422, detail=why)
 
     def _encode(img):
         buf = io.BytesIO()
@@ -2946,12 +2970,12 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
     # is cut once, before rotating, so every rotation shows the same region.
     rotated_b64 = {}
 
-    def _view(variant_label, angle, mirror):
+    def _view(variant_label, angle, mirror, index=0):
         crop = prompt_crop(variant_label)
         ck = json.dumps(crop, sort_keys=True) if crop else ""
-        k = (ck, _key(angle, mirror))
+        k = (ck, _key(angle, mirror), index)
         if k not in rotated_b64:
-            img = original
+            img = originals[index]
             if crop:
                 w, h = img.size
                 img = img.crop((round(w * crop["left"]), round(h * crop["top"]),
@@ -3001,7 +3025,15 @@ async def analyse_band_photo(contents, media_type, requested_variants, repeats, 
                 content.append({"type": "text", "text": label + " :"})
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ref['b64']}"}})
             content.append({"type": "text", "text": "\n\nMaintenant, voici la photo à évaluer :"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{_view(variant_label, angle, mirror)}"}})
+        if len(originals) == 1:
+            content.append({"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{_view(variant_label, angle, mirror)}"}})
+        else:
+            # Numbered, so a per-photo answer can say which photo it means.
+            # Every photo of the group gets the same rotation in a given call.
+            for i in range(len(originals)):
+                content.append({"type": "text", "text": f"Photo {i + 1} :"})
+                content.append({"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{_view(variant_label, angle, mirror, i)}"}})
 
         start = time.time()
         if model_entry is DEFAULT_VISION_MODEL:
@@ -3205,6 +3237,11 @@ async def azure_band_test(
     record: bool = Form(True),
     # A label from VISION_MODELS, for re-scores only. Empty is the default model.
     model: str = Form(""),
+    # The rest of a group, for a group prompt (chute-g1): file is the first
+    # photo, these follow it in order, and all of them are judged in one call.
+    # Re-scores only -- a group is not one sample, so it is never recorded as
+    # an estimate.
+    more: list[UploadFile] | None = File(None),
     operator: dict = Depends(require_capture_role()),
 ):
     # An operator gets no say in how the analysis runs. Whatever the browser
@@ -3286,9 +3323,15 @@ async def azure_band_test(
     else:
         raise HTTPException(status_code=400, detail="Aucune image fournie.")
     b64_image = base64.b64encode(contents).decode("utf-8")
+    group = [contents]
+    if more:
+        if record or is_operator or command_id:
+            raise HTTPException(status_code=400,
+                                detail="Plusieurs photos : re-notation seulement (record=false, fichiers envoyés).")
+        group += [await f.read() for f in more]
 
     parsed_results, escalated, photo_mean, photo_std = await analyse_band_photo(
-        contents, media_type, requested_variants, repeats, model_entry,
+        group if len(group) > 1 else contents, media_type, requested_variants, repeats, model_entry,
         escalate_settings=settings if is_operator else None,
         refuse_unusable_as=command_id or None,
     )
