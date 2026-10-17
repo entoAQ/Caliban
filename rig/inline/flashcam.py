@@ -117,6 +117,10 @@ DEFAULTS = {
     "coverage_grid": [32, 24],
     "coverage_diff": 25.0,
     "min_coverage": 0.30,
+    # How much product is in the photo, pixel by pixel (product_share): the
+    # flow, for sizing a burst. Crop as the chute prompts' (top, left share).
+    "product_crop": [0.22, 0.10],
+    "product_min_sat": 0.28,
     # During a stop, fire the flash this often anyway: the TT520III falls
     # into a sleep only its button wakes after ~10 min without a trigger.
     "keepalive_s": 480,
@@ -230,6 +234,24 @@ def coverage(array, settings):
         tiles = tiles / level
     diff = np.abs(tiles - ref).mean(axis=2)
     return round(float((diff > settings["coverage_diff"]).mean()), 3)
+
+
+def product_share(array, settings):
+    """Share of the analysed view (0-1) that is product -- larvae and frass --
+    pixel by pixel: warm, saturated colour, where the chute and the shadows
+    are grey to blue. Over the same crop the chute prompts look at. It
+    measures the flow: coverage() works on ~6 mm tiles, and at normal flow
+    almost every tile is touched by a larva or its shadow (0.93 on every photo,
+    2026-10-17), while this tracked the model's own larva count at r = 0.95 and
+    ran 0.02 to 0.44 per photo the same afternoon. No reference needed."""
+    import numpy as np
+    top, left = settings["product_crop"]
+    h, w = array.shape[:2]
+    a = array[int(h * top)::4, int(w * left)::4, ::-1].astype(np.float32)   # BGR -> RGB
+    mx, mn = a.max(axis=2), a.min(axis=2)
+    sat = (mx - mn) / np.maximum(mx, 1)
+    prod = (sat > settings["product_min_sat"]) & (a[..., 0] > a[..., 2] + 15) & (mx > 50)
+    return round(float(prod.mean()), 3)
 
 
 def flash_level(array, settings):
@@ -437,6 +459,8 @@ def capture(path, settings=None, log=print, keep=None):
                         # reference exists; the loop skips sending below
                         # min_coverage.
                         "coverage": coverage(array, s),
+                        # Share of the analysed view that is product: the flow.
+                        "product": product_share(array, s),
                         # Flash strength against the reference: ~1.0 healthy,
                         # falling as the batteries tire.
                         "flash_level": flash_level(array, s),

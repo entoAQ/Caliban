@@ -401,12 +401,13 @@ def take_reading(state):
     # apart, judged together as one tray-sized sample. A photo that fails, or
     # shows too little product, is left out; the rest still go.
     # Flow-sized (group_target_cover set): after group_size photos it keeps
-    # going until the photos' summed product coverage reaches the target, up
-    # to group_max -- so light flow gets more photos and heavy flow fewer, and
-    # every reading is about the same amount of product. A photo whose
-    # coverage cannot be measured ends the extension: the burst then stays
-    # at group_size, as before.
-    paths, covers = [path], [cov]
+    # going until the photos' summed product share (flashcam.product_share,
+    # pixel by pixel -- not the tile coverage, which saturates at normal flow)
+    # reaches the target, up to group_max -- so light flow gets more photos and
+    # heavy flow fewer, and every reading is about the same amount of product.
+    # A photo whose share cannot be measured ends the extension: the burst
+    # then stays at group_size, as before.
+    paths, covers = [path], [measured.get("product")]
     n_min = int(state.get("group_size") or 1)
     n_max = max(n_min, int(state.get("group_max") or 0))
     target = float(state.get("group_target_cover") or 0)
@@ -432,10 +433,10 @@ def take_reading(state):
             log(f"{reading_id}-{k}: product covers {c_k:.0%} -- left out of the burst")
             continue
         paths.append(p)
-        covers.append(c_k)
+        covers.append(m_k.get("product"))
     if target:
         known = [c for c in covers if c is not None]
-        log(f"{reading_id}: burst of {len(paths)}, product cover {sum(known):.2f} (target {target:.2f})")
+        log(f"{reading_id}: burst of {len(paths)}, product {sum(known):.2f} (target {target:.2f})")
     state["last_flash_at"] = iso(now_utc())
 
     try:
