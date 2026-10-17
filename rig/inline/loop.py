@@ -180,9 +180,12 @@ def judge_flash(state, level):
 
 # --- Caliban ------------------------------------------------------------------
 
-def request_reading(reading_id, path):
-    """POST the photo. Returns (reply or None, http_error_detail or None).
-    Raises requests.RequestException when Caliban could not be reached."""
+def request_reading(reading_id, paths):
+    """POST the photo, or a burst of them (the first as `file`, the rest as
+    `more`, judged together by a group prompt). Returns (reply or None,
+    http_error_detail or None). Raises requests.RequestException when
+    Caliban could not be reached."""
+    paths = [paths] if isinstance(paths, str) else list(paths)
     # The operator's last confirmation, so Caliban starts its decision window
     # after it (app/main.py inline_decision): the readings from before an
     # adjustment describe a setting that is gone. Sent as seconds ago on this
@@ -196,14 +199,20 @@ def request_reading(reading_id, path):
             data["last_ack_instruction"] = acks[-1].get("instruction") or ""
         except (KeyError, TypeError, ValueError):
             pass
-    with open(path, "rb") as f:
+    handles = [open(p, "rb") for p in paths]
+    try:
+        files = [("file" if i == 0 else "more", (os.path.basename(p), h, "image/jpeg"))
+                 for i, (p, h) in enumerate(zip(paths, handles))]
         resp = requests.post(
             f"{CALIBAN_URL}/inline/readings",
             headers=headers(),
-            files={"file": (os.path.basename(path), f, "image/jpeg")},
+            files=files,
             data=data,
             timeout=REQUEST_TIMEOUT,
         )
+    finally:
+        for h in handles:
+            h.close()
     if resp.ok:
         return resp.json(), None
     try:
@@ -384,8 +393,27 @@ def take_reading(state):
         set_health(state, camera="ok")
     level = measured.get("flash_level")
 
+    # A burst for a group prompt (Caliban inline_settings.group_size, sent
+    # back with every reply): more photos of the same stream a few seconds
+    # apart, judged together as one tray-sized sample. A photo that fails, or
+    # shows too little product, is left out; the rest still go.
+    paths = [path]
+    for k in range(2, int(state.get("group_size") or 1) + 1):
+        time.sleep(int(state.get("group_spacing_s") or 12))
+        try:
+            p, m_k = take_photo(f"{reading_id}-{k}")
+        except Exception as e:
+            log(f"{reading_id}-{k}: burst photo failed: {type(e).__name__}: {e}")
+            continue
+        c_k = m_k.get("coverage")
+        if c_k is not None and c_k < cam_settings["min_coverage"]:
+            log(f"{reading_id}-{k}: product covers {c_k:.0%} -- left out of the burst")
+            continue
+        paths.append(p)
+    state["last_flash_at"] = iso(now_utc())
+
     try:
-        reply, error = request_reading(reading_id, path)
+        reply, error = request_reading(reading_id, paths)
     except requests.RequestException as e:
         log(f"Caliban unreachable for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, network="down", message="Pas de connexion à Caliban — lecture non analysée")
@@ -429,6 +457,9 @@ def take_reading(state):
     }
     state["mode"] = reply.get("mode") or "shadow"
     state["thresholds"] = reply.get("thresholds") or state.get("thresholds")
+    # How to take the next reading. An older Caliban sends neither: one photo.
+    state["group_size"] = int(reply.get("group_size") or 1)
+    state["group_spacing_s"] = int(reply.get("group_spacing_s") or 12)
     # An instruction stays on screen until someone confirms it, even after the
     # readings settle back: someone walking past five minutes later still has
     # to see that the destoner was meant to be changed. screen.shown_reading

@@ -3643,6 +3643,11 @@ INLINE_DEFAULTS = {
     "decision_readings": 1,
     "decision_min_readings": 1,
     "decision_max_age_min": 30,
+    # Photos per reading. Above 1 the Pi takes a burst of group_size photos,
+    # group_spacing_s apart, and sends them together for a group prompt
+    # (chute-g1) to judge as one tray-sized sample -- see rig/prompt_chute_g1.sql.
+    "group_size": 1,
+    "group_spacing_s": 12,
 }
 
 
@@ -3663,7 +3668,8 @@ def inline_settings():
             if isinstance(overrides.get(key), str):
                 settings[key] = overrides[key].strip()
         for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
-                    "decision_readings", "decision_min_readings", "decision_max_age_min"):
+                    "decision_readings", "decision_min_readings", "decision_max_age_min",
+                    "group_size", "group_spacing_s"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3692,6 +3698,8 @@ def inline_settings():
     settings["decision_readings"] = max(1, min(30, settings["decision_readings"]))
     settings["decision_min_readings"] = max(1, min(settings["decision_readings"], settings["decision_min_readings"]))
     settings["decision_max_age_min"] = max(5, min(240, settings["decision_max_age_min"]))
+    settings["group_size"] = max(1, min(8, settings["group_size"]))
+    settings["group_spacing_s"] = max(3, min(60, settings["group_spacing_s"]))
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["interval_min"] = max(1, min(60, settings["interval_min"]))
@@ -3781,6 +3789,9 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "decision_pct": decider.get("decision_pct"),
         "decision_n": decider.get("decision_n"),
         "decision_min": settings["decision_min_readings"],
+        # How the Pi should take the next reading: a burst of group_size photos.
+        "group_size": settings["group_size"],
+        "group_spacing_s": settings["group_spacing_s"],
         # The lines the instruction is decided against, for the screen's trend.
         "thresholds": {"decrease_below": settings["decrease_below"],
                        "increase_at": settings["increase_at"]},
@@ -3801,6 +3812,9 @@ async def inline_reading(
     # neither and gets the window without a restart.
     since_ack_s: str = Form(""),
     last_ack_instruction: str = Form(""),
+    # The rest of a burst (inline_settings.group_size > 1): judged with file
+    # in one call by a group prompt, as one sample.
+    more: list[UploadFile] | None = File(None),
     _: bool = Depends(verify_inline_key),
 ):
     """Judge one inline photo and say what the destoner screen should show.
@@ -3838,10 +3852,13 @@ async def inline_reading(
     if any(v not in registry for v in requested_variants):
         raise HTTPException(status_code=500, detail=f"Prompt inconnu : {requested_variants}.")
 
+    extra = [await f.read() for f in (more or [])]
+    group = [contents] + extra
+
     # A black, blank or blown-out frame is refused with a 422 before any call
     # is spent -- on this rig that usually means the flash did not fire.
     results, escalated, photo_mean, photo_std = await analyse_band_photo(
-        contents, media_type, requested_variants, settings["repeats"], DEFAULT_VISION_MODEL,
+        group if extra else contents, media_type, requested_variants, settings["repeats"], DEFAULT_VISION_MODEL,
         escalate_settings=settings, refuse_unusable_as=reading_id,
     )
 
@@ -3874,6 +3891,17 @@ async def inline_reading(
     except Exception as e:
         storage_path = None
         print(f"[inline photo upload failed] {reading_id}: {type(e).__name__}: {e}")
+    # The rest of a burst, beside the first: inline/<id>-2.jpg and so on, so the
+    # whole sample can be looked at and re-scored later.
+    group_paths = [storage_path] if storage_path else []
+    for k, raw in enumerate(extra, start=2):
+        path_k = f"inline/{reading_id}-{k}.jpg"
+        try:
+            supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
+                path_k, review_copy(raw), file_options={"content-type": "image/jpeg", "upsert": "true"})
+            group_paths.append(path_k)
+        except Exception as e:
+            print(f"[inline photo upload failed] {reading_id}-{k}: {type(e).__name__}: {e}")
 
     recorded_id = None
     for parsed in results:
@@ -3913,8 +3941,23 @@ async def inline_reading(
                 "plastic_desc": parsed.get("plastic_desc"),
             } if parsed.get("plastic_votes") is not None else {}),
         }
+        # A measuring or group prompt's answers, and a burst's photos
+        # (rig/inline/inline_mesures.sql). Saved without them rather than not
+        # at all if that column is not there yet.
+        mesures = dict(parsed.get("measures") or {})
+        if len(group_paths) > 1:
+            mesures["groupe"] = group_paths
+        if mesures:
+            row["mesures"] = mesures
         try:
-            resp = supabase.table("vision_band_estimates").insert(row).execute()
+            try:
+                resp = supabase.table("vision_band_estimates").insert(row).execute()
+            except Exception as e:
+                if "mesures" not in row or "mesures" not in str(e):
+                    raise
+                print(f"[inline recording] column mesures missing -- saving without it")
+                row.pop("mesures")
+                resp = supabase.table("vision_band_estimates").insert(row).execute()
             if is_decider and resp.data:
                 recorded_id = resp.data[0].get("id")
         except Exception as e:
