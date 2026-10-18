@@ -35,6 +35,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
     python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
     python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
+    python3 flashcam.py focus-live      # HQ camera: flash photos + crispness at http://<pi>:8000/ while turning the ring
     python3 flashcam.py sweep           # measure the firing window for this camera and save it
     python3 flashcam.py daylight        # colour from the camera's own calibration at flash colour
     python3 flashcam.py reference       # flash photo of the EMPTY chute, for the product check
@@ -566,6 +567,108 @@ def focus_shots(positions=(0.0, 2.0, 3.5, 5.0, 8.0)):
     print(f"compare the crops in {out_dir} at 100% zoom")
 
 
+def _edge_crispness(array, region=(0.10, 0.22, 1.0, 1.0)):
+    """Fine-scale edge energy over coarse-scale, on the measured crop. Blur
+    takes the fine scale first, so this rises with focus; how much product is
+    in view changes both scales alike, so -- unlike _sharpness -- it stays
+    comparable between photos of a moving stream."""
+    import numpy as np
+    h, w = array.shape[:2]
+    x0, y0, x1, y1 = region
+    g = array[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)].mean(axis=2)
+
+    def halve(a):
+        a = a[:a.shape[0] // 2 * 2, :a.shape[1] // 2 * 2]
+        return (a[0::2, 0::2] + a[1::2, 0::2] + a[0::2, 1::2] + a[1::2, 1::2]) / 4
+
+    def lap(a):
+        return 4 * a[1:-1, 1:-1] - a[:-2, 1:-1] - a[2:, 1:-1] - a[1:-1, :-2] - a[1:-1, 2:]
+    # Pixel-scale detail is mostly sensor noise, the same at any focus: start
+    # one scale up, where the edges of larvae and clumps are.
+    half = halve(g)
+    return float(np.var(lap(half)) / max(np.var(lap(halve(half))), 1e-6))
+
+
+def focus_live(port=8000, every_s=2.0):
+    """Focus the HQ camera's lens ring by hand on the running line.
+
+    A room-light live view smears the falling product, so this fires the
+    flash every few seconds instead and serves the latest frozen frame -- a
+    100% crop of the middle -- with a crispness score, at
+    http://<pi>:<port>/. Turn the ring a little, watch a few scores, keep the
+    position where they run highest. The score moves with what happens to be
+    in view, so go by the run of scores (the median of the last five), not
+    one. Stop the loop first (sudo systemctl stop caliban-inline); Ctrl+C
+    to end.
+    """
+    import io
+    import statistics
+    import threading
+    from http import server
+    from PIL import Image
+
+    s = dict(load_settings(), attempts=3, recharge_s=1.5)
+    path = os.path.join(HOME, "captures", "inline", "FOCUS.jpg")
+    latest = {"jpg": b"", "text": "starting..."}
+    lock = threading.Lock()
+
+    class Handler(server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith("/frame.jpg"):
+                with lock:
+                    body, kind = latest["jpg"], "image/jpeg"
+            else:
+                with lock:
+                    text = latest["text"]
+                body = (f"<!doctype html><meta http-equiv=refresh content=1>"
+                        f"<body style='margin:0;background:#111;color:#eee;font:20px sans-serif;text-align:center'>"
+                        f"<p>{text}</p><img src='frame.jpg?{time.time()}' style='max-width:100%'>").encode()
+                kind = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", kind)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_):
+            pass
+
+    httpd = server.ThreadingHTTPServer(("", port), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    print(f"focus view on http://<this pi>:{port}/  (Ctrl+C to stop)", flush=True)
+
+    scores, best = [], 0.0
+    try:
+        while True:
+            keep = {}
+            try:
+                capture(path, s, log=lambda *_: None, keep=keep)
+            except (FlashNotFired, FlashTiming) as e:
+                print(f"  {e}", flush=True)
+                time.sleep(every_s)
+                continue
+            a = keep["array"]
+            v = 100 * _edge_crispness(a)
+            scores = (scores + [v])[-5:]
+            run = statistics.median(scores)
+            if len(scores) == 5:
+                best = max(best, run)
+            h, w = a.shape[:2]
+            buf = io.BytesIO()
+            Image.fromarray(a[h // 2 - 250:h // 2 + 250, w // 2 - 400:w // 2 + 400, ::-1].copy()).save(
+                buf, "JPEG", quality=92)
+            text = f"crispness {v:.1f} &nbsp; last 5: <b>{run:.1f}</b> &nbsp; best run so far {best:.1f}"
+            with lock:
+                latest["jpg"], latest["text"] = buf.getvalue(), text
+            print(f"  crispness {v:5.1f}   last 5 {run:5.1f}   best {best:5.1f}", flush=True)
+            gc.collect()
+            time.sleep(every_s)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.shutdown()
+
+
 def sweep():
     """Measure where the flash must land on this camera, and save it.
 
@@ -724,9 +827,11 @@ if __name__ == "__main__":
             time.sleep(2)
     elif len(sys.argv) > 1 and sys.argv[1] == "daylight":
         daylight(int(sys.argv[2]) if len(sys.argv) > 2 else 5600)
+    elif len(sys.argv) > 1 and sys.argv[1] == "focus-live":
+        focus_live()
     elif len(sys.argv) > 1 and sys.argv[1] in ("focus", "focus-shots") and load_settings()["camera"] == "imx477":
         print("The HQ camera has no focus motor: focus it by hand on the lens ring "
-              "(live view: python3 ~/caliban/rig/preview.py).")
+              "(under the flash, on the running line: python3 flashcam.py focus-live).")
     elif len(sys.argv) > 1 and sys.argv[1] == "focus":
         focus()
     elif len(sys.argv) > 1 and sys.argv[1] == "focus-shots":
