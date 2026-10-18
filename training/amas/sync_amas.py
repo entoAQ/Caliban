@@ -32,6 +32,8 @@ AMAS = ROOT / "amas"
 # labels still train the model, but its lots are not used for calibration
 # or the lot checks, and its unlabelled tiles are left out of the queue.
 FIRST_LOT = "20261016"
+# Lots never to be compared with the lab or labelled (Tim, 2026-10-18).
+EXCLUDED_LOTS = {"20261018-BB04"}
 PROJECT_TITLE = "Chute en ligne - MEO"
 
 INSTRUCTIONS = """<p>Each task is one tile, a sixth of a photo. Draw a box around every piece of <b>MEO</b> in the tile, and nothing else. A piece cut by the tile edge: box the part you can see.</p>

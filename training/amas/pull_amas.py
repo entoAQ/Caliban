@@ -116,12 +116,13 @@ def main():
     AMAS.mkdir(parents=True, exist_ok=True)
     index = json.loads(INDEX.read_text(encoding="utf-8")) if INDEX.exists() else {}
     prev = None
+    from sync_amas import EXCLUDED_LOTS
     for lot in lots:
         close = ts(lot["packaged_at"])
         start, prev = max(prev or close - WINDOW, close - WINDOW) - LAG, close
         wt = latest.get((lot["id"], tests["me_organic_wt"]))
         den = latest.get((lot["id"], tests["bulk_density"]))
-        if wt is None or not den:
+        if wt is None or not den or lot["lot_number"] in EXCLUDED_LOTS:
             continue
         lab = round(100 * wt / den, 2)
 
