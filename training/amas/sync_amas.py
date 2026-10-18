@@ -123,7 +123,8 @@ def main():
             break
         page += 1
     tiles_index = json.loads((AMAS / "tiles" / "tiles.json").read_text(encoding="utf-8"))
-    early_tiles = {n for n, d in tiles_index.items() if d["lot_number"] < FIRST_LOT}
+    early_tiles = {n for n, d in tiles_index.items()
+                   if d["lot_number"] < FIRST_LOT and not d.get("training_only")}
 
     # Whole-photo tasks from before the tiles: their boxes are carried over
     # to the photo's tiles, then the whole-photo tasks are removed.
@@ -155,7 +156,7 @@ def main():
     new = [{"data": {"image": f"/data/local-files/?d=amas/tiles/{d['tile']}", "tile": d["tile"],
                      "photo": d["photo"], "reading_id": d["reading_id"], "taken_at": d["taken_at"]}}
            for d in order if d["tile"] not in have and (AMAS / "tiles" / d["tile"]).exists()
-           and d["lot_number"] >= FIRST_LOT]
+           and (d["lot_number"] >= FIRST_LOT or d.get("training_only"))]
     for task in new:
         if task["data"]["tile"] in carried:
             task["annotations"] = [{"result": carried[task["data"]["tile"]]}]

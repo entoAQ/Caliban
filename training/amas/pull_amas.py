@@ -26,6 +26,7 @@ product share.
 Usage:
     python pull_amas.py                  # new lots since the refocus, 19 photos each
     python pull_amas.py --per-lot 25
+    python pull_amas.py --training 50    # 50 photos since the refocus, no lab needed
 """
 
 import argparse
@@ -73,11 +74,36 @@ def product_share(path):
     return round(float(((sat > 0.28) & (r > b + 15) & (mx > 50)).mean()), 4)
 
 
+def pick(photos, n, url, auth):
+    """From (reading, path, taken_at) photos: measure the product share of up
+    to 3 x n evenly spaced ones, drop empty-chute ones and keep n spread
+    evenly from lightest to heaviest flow. Returns (measured, kept)."""
+    n_cand = min(len(photos), 3 * n)
+    cands = [photos[int((i + .5) * len(photos) / n_cand)] for i in range(n_cand)]
+    measured = []
+    for rid, path, taken in cands:
+        dest = AMAS / Path(path).name
+        if not dest.exists():
+            try:
+                dest.write_bytes(http("GET", f"{url}/storage/v1/object/{BUCKET}/{path}", auth, raw=True))
+            except urllib.error.HTTPError:
+                continue   # review copy already gone
+        share = product_share(dest)
+        if share is not None and share >= EMPTY:
+            measured.append((share, dest.name, rid, taken))
+    measured.sort()
+    k = min(len(measured), n)
+    return measured, [measured[int((i + .5) * len(measured) / k)] for i in range(k)]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--per-lot", type=int, default=19)
     ap.add_argument("--since", default=REFOCUSED,
                     help="only photos from this time on, UTC (default: the lens refocus)")
+    ap.add_argument("--training", type=int, default=0, metavar="N",
+                    help="instead: N photos since --since whatever their lot, lab result or not, "
+                         "for training only (spread across flow)")
     args = ap.parse_args()
 
     url = os.environ["SUPABASE_URL"].rstrip("/")
@@ -115,6 +141,21 @@ def main():
 
     AMAS.mkdir(parents=True, exist_ok=True)
     index = json.loads(INDEX.read_text(encoding="utf-8")) if INDEX.exists() else {}
+    if args.training:
+        # Training does not need the lab: a box is right or wrong whatever the
+        # lot. No lot and no lab, so these never enter a lot check.
+        photos = [(r["lot_number_text"], p, r["created_at"]) for r in rows
+                  for p in (r.get("mesures") or {}).get("groupe") or [r["storage_path"]]]
+        photos = [ph for ph in photos if Path(ph[1]).name not in index]
+        measured, keep = pick(photos, args.training, url, auth)
+        for share, name, rid, taken in keep:
+            index[name] = {"photo": name, "reading_id": rid, "taken_at": taken,
+                           "lot_number": "", "lab_me_pct": None, "product_share": share, "training_only": True}
+        INDEX.write_text(json.dumps(index, indent=1, ensure_ascii=False), encoding="utf-8")
+        print(f"training only: {len(photos)} photos since {args.since}, {len(measured)} measured, "
+              f"{len(keep)} kept (flow {keep[0][0] if keep else 0:.2f}-{keep[-1][0] if keep else 0:.2f})")
+        return
+
     prev = None
     from sync_amas import EXCLUDED_LOTS
     for lot in lots:
@@ -134,28 +175,12 @@ def main():
         if not photos:
             continue
 
-        n_cand = min(len(photos), 3 * args.per_lot)
-        cands = [photos[int((i + .5) * len(photos) / n_cand)] for i in range(n_cand)]
-        measured = []
-        for rid, path, taken in cands:
-            dest = AMAS / Path(path).name
-            if not dest.exists():
-                try:
-                    dest.write_bytes(http("GET", f"{url}/storage/v1/object/{BUCKET}/{path}", auth, raw=True))
-                except urllib.error.HTTPError:
-                    continue   # review copy already gone
-            share = product_share(dest)
-            if share is not None and share >= EMPTY:
-                measured.append((share, dest.name, rid, taken))
-
-        measured.sort()
-        n = min(len(measured), args.per_lot)
-        keep = [measured[int((i + .5) * len(measured) / n)] for i in range(n)]
+        measured, keep = pick(photos, args.per_lot, url, auth)
         for share, name, rid, taken in keep:
             index[name] = {"photo": name, "reading_id": rid, "taken_at": taken,
                            "lot_number": lot["lot_number"], "lab_me_pct": lab, "product_share": share}
         print(f"{lot['lot_number']}  lab {lab:5.2f}  {len(photos):4d} photos in window, "
-              f"{len(measured):3d} measured, {n:2d} kept  (flow {keep[0][0] if keep else 0:.2f}"
+              f"{len(measured):3d} measured, {len(keep):2d} kept  (flow {keep[0][0] if keep else 0:.2f}"
               f"-{keep[-1][0] if keep else 0:.2f})", flush=True)
 
     INDEX.write_text(json.dumps(index, indent=1, ensure_ascii=False), encoding="utf-8")

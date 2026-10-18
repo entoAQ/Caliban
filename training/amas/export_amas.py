@@ -65,7 +65,7 @@ def main():
         # Lots before FIRST_LOT: their boxes are as good as any for training,
         # only their lot assignment is not trusted -- so train, never val,
         # and left out of the per-lot check.
-        early = d["lot_number"] < FIRST_LOT
+        early = d["lot_number"] < FIRST_LOT or d.get("lab_me_pct") is None
         if d["lot_number"] in EXCLUDED_LOTS:
             continue
         boxes = [r for r in res if r["type"] == "rectanglelabels"]
