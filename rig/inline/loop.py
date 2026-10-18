@@ -180,7 +180,31 @@ def judge_flash(state, level):
 
 # --- Caliban ------------------------------------------------------------------
 
-def request_reading(reading_id, paths, covers=None):
+def detect_burst(paths):
+    """The MEO detector's numbers for each photo of a burst (meo_detect.py),
+    as Caliban's detecteur field wants them, or None when the detector cannot
+    run here (onnxruntime or the model missing) or fails -- Caliban then
+    decides as its settings say (prompts, or a refusal)."""
+    global _detector_missing
+    if _detector_missing:
+        return None
+    try:
+        import meo_detect
+        photos = [meo_detect.measure(p) for p in paths]
+    except ImportError as e:
+        log(f"MEO detector not available ({e}): readings go without it")
+        _detector_missing = True
+        return None
+    except Exception as e:
+        log(f"MEO detector failed: {type(e).__name__}: {e}")
+        return None
+    return {"version": meo_detect.version(), "photos": photos}
+
+
+_detector_missing = False
+
+
+def request_reading(reading_id, paths, covers=None, det=None):
     """POST the photo, or a burst of them (the first as `file`, the rest as
     `more`, judged together by a group prompt), with each photo's product
     coverage when measured. Returns (reply or None,
@@ -192,6 +216,8 @@ def request_reading(reading_id, paths, covers=None):
     # adjustment describe a setting that is gone. Sent as seconds ago on this
     # Pi's own clock, so it is right even while the clock itself is not.
     data = {"reading_id": reading_id}
+    if det:
+        data["detecteur"] = json.dumps(det)
     if covers and any(c is not None for c in covers):
         data["couverture"] = ",".join("" if c is None else f"{c:.3f}" for c in covers)
     acks = screen.read_acks()
@@ -439,8 +465,16 @@ def take_reading(state):
         log(f"{reading_id}: burst of {len(paths)}, product {sum(known):.2f} (target {target:.2f})")
     state["last_flash_at"] = iso(now_utc())
 
+    # The MEO detector on this Pi (Caliban decides with it when its
+    # inline_settings.decider is "yolo"). A few seconds per burst.
+    det = detect_burst(paths)
+    if det:
+        p = det["photos"]
+        log(f"{reading_id}: detector {sum(x['meo_n'] for x in p)} MEO pieces, "
+            f"{sum(x['ms'] for x in p) / 1000:.1f} s for {len(p)} photo(s)")
+
     try:
-        reply, error = request_reading(reading_id, paths, covers)
+        reply, error = request_reading(reading_id, paths, covers, det)
     except requests.RequestException as e:
         log(f"Caliban unreachable for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, network="down", message="Pas de connexion à Caliban — lecture non analysée")

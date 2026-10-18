@@ -3658,6 +3658,17 @@ INLINE_DEFAULTS = {
     # product, light flow or heavy. 0 = a fixed burst of group_size.
     "group_max": 0,
     "group_target_cover": 0.0,
+    # Who reads the burst. "ai": the vision prompts (variant above), as
+    # before. "yolo": the MEO detector on Ariel (rig/inline/meo_detect.py,
+    # trained on the boxed tiles in training/amas/), which sends each photo's
+    # MEO box area and product pixels; the estimate is yolo_scale x 100 x
+    # sum(MEO) / sum(product), on the lab ME% scale (yolo_scale fitted on lab
+    # lots: 3.19 on 2026-10-18), and no vision call is made. Without the
+    # detector's numbers (Ariel missing onnxruntime or the model) the reading
+    # goes to the prompts only if ai_fallback; otherwise it is refused (503).
+    "decider": "ai",
+    "yolo_scale": 3.19,
+    "ai_fallback": False,
 }
 
 
@@ -3674,7 +3685,7 @@ def inline_settings():
         print(f"[inline_settings lookup failed] {type(e).__name__}: {e}")
         overrides = None
     if isinstance(overrides, dict):
-        for key in ("variant", "high_variant", "low_variant", "mode"):
+        for key in ("variant", "high_variant", "low_variant", "mode", "decider"):
             if isinstance(overrides.get(key), str):
                 settings[key] = overrides[key].strip()
         for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
@@ -3688,12 +3699,13 @@ def inline_settings():
         # (chute prompts, uncalibrated: about half the lab ME% on 2026-10-16),
         # so the tray's limits -- and the clamps operator_settings puts on
         # them -- do not carry over. Only their order is enforced, below.
-        for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at", "group_target_cover"):
+        for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at", "group_target_cover",
+                    "yolo_scale"):
             try:
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
-        for key in ("offline_alert", "teams"):
+        for key in ("offline_alert", "teams", "ai_fallback"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
         # A straight line from the prompt's value to lab ME%, fitted on lots
@@ -3709,6 +3721,9 @@ def inline_settings():
                 pass
     if settings["mode"] not in ("shadow", "live"):
         settings["mode"] = "shadow"
+    if settings["decider"] not in ("ai", "yolo"):
+        settings["decider"] = "ai"
+    settings["yolo_scale"] = max(0.1, min(50.0, settings["yolo_scale"]))
     # Teams follows live mode unless told otherwise: live with teams=false is
     # the operator acting on the screen while AQ watches the line in person.
     settings.setdefault("teams", settings["mode"] == "live")
@@ -3781,6 +3796,58 @@ def inline_calibrated(value, settings):
     if value is None or not cal:
         return value
     return round(max(0.0, cal["slope"] * float(value) + cal["intercept"]), 2)
+
+
+def inline_detector(raw, n_photos):
+    """Ariel's MEO detector numbers for a burst (the detecteur form field:
+    {"version", "photos": [{"meo_px", "meo_n", "product_px", "ms"}, ...]}),
+    checked, or None when absent or unusable -- one entry per photo, product
+    seen on at least one."""
+    if not (raw or "").strip():
+        return None
+    try:
+        det = json.loads(raw)
+        photos = det["photos"]
+        if not isinstance(photos, list) or len(photos) != n_photos:
+            return None
+        rows = [{"meo_px": max(0.0, float(ph["meo_px"])), "meo_n": max(0, int(ph["meo_n"])),
+                 "product_px": max(0, int(ph["product_px"])), "ms": int(ph.get("ms") or 0)} for ph in photos]
+    except (ValueError, TypeError, KeyError):
+        return None
+    if sum(r["product_px"] for r in rows) <= 0:
+        return None
+    return {"version": str(det.get("version") or "meo")[:40], "photos": rows}
+
+
+def yolo_band_result(group, det, settings, reading_id):
+    """The reading from the detector's numbers, shaped like one prompt's
+    aggregated result so the rest of /inline/readings records it the same
+    way. The photos still get the unusable-frame check first (422), exactly
+    as on the prompt path. Returns (results, escalated, photo_mean, photo_std)."""
+    from PIL import Image
+    imgs = [Image.open(io.BytesIO(raw)).convert("RGB") for raw in group]
+    photo_mean, photo_std = photo_stats(imgs[0])
+    for img in imgs:
+        why = unusable_photo(img)
+        if why:
+            print(f"[capture refused] {reading_id}: {why}")
+            raise HTTPException(status_code=422, detail=why)
+    meo = sum(p["meo_px"] for p in det["photos"])
+    product = sum(p["product_px"] for p in det["photos"])
+    pieces = sum(p["meo_n"] for p in det["photos"])
+    ratio = meo / product
+    estimate = round(settings["yolo_scale"] * 100 * ratio, 2)
+    result = {
+        "band": band_for_pct(estimate, "coarse6"),
+        "estimate_pct": estimate,
+        "prompt_version": f"yolo-{det['version']}",
+        "model": "yolo-onnx (Ariel)",
+        "repeat_count": 1,
+        "justification": f"Détecteur : {pieces} morceau(x) de MEO sur {len(group)} photo(s).",
+        "measures": {"yolo": {**det, "ratio_pct": round(100 * ratio, 4), "scale": settings["yolo_scale"],
+                              "meo_px": round(meo, 1), "product_px": product, "meo_n": pieces}},
+    }
+    return [result], False, photo_mean, photo_std
 
 
 def inline_instruction(decision_pct, n, settings, last_ack_instruction=None):
@@ -3860,6 +3927,10 @@ async def inline_reading(
     # order; empty where the Pi could not measure it), as the Pi measured it
     # against the empty chute. Kept with the reading: it is the flow.
     couverture: str = Form(""),
+    # Ariel's MEO detector numbers for the burst (JSON, see inline_detector).
+    # Decide with them when inline_settings.decider is "yolo"; otherwise they
+    # are only recorded beside the prompt's reading.
+    detecteur: str = Form(""),
     _: bool = Depends(verify_inline_key),
 ):
     """Judge one inline photo and say what the destoner screen should show.
@@ -3891,12 +3962,6 @@ async def inline_reading(
 
     contents = await file.read()
     media_type = file.content_type or "image/jpeg"
-    pair = operator_prompt_pair(settings)
-    requested_variants = list(pair) if pair else [settings["variant"]]
-    registry = prompt_registry()
-    if any(v not in registry for v in requested_variants):
-        raise HTTPException(status_code=500, detail=f"Prompt inconnu : {requested_variants}.")
-
     extra = [await f.read() for f in (more or [])]
     group = [contents] + extra
 
@@ -3910,12 +3975,32 @@ async def inline_reading(
     if not any(c is not None for c in covers):
         covers = []
 
-    # A black, blank or blown-out frame is refused with a 422 before any call
-    # is spent -- on this rig that usually means the flash did not fire.
-    results, escalated, photo_mean, photo_std = await analyse_band_photo(
-        group if extra else contents, media_type, requested_variants, settings["repeats"], DEFAULT_VISION_MODEL,
-        escalate_settings=settings, refuse_unusable_as=reading_id,
-    )
+    det = inline_detector(detecteur, len(group))
+    use_yolo = settings["decider"] == "yolo" and det is not None
+    if settings["decider"] == "yolo" and det is None and not settings["ai_fallback"]:
+        print(f"[inline] {reading_id}: decider yolo but no detector numbers from Ariel")
+        raise HTTPException(status_code=503, detail="Détecteur MEO absent sur Ariel : lecture non analysée.")
+
+    if use_yolo:
+        pair = None
+        results, escalated, photo_mean, photo_std = yolo_band_result(group, det, settings, reading_id)
+    else:
+        pair = operator_prompt_pair(settings)
+        requested_variants = list(pair) if pair else [settings["variant"]]
+        registry = prompt_registry()
+        if any(v not in registry for v in requested_variants):
+            raise HTTPException(status_code=500, detail=f"Prompt inconnu : {requested_variants}.")
+        # A black, blank or blown-out frame is refused with a 422 before any call
+        # is spent -- on this rig that usually means the flash did not fire.
+        results, escalated, photo_mean, photo_std = await analyse_band_photo(
+            group if extra else contents, media_type, requested_variants, settings["repeats"], DEFAULT_VISION_MODEL,
+            escalate_settings=settings, refuse_unusable_as=reading_id,
+        )
+        if det is not None:
+            # The detector's view of the same burst, kept beside the prompt's
+            # for comparing the two.
+            results[0].setdefault("measures", {})
+            results[0]["measures"] = {**(results[0]["measures"] or {}), "yolo": det}
 
     try:
         since_ack = float(since_ack_s) if since_ack_s.strip() else None
@@ -3928,12 +4013,14 @@ async def inline_reading(
         alert, reason, notify = _apply_streak(instruction, alert, settings, source="inline")
     else:
         decider = results[0]
+        # The detector's estimate is on the lab scale already: no calibration line.
+        dec_settings = {**settings, "calibration": None} if use_yolo else settings
         decision_pct, decision_n = inline_decision(
-            decider.get("estimate_pct"), decider.get("prompt_version"), settings, since_ack)
+            decider.get("estimate_pct"), decider.get("prompt_version"), dec_settings, since_ack)
         # The line is straight and rising, so the median of calibrated values
         # is the calibrated median: calibrating after the median is the same.
-        decision_pct = inline_calibrated(decision_pct, settings)
-        decider["calibrated_pct"] = inline_calibrated(decider.get("estimate_pct"), settings)
+        decision_pct = inline_calibrated(decision_pct, dec_settings)
+        decider["calibrated_pct"] = inline_calibrated(decider.get("estimate_pct"), dec_settings)
         decider["decision_pct"], decider["decision_n"] = decision_pct, decision_n
         instruction, alert, reason = inline_instruction(
             decision_pct, decision_n, settings, last_ack_instruction.strip() or None)
@@ -4011,7 +4098,7 @@ async def inline_reading(
             known = [c for c in covers if c is not None]
             if known:
                 mesures["couverture_totale"] = round(sum(known), 3)
-        if is_decider and settings.get("calibration"):
+        if is_decider and settings.get("calibration") and not use_yolo:
             # What the operator was shown, and the line that produced it, so a
             # later refit can tell readings made under different lines apart.
             mesures["calibre"] = {"pct": decider.get("calibrated_pct"),
