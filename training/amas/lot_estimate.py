@@ -153,6 +153,9 @@ def main():
     cal = [l for l in lots if l["lot"] in trained and l["lab"] is not None and l["ratio"]]
     k = sum(l["lab"] * l["ratio"] for l in cal) / sum(l["ratio"] ** 2 for l in cal)
     print(f"\nscale fitted on {len(cal)} training lots: lab = {k:.2f} x ratio\n")
+    # For retrain.ps1: the scale goes into Caliban's inline_settings.yolo_scale.
+    (ROOT / "amas_runs" / args.name / "scale.json").write_text(
+        json.dumps({"yolo_scale": round(k, 3), "lots": len(cal)}), encoding="utf-8")
     random.seed(3)
     print(f"{'lot':15s} {'used':10s} readings  estimate  80% range     band     lab    lab band")
     for l in lots:
