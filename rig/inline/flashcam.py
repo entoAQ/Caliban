@@ -35,7 +35,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py wb 0.3,0.3,0.7,0.7   # ... or on a region (fractions x0,y0,x1,y1)
     python3 flashcam.py focus           # sweep the lens under the flash, keep the sharpest
     python3 flashcam.py focus-shots     # centre crops at a few lens positions, to compare by eye
-    python3 flashcam.py focus-live      # HQ camera: flash photos + crispness at http://<pi>:8000/ while turning the ring
+    python3 flashcam.py focus-live [s]  # HQ camera: a flash photo every s (30) + crispness at http://<pi>:8000/
     python3 flashcam.py sweep           # measure the firing window for this camera and save it
     python3 flashcam.py daylight        # colour from the camera's own calibration at flash colour
     python3 flashcam.py reference       # flash photo of the EMPTY chute, for the product check
@@ -589,15 +589,15 @@ def _edge_crispness(array, region=(0.10, 0.22, 1.0, 1.0)):
     return float(np.var(lap(half)) / max(np.var(lap(halve(half))), 1e-6))
 
 
-def focus_live(port=8000, every_s=2.0):
+def focus_live(port=8000, every_s=30.0):
     """Focus the HQ camera's lens ring by hand on the running line.
 
     A room-light live view smears the falling product, so this fires the
-    flash every few seconds instead and serves the latest frozen frame -- a
+    flash every 30 s (or as given: focus-live 10) instead and serves the latest frozen frame -- a
     100% crop of the middle -- with a crispness score, at
     http://<pi>:<port>/. Turn the ring a little, watch a few scores, keep the
     position where they run highest. The score moves with what happens to be
-    in view, so go by the run of scores (the median of the last five), not
+    in view, so go by the run of scores (the median of the last three), not
     one. Stop the loop first (sudo systemctl stop caliban-inline); Ctrl+C
     to end.
     """
@@ -649,18 +649,18 @@ def focus_live(port=8000, every_s=2.0):
                 continue
             a = keep["array"]
             v = 100 * _edge_crispness(a)
-            scores = (scores + [v])[-5:]
+            scores = (scores + [v])[-3:]
             run = statistics.median(scores)
-            if len(scores) == 5:
+            if len(scores) == 3:
                 best = max(best, run)
             h, w = a.shape[:2]
             buf = io.BytesIO()
             Image.fromarray(a[h // 2 - 250:h // 2 + 250, w // 2 - 400:w // 2 + 400, ::-1].copy()).save(
                 buf, "JPEG", quality=92)
-            text = f"crispness {v:.1f} &nbsp; last 5: <b>{run:.1f}</b> &nbsp; best run so far {best:.1f}"
+            text = f"crispness {v:.1f} &nbsp; last 3: <b>{run:.1f}</b> &nbsp; best run so far {best:.1f}"
             with lock:
                 latest["jpg"], latest["text"] = buf.getvalue(), text
-            print(f"  crispness {v:5.1f}   last 5 {run:5.1f}   best {best:5.1f}", flush=True)
+            print(f"  crispness {v:5.1f}   last 3 {run:5.1f}   best {best:5.1f}", flush=True)
             gc.collect()
             time.sleep(every_s)
     except KeyboardInterrupt:
@@ -828,7 +828,7 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "daylight":
         daylight(int(sys.argv[2]) if len(sys.argv) > 2 else 5600)
     elif len(sys.argv) > 1 and sys.argv[1] == "focus-live":
-        focus_live()
+        focus_live(every_s=float(sys.argv[2]) if len(sys.argv) > 2 else 30.0)
     elif len(sys.argv) > 1 and sys.argv[1] in ("focus", "focus-shots") and load_settings()["camera"] == "imx477":
         print("The HQ camera has no focus motor: focus it by hand on the lens ring "
               "(under the flash, on the running line: python3 flashcam.py focus-live).")
