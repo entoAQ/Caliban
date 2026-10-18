@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, ls  # noqa: E402
-from sync_amas import AMAS, find_project  # noqa: E402
+from sync_amas import AMAS, FIRST_LOT, find_project  # noqa: E402
 
 CLASSES = ["MEO", "Peau", "Incertain"]
 TILES = AMAS / "tiles"
@@ -43,7 +43,7 @@ def main():
     tasks = ls("GET", f"/api/projects/{pid}/export", exportType="JSON")
 
     first = {}
-    for d in index.values():
+    for d in (d for d in index.values() if d["lot_number"] >= FIRST_LOT):
         first[d["lot_number"]] = min(first.get(d["lot_number"], d["taken_at"]), d["taken_at"])
     order = sorted(first, key=first.get)
     val_lots = set(order[3::4])
@@ -62,6 +62,8 @@ def main():
         if any("Inutilisable" in r["value"].get("choices", []) for r in res):
             continue
         d = index[name]
+        if d["lot_number"] < FIRST_LOT:
+            continue
         boxes = [r for r in res if r["type"] == "rectanglelabels"]
         split = "val" if d["lot_number"] in val_lots else "train"
         shutil.copy2(TILES / name, OUT / "images" / split / name)

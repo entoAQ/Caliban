@@ -33,6 +33,7 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, http  # noqa: E402
 from pull_amas import BUCKET, CHUTE_MOUNTED, LAG, WINDOW, ts  # noqa: E402
 from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
+from sync_amas import FIRST_LOT  # noqa: E402
 
 CACHE = ROOT / "amas" / "all"
 BANDS = [(3, "<3%"), (5, "3-5%"), (8, "5-8%"), (10, "8-10%"), (999, ">10%")]
@@ -91,7 +92,7 @@ def main():
     url = os.environ["SUPABASE_URL"].rstrip("/")
     key = os.environ["SUPABASE_SERVICE_KEY"]
     auth = {"apikey": key, "Authorization": f"Bearer {key}"}
-    lots = fetch_lots(url, auth)
+    lots = [l for l in fetch_lots(url, auth) if l["lot"] >= FIRST_LOT]
     CACHE.mkdir(parents=True, exist_ok=True)
     got = gone = 0
     for lot in lots:

@@ -28,6 +28,9 @@ from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
 import cv2  # noqa: E402
 
 AMAS = ROOT / "amas"
+# 10-13 was a short test day under different conditions: its lots are left
+# out of labelling, training and calibration.
+FIRST_LOT = "20261016"
 PROJECT_TITLE = "Chute en ligne - MEO"
 
 INSTRUCTIONS = """<p>Each task is one tile, a sixth of a photo. Draw a box around every piece of <b>MEO</b> in the tile, and nothing else. A piece cut by the tile edge: box the part you can see.</p>
@@ -106,15 +109,18 @@ def main():
             "title": PROJECT_TITLE, "expert_instruction": INSTRUCTIONS, "show_instruction": True, "label_config": config,
         })
 
-    have, page, whole = set(), 1, []
+    have, page, whole, tasks_all = set(), 1, [], []
     while True:
-        resp = ls("GET", "/api/tasks", project=pid, page=page, page_size=500)
+        resp = ls("GET", "/api/tasks", project=pid, page=page, page_size=100, fields="all")
         tasks = resp["tasks"] if isinstance(resp, dict) else resp
         have.update(t["data"].get("tile") for t in tasks)
         whole += [t for t in tasks if not t["data"].get("tile")]
-        if len(tasks) < 500:
+        tasks_all += tasks
+        if len(tasks) < 100:
             break
         page += 1
+    tiles_index = json.loads((AMAS / "tiles" / "tiles.json").read_text(encoding="utf-8"))
+    early_tiles = {n for n, d in tiles_index.items() if d["lot_number"] < FIRST_LOT}
 
     # Whole-photo tasks from before the tiles: their boxes are carried over
     # to the photo's tiles, then the whole-photo tasks are removed.
@@ -129,13 +135,24 @@ def main():
         have = set()
         print(f"Removed {len(whole)} whole-photo tasks, boxes of {len(done)} carried over to their tiles")
 
+    # Unlabelled tiles of lots before FIRST_LOT come out of the queue;
+    # labelled ones stay (export skips them).
+    early = [t["id"] for t in tasks_all if t["data"].get("tile") and t["data"]["tile"] in early_tiles
+             and not (t.get("total_annotations") or t.get("draft_exists") or t.get("cancelled_annotations"))]
+    if early:
+        ls("POST", "/api/dm/actions", {"selectedItems": {"all": False, "included": early}},
+           id="delete_tasks", project=pid)
+        have -= {t["data"]["tile"] for t in tasks_all if t["id"] in set(early)}
+        print(f"Removed {len(early)} unlabelled tiles of lots before {FIRST_LOT}")
+
     index = json.loads((AMAS / "tiles" / "tiles.json").read_text(encoding="utf-8"))
     # Photos shuffled by name hash so labelling order mixes lots and flows;
     # a photo's tiles stay together, in reading order.
     order = sorted(index.values(), key=lambda d: (zlib.crc32(d["photo"].encode()), d["row"], d["col"]))
     new = [{"data": {"image": f"/data/local-files/?d=amas/tiles/{d['tile']}", "tile": d["tile"],
                      "photo": d["photo"], "reading_id": d["reading_id"], "taken_at": d["taken_at"]}}
-           for d in order if d["tile"] not in have and (AMAS / "tiles" / d["tile"]).exists()]
+           for d in order if d["tile"] not in have and (AMAS / "tiles" / d["tile"]).exists()
+           and d["lot_number"] >= FIRST_LOT]
     for task in new:
         if task["data"]["tile"] in carried:
             task["annotations"] = [{"result": carried[task["data"]["tile"]]}]
