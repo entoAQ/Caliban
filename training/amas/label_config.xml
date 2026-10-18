@@ -1,0 +1,11 @@
+<View>
+  <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="false"/>
+  <RectangleLabels name="box" toName="image" strokeWidth="2" opacity="0.15">
+    <Label value="Amas" background="#ff7a00" hotkey="1"/>
+    <Label value="Peau" background="#2b8cff" hotkey="2"/>
+    <Label value="Incertain" background="#9a9a9a" hotkey="3"/>
+  </RectangleLabels>
+  <Choices name="usable" toName="image" choice="single" showInline="true">
+    <Choice value="Inutilisable"/>
+  </Choices>
+</View>
