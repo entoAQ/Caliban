@@ -19,6 +19,10 @@ param([int]$Epochs = 30)
 # Not "Stop": Python writes its progress to stderr, which Windows PowerShell
 # would then treat as a failure. Each step checks the exit code instead.
 $ErrorActionPreference = "Continue"
+# Python's output as UTF-8 both ends, or its progress bars (line-drawing
+# characters) come through as garbled symbols instead of being filtered.
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$env:PYTHONIOENCODING = "utf-8"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Resolve-Path (Join-Path $here "..\..")
 $name = "meo-" + (Get-Date -Format "yyyyMMdd-HHmm")
@@ -32,7 +36,7 @@ function Step($title, $script, $arguments) {
     # lines, not as PowerShell error records.
     $cmdline = 'python "' + (Join-Path $here $script) + '" ' + ($arguments -join ' ') + ' 2>&1'
     & cmd /c $cmdline | Tee-Object -FilePath $log -Append |
-        Where-Object { $_ -notmatch ("^\s+\d+/\d+|" + [char]0x2501) }
+        Where-Object { $_ -notmatch ("^\s+\d+/\d+|[" + [char]0x2500 + [char]0x2501 + "]") }
     if ($LASTEXITCODE -ne 0) { Write-Host "Stopped: $script failed (see $log)." -ForegroundColor Red; exit 1 }
 }
 
