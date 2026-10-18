@@ -7,7 +7,7 @@ lot difference only shows up summed over many photos -- which is why the
 photos are chosen per lab lot rather than at random: the boxes then give,
 per lot, sum(clump area) / sum(product area), to set against the lab ME%.
 
-For every lot with a lab ME% since the chute mount, takes the inline photos
+For every lot with a lab ME%, takes the inline photos taken since --since
 of its window (previous bag close to this bag close, less the 10-minute lag,
 at most 120 minutes: the same window as sgsc-app's inline_sample_lots view),
 burst photos included. From those it measures the product share of up to
@@ -24,7 +24,7 @@ Needs SUPABASE_URL and SUPABASE_SERVICE_KEY, and numpy + opencv for the
 product share.
 
 Usage:
-    python pull_amas.py                  # 19 per lot (~300 over 16 lots)
+    python pull_amas.py                  # new lots since the refocus, 19 photos each
     python pull_amas.py --per-lot 25
 """
 
@@ -47,6 +47,10 @@ AMAS = ROOT / "amas"
 INDEX = AMAS / "amas_photos.json"
 BUCKET = "vision-band-test-captures"
 CHUTE_MOUNTED = "2026-10-13T12:30:00Z"
+# Lens refocused by hand (flashcam.py focus-live, crispness 27 -> 34). New
+# photos are taken from here on only: the set already labelled is from
+# before, and softer photos are not added to it.
+REFOCUSED = "2026-10-18T14:20:00Z"
 LAG = timedelta(minutes=10)        # inline_settings operator_lot_lag_min
 WINDOW = timedelta(minutes=120)    # inline_settings operator_lot_window_min
 EMPTY = 0.02                       # product share below this: chute nearly empty
@@ -72,6 +76,8 @@ def product_share(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--per-lot", type=int, default=19)
+    ap.add_argument("--since", default=REFOCUSED,
+                    help="only photos from this time on, UTC (default: the lens refocus)")
     args = ap.parse_args()
 
     url = os.environ["SUPABASE_URL"].rstrip("/")
@@ -104,7 +110,7 @@ def main():
     rows = rest("vision_band_estimates", [
         ("select", "lot_number_text,created_at,storage_path,mesures"),
         ("source", "eq.inline"), ("excluded_reason", "is.null"), ("storage_path", "not.is.null"),
-        ("operator_instruction", "not.is.null"), ("created_at", f"gte.{CHUTE_MOUNTED}"),
+        ("operator_instruction", "not.is.null"), ("created_at", f"gte.{args.since}"),
         ("order", "created_at")])
 
     AMAS.mkdir(parents=True, exist_ok=True)
