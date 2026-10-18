@@ -16,7 +16,9 @@
 #   git checkout rig\inline\models
 
 param([int]$Epochs = 30)
-$ErrorActionPreference = "Stop"
+# Not "Stop": Python writes its progress to stderr, which Windows PowerShell
+# would then treat as a failure. Each step checks the exit code instead.
+$ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Resolve-Path (Join-Path $here "..\..")
 $name = "meo-" + (Get-Date -Format "yyyyMMdd-HHmm")
@@ -26,8 +28,11 @@ New-Item -ItemType Directory -Force $runs | Out-Null
 
 function Step($title, $script, $arguments) {
     Write-Host "`n=== $title ===" -ForegroundColor Cyan
-    & python (Join-Path $here $script) @arguments 2>&1 | Tee-Object -FilePath $log -Append |
-        Where-Object { $_ -notmatch "^\s+\d+/\d+|━" }
+    # Through cmd so Python's stderr (its progress) comes through as plain
+    # lines, not as PowerShell error records.
+    $cmdline = 'python "' + (Join-Path $here $script) + '" ' + ($arguments -join ' ') + ' 2>&1'
+    & cmd /c $cmdline | Tee-Object -FilePath $log -Append |
+        Where-Object { $_ -notmatch ("^\s+\d+/\d+|" + [char]0x2501) }
     if ($LASTEXITCODE -ne 0) { Write-Host "Stopped: $script failed (see $log)." -ForegroundColor Red; exit 1 }
 }
 
@@ -40,6 +45,7 @@ Write-Host "`n=== 4/5 Export for Ariel ===" -ForegroundColor Cyan
 $weights = Join-Path $runs "$name\weights\best.pt"
 & python -c "from ultralytics import YOLO; YOLO(r'$weights').export(format='onnx', imgsz=416, opset=12, simplify=False, dynamic=False)" 2>&1 |
     Tee-Object -FilePath $log -Append | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "Stopped: export for Ariel failed (see $log)." -ForegroundColor Red; exit 1 }
 $scale = (Get-Content (Join-Path $runs "$name\scale.json") | ConvertFrom-Json).yolo_scale
 $tiles = (Get-ChildItem (Join-Path (Split-Path $runs) "amas_yolo\images\train")).Count
 Copy-Item (Join-Path $runs "$name\weights\best.onnx") (Join-Path $repo "rig\inline\models\meo.onnx") -Force
