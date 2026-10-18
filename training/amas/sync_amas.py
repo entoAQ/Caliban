@@ -24,15 +24,16 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, ls  # noqa: E402
 
 AMAS = ROOT / "amas"
-PROJECT_TITLE = "Chute en ligne - Amas"
+PROJECT_TITLE = "Chute en ligne - MEO"
 
-INSTRUCTIONS = """<p>Draw a box around every <b>clump</b> in the photo, and nothing else.</p>
+INSTRUCTIONS = """<p>Draw a box around every piece of <b>MEO</b> in the photo, and nothing else.</p>
 <ol>
-<li><b>Amas</b> (1): frass clump you could pick up between two fingers. Frass has an <b>irregular, crumbly</b> edge; a larva has a <b>smooth</b> edge, gloss or segment lines. Box tight around the clump.</li>
-<li>Skip anything you could not pick up between two fingers: dust, crumbs, specks. They are not ME.</li>
-<li><b>Peau</b> (2): pale papery shed skin. Not ME, boxed so the model learns to tell it apart.</li>
-<li><b>Incertain</b> (3): you cannot tell clump from larva (half hidden, blurred). Box it rather than guess.</li>
-<li>Larvae, chute and shadows: nothing. A photo with no clump is submitted with no box.</li>
+<li><b>MEO</b> (1): any piece that is not a larva and that you could pick up between two fingers: frass clumps, seeds, other organic pieces. Frass has an <b>irregular, crumbly</b> edge; a larva has a <b>smooth</b> edge, gloss or segment lines.</li>
+<li>The box is a plain rectangle, not the outline: drag it as tight as you can around the piece, as little chute or larva inside as possible. Pieces touching each other: one box each if you can tell them apart, one box around both if not.</li>
+<li>Skip anything you could not pick up between two fingers: dust, crumbs, specks. They are not MEO.</li>
+<li><b>Peau</b> (2): pale papery shed skin. Not MEO, boxed so the model learns to tell it apart.</li>
+<li><b>Incertain</b> (3): you cannot tell MEO from larva (half hidden, blurred). Box it rather than guess.</li>
+<li>Larvae, chute and shadows: nothing. A photo with no MEO is submitted with no box.</li>
 </ol>
 <p>Zoom in: grey-brown on a grey chute is easy to miss. Go over the whole photo, side streams included.</p>
 <p>Unusable photo (blurred, flash missed, empty chute): tick <i>Inutilisable</i> and submit, rather than skip.</p>"""
@@ -41,7 +42,7 @@ INSTRUCTIONS = """<p>Draw a box around every <b>clump</b> in the photo, and noth
 def find_project():
     resp = ls("GET", "/api/projects", page_size=100)
     for p in resp.get("results", resp) if isinstance(resp, dict) else resp:
-        if p["title"] == PROJECT_TITLE:
+        if p["title"] in (PROJECT_TITLE, "Chute en ligne - Amas"):   # its first name
             return p["id"]
     return None
 
@@ -52,7 +53,7 @@ def main():
     if pid is None:
         pid = ls("POST", "/api/projects", {
             "title": PROJECT_TITLE,
-            "description": "Amas de frass sur la chute, pour mesurer le ME% par lot.",
+            "description": "MEO (frass, graines...) sur la chute, pour mesurer le ME% par lot.",
             "label_config": config, "expert_instruction": INSTRUCTIONS, "show_instruction": True,
         })["id"]
         print(f"Created project {pid}")
@@ -63,7 +64,7 @@ def main():
         })
     else:
         ls("PATCH", f"/api/projects/{pid}", {
-            "expert_instruction": INSTRUCTIONS, "show_instruction": True, "label_config": config,
+            "title": PROJECT_TITLE, "expert_instruction": INSTRUCTIONS, "show_instruction": True, "label_config": config,
         })
 
     have, page = set(), 1

@@ -4,7 +4,7 @@
 Writes to INLINE_LABELING_DIR/amas_yolo/:
 
     images/{train,val}/, labels/{train,val}/, data.yaml
-        classes 0 Amas, 1 Peau, 2 Incertain. Split by lot (every 4th lot
+        classes 0 MEO, 1 Peau, 2 Incertain. Split by lot (every 4th lot
         in packaging order to val), so val photos never share a lot with
         training ones.
     lots.csv
@@ -30,14 +30,14 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, ls  # noqa: E402
 from sync_amas import AMAS, find_project  # noqa: E402
 
-CLASSES = ["Amas", "Peau", "Incertain"]
+CLASSES = ["MEO", "Peau", "Incertain"]
 OUT = ROOT / "amas_yolo"
 
 
 def main():
     pid = find_project()
     if pid is None:
-        raise SystemExit("No Amas project: run sync_amas.py first.")
+        raise SystemExit("No MEO project: run sync_amas.py first.")
     index = json.loads((AMAS / "amas_photos.json").read_text(encoding="utf-8"))
     tasks = ls("GET", f"/api/projects/{pid}/export", exportType="JSON")
 
@@ -74,7 +74,7 @@ def main():
 
         s = per_lot.setdefault(d["lot_number"], {"lab": d["lab_me_pct"], "n": 0, "amas": 0, "area": 0.0, "prod": 0.0})
         s["n"] += 1
-        s["amas"] += sum(1 for r in boxes if r["value"]["rectanglelabels"][0] == "Amas")
+        s["amas"] += sum(1 for r in boxes if r["value"]["rectanglelabels"][0] == "MEO")
         s["area"] += amas_area
         # product_share is measured on the prompts' crop (0.78 x 0.90 of the frame)
         s["prod"] += d["product_share"] * 0.78 * 0.90
@@ -84,13 +84,13 @@ def main():
         + "".join(f"  {i}: {c}\n" for i, c in enumerate(CLASSES)), encoding="utf-8")
     with open(OUT / "lots.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["lot", "photos", "amas", "amas_area_over_product_pct", "lab_me_pct", "split"])
+        w.writerow(["lot", "photos", "meo", "meo_area_over_product_pct", "lab_me_pct", "split"])
         for lot in order:
             if lot in per_lot:
                 s = per_lot[lot]
                 ratio = 100 * s["area"] / s["prod"] if s["prod"] else 0
                 w.writerow([lot, s["n"], s["amas"], f"{ratio:.2f}", s["lab"], "val" if lot in val_lots else "train"])
-                print(f"{lot}  {s['n']:3d} photos  {s['amas']:4d} amas  ratio {ratio:6.2f}%  lab {s['lab']:5.2f}")
+                print(f"{lot}  {s['n']:3d} photos  {s["amas"]:4d} MEO  ratio {ratio:6.2f}%  lab {s['lab']:5.2f}")
     print(f"Written to {OUT}")
 
 
