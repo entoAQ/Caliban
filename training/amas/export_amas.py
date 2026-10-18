@@ -62,10 +62,12 @@ def main():
         if any("Inutilisable" in r["value"].get("choices", []) for r in res):
             continue
         d = index[name]
-        if d["lot_number"] < FIRST_LOT:
-            continue
+        # Lots before FIRST_LOT: their boxes are as good as any for training,
+        # only their lot assignment is not trusted -- so train, never val,
+        # and left out of the per-lot check.
+        early = d["lot_number"] < FIRST_LOT
         boxes = [r for r in res if r["type"] == "rectanglelabels"]
-        split = "val" if d["lot_number"] in val_lots else "train"
+        split = "val" if d["lot_number"] in val_lots and not early else "train"
         shutil.copy2(TILES / name, OUT / "images" / split / name)
         lines, meo_px, n_meo = [], 0.0, 0
         for r in boxes:
@@ -78,6 +80,8 @@ def main():
                 meo_px += w * h * d["width"] * d["height"]
         (OUT / "labels" / split / (Path(name).stem + ".txt")).write_text("\n".join(lines), encoding="utf-8")
 
+        if early:
+            continue
         s = per_lot.setdefault(d["lot_number"], {"lab": d["lab_me_pct"], "n": 0, "meo": 0, "area": 0.0, "prod": 0})
         s["n"] += 1
         s["meo"] += n_meo

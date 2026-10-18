@@ -28,8 +28,9 @@ from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
 import cv2  # noqa: E402
 
 AMAS = ROOT / "amas"
-# 10-13 was a short test day under different conditions: its lots are left
-# out of labelling, training and calibration.
+# 10-13 was a short test day under different conditions: its photos'
+# labels still train the model, but its lots are not used for calibration
+# or the lot checks, and its unlabelled tiles are left out of the queue.
 FIRST_LOT = "20261016"
 PROJECT_TITLE = "Chute en ligne - MEO"
 
