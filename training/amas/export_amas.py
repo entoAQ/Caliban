@@ -68,7 +68,8 @@ def main():
             cls = CLASSES.index(v["rectanglelabels"][0])
             w, h = v["width"] / 100, v["height"] / 100
             lines.append(f"{cls} {v['x'] / 100 + w / 2:.6f} {v['y'] / 100 + h / 2:.6f} {w:.6f} {h:.6f}")
-            if cls == 0:
+            # The ratio stays on the crop the product share is measured on.
+            if cls == 0 and v["y"] / 100 + h / 2 > .22 and v["x"] / 100 + w / 2 > .10:
                 amas_area += w * h
         (OUT / "labels" / split / (Path(name).stem + ".txt")).write_text("\n".join(lines), encoding="utf-8")
 
