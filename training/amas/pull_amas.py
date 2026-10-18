@@ -126,11 +126,16 @@ def main():
     lots = rest("lots", [("select", "id,lot_number,packaged_at"), ("legacy_import", "is.false"),
                          ("packaged_at", f"gte.{CHUTE_MOUNTED}"), ("order", "packaged_at,lot_number")])
     results = rest("test_results", [
-        ("select", "lot_id,test_id,result_value"), ("is_superseded", "is.false"),
+        ("select", "lot_id,test_id,result_value,notes"), ("is_superseded", "is.false"),
         ("test_id", f"in.({tests['me_organic_wt']},{tests['bulk_density']})"),
         ("lot_id", "in.(%s)" % ",".join(str(l["id"]) for l in lots)), ("order", "created_at.desc")])
     latest = {}
     for r in results:
+        # Lots released on the inline estimate carry it as a test result,
+        # noted "Estimation (en ligne, 2h) ..." / "Estimation (poids) ...":
+        # not a lab value, never compared or calibrated against.
+        if (r.get("notes") or "").strip().lower().startswith("estimation"):
+            continue
         latest.setdefault((r["lot_id"], r["test_id"]), r["result_value"])
 
     rows = rest("vision_band_estimates", [
