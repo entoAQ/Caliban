@@ -1,5 +1,5 @@
 # One click to label MEO: starts Label Studio (training\labelstudio\start.ps1)
-# in its own window, waits for it, brings the MEO project up to date
+# in its own window, waits for it, cuts any new photos into tiles, brings the MEO project up to date
 # (sync_amas.py) and opens it in the browser.
 #
 # Close the Label Studio window to stop it. Labels are saved as you submit.
@@ -22,5 +22,6 @@ if (-not (Up)) {
     }
 }
 
+python (Join-Path $here "tile_amas.py")
 python (Join-Path $here "sync_amas.py")
 Start-Process "$url/projects/"
