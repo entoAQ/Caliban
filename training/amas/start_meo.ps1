@@ -1,6 +1,6 @@
 # One click to label MEO: starts Label Studio (training\labelstudio\start.ps1)
 # in its own window, waits for it, cuts any new photos into tiles, brings the MEO project up to date
-# (sync_amas.py) and opens it in the browser.
+# (sync_amas.py) and opens it in the browser, already labelling.
 #
 # Close the Label Studio window to stop it. Labels are saved as you submit.
 #
@@ -24,4 +24,7 @@ if (-not (Up)) {
 
 python (Join-Path $here "tile_amas.py")
 python (Join-Path $here "sync_amas.py")
-Start-Process "$url/projects/"
+# Straight into "Label All Tasks" on the MEO project: each Submit (Ctrl+Enter)
+# opens the next tile nobody has labelled, so there is no list to go back to.
+$proj = python -c "import sys; sys.path.insert(0, r'$here'); from sync_amas import find_project; print(find_project() or '')"
+if ($proj) { Start-Process "$url/projects/$proj/data?labeling=1" } else { Start-Process "$url/projects/" }
