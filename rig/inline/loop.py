@@ -368,6 +368,15 @@ def line_running(state, cam_settings):
                 judge_flash(state, m.get("flash_level"))
                 if state.get("health", {}).get("flash") == "fail":
                     set_health(state, flash="ok")
+            except flashcam.FlashTiming:
+                # The flash fired, and waking it is all a keep-alive is for.
+                # Over an empty chute the light falls unevenly (darker at the
+                # top, 2026-10-19), which fails the even-frame check meant for
+                # readings; on time, that is not a failure here.
+                state["last_flash_at"] = iso(now_utc())
+                log("keep-alive flash (fired; frame uneven over the empty chute)")
+                if state.get("health", {}).get("flash") == "fail":
+                    set_health(state, flash="ok")
             except flashcam.FlashNotFired:
                 log("keep-alive: the flash did not fire")
                 set_health(state, flash="fail",
