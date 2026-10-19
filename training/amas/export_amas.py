@@ -28,7 +28,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, ls  # noqa: E402
-from sync_amas import AMAS, EXCLUDED_LOTS, FIRST_LOT, find_project  # noqa: E402
+from sync_amas import AMAS, EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS, find_project  # noqa: E402
 
 CLASSES = ["MEO", "Peau", "Incertain"]
 TILES = AMAS / "tiles"
@@ -65,7 +65,7 @@ def main():
         # Lots before FIRST_LOT: their boxes are as good as any for training,
         # only their lot assignment is not trusted -- so train, never val,
         # and left out of the per-lot check.
-        early = d["lot_number"] < FIRST_LOT or d.get("lab_me_pct") is None
+        early = d["lot_number"] < FIRST_LOT or d.get("lab_me_pct") is None or d["lot_number"] in NO_FIT_LOTS
         if d["lot_number"] in EXCLUDED_LOTS:
             continue
         boxes = [r for r in res if r["type"] == "rectanglelabels"]

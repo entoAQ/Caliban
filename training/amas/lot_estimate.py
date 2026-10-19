@@ -33,7 +33,7 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, http  # noqa: E402
 from pull_amas import BUCKET, CHUTE_MOUNTED, LAG, WINDOW, ts  # noqa: E402
 from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
-from sync_amas import EXCLUDED_LOTS, FIRST_LOT  # noqa: E402
+from sync_amas import EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS  # noqa: E402
 
 CACHE = ROOT / "amas" / "all"
 BANDS = [(3, "<3%"), (5, "3-5%"), (8, "5-8%"), (10, "8-10%"), (999, ">10%")]
@@ -150,7 +150,7 @@ def main():
                         if per_reading else None)
         print(f"  {lot['lot']}: {len(per_reading)} readings read", flush=True)
 
-    cal = [l for l in lots if l["lot"] in trained and l["lab"] is not None and l["ratio"]]
+    cal = [l for l in lots if l["lot"] in trained and l["lab"] is not None and l["ratio"] and l["lot"] not in NO_FIT_LOTS]
     k = sum(l["lab"] * l["ratio"] for l in cal) / sum(l["ratio"] ** 2 for l in cal)
     print(f"\nscale fitted on {len(cal)} training lots: lab = {k:.2f} x ratio\n")
     # For retrain.ps1: the scale goes into Caliban's inline_settings.yolo_scale.
@@ -165,7 +165,7 @@ def main():
         bs = sorted(k * 100 * sum(m for m, _ in s) / max(1, sum(p for _, p in s))
                     for s in (random.choices(pr, k=len(pr)) for _ in range(1000)))
         est = k * l["ratio"]
-        used = "training" if l["lot"] in trained else "BLIND"
+        used = "not fitted" if l["lot"] in NO_FIT_LOTS else "training" if l["lot"] in trained else "BLIND"
         lab = f"{l['lab']:5.2f}   {band(l['lab'])}" if l["lab"] is not None else "  -"
         print(f"{l['lot']:15s} {used:10s} {len(pr):5d}   {est:6.2f}   {bs[100]:5.2f}-{bs[900]:5.2f}   "
               f"{band(est):7s} {lab}")

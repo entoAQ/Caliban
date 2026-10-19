@@ -34,6 +34,11 @@ AMAS = ROOT / "amas"
 FIRST_LOT = "20261016"
 # Lots never to be compared with the lab or labelled (Tim, 2026-10-18).
 EXCLUDED_LOTS = {"20261018-BB04"}
+# Lots whose lab result is kept but does not match their photos (Tim,
+# 2026-10-19: 10-17 BB03 read ~10% against a lab 5.33 with every model):
+# never used to fit the scale or scored against the lab. Their boxes still
+# train the model -- a box is right or wrong whatever the lot's lab says.
+NO_FIT_LOTS = {"20261017-BB03"}
 PROJECT_TITLE = "Chute en ligne - MEO"
 
 INSTRUCTIONS = """<p>Each task is one tile, a sixth of a photo. Draw a box around every piece of <b>MEO</b> in the tile, and nothing else. A piece cut by the tile edge: box the part you can see.</p>
