@@ -48,7 +48,8 @@ INSTRUCTIONS = """<p>Each task is one tile, a sixth of a photo. Draw a box aroun
 <li>Skip anything you could not pick up between two fingers: dust, crumbs, specks. They are not MEO.</li>
 <li><b>Peau</b> (2): pale papery shed skin. Not MEO, boxed so the model learns to tell it apart.</li>
 <li><b>Incertain</b> (3): you cannot tell MEO from larva (half hidden, blurred). Box it rather than guess.</li>
-<li>Larvae, chute and shadows: nothing. A tile with no MEO is submitted with no box.</li>
+<li><b>Prépupe</b> (4): a dark prepupa, whole or only partly visible (cut off by a larva falling across it, or by the tile edge). Not MEO: boxed, the visible part only, so the model learns that dark is not enough. A pre-filled MEO box on a prepupa: switch it to Prépupe rather than deleting it.</li>
+<li>Pale larvae, chute and shadows: nothing. A tile with no MEO is submitted with no box.</li>
 </ol>
 <p>Zoom in: grey-brown on a grey chute is easy to miss. Go over the whole tile.</p>
 <p>Unusable tile (blurred, flash missed): tick <i>Inutilisable</i> and submit, rather than skip.</p>"""

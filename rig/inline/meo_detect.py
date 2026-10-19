@@ -32,7 +32,7 @@ COLS, ROWS = 3, 2
 SIZE = 416
 CONF = 0.25
 IOU = 0.7
-MEO = 0  # class 0 of MEO / Peau / Incertain
+MEO = 0  # class 0 of MEO / Peau / Incertain (/ Prépupe from the next retrain)
 
 _session = None
 
