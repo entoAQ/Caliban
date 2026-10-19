@@ -8,9 +8,8 @@ photos are chosen per lab lot rather than at random: the boxes then give,
 per lot, sum(clump area) / sum(product area), to set against the lab ME%.
 
 For every lot with a lab ME%, takes the inline photos taken since --since
-of its window (previous bag close to this bag close, less the 10-minute lag,
-at most 120 minutes: the same window as sgsc-app's inline_sample_lots view),
-burst photos included. From those it measures the product share of up to
+of its probe window (lot_windows(): the last 45 minutes of the bag, the part
+the lab's sample comes from), burst photos included. From those it measures the product share of up to
 3 x --per-lot evenly spaced photos (warm, saturated pixels, rig/inline/
 flashcam.py product_share), drops empty-chute ones and keeps --per-lot spread
 evenly from lightest to heaviest flow.
@@ -52,13 +51,36 @@ CHUTE_MOUNTED = "2026-10-13T12:30:00Z"
 # photos are taken from here on only: the set already labelled is from
 # before, and softer photos are not added to it.
 REFOCUSED = "2026-10-18T14:20:00Z"
-LAG = timedelta(minutes=10)        # inline_settings operator_lot_lag_min
-WINDOW = timedelta(minutes=120)    # inline_settings operator_lot_window_min
+# Lot windows, from the bagging scale's trace (2026-10-19, 51 bags over
+# 10-15..10-18): the operator confirms a lot about 2 minutes after its last
+# top-up, and product reaches the scale 0-2 minutes after passing Ariel. So a
+# bag holds what Ariel saw from the previous confirmation to its own, less LAG.
+# The lab's probe only reaches ~70% into the bag (Tim), so the lab describes
+# the end of the fill: against the lab, the last PROBE of the bag matched best
+# (33 lots: 0.99-1.04 average miss, against 1.40 for the whole bag). Hence two
+# windows -- the probe window for anything set against the lab (fitting the
+# scale, checking a model, the scorecard), the whole bag for the lot's own
+# estimate, which also covers what the probe never reaches.
+LAG = timedelta(minutes=2)
+PROBE = timedelta(minutes=45)
+WHOLE_CAP = timedelta(hours=24)    # a first bag after a weekend: no further back
 EMPTY = 0.02                       # product share below this: chute nearly empty
 
 
 def ts(s):
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+
+def lot_windows(closes):
+    """(whole_start, probe_start, end) for each confirmation time, in order:
+    a reading at t is in the whole bag if whole_start < t <= end, in the probe
+    window if probe_start < t <= end."""
+    out, prev = [], None
+    for close in closes:
+        whole = max(prev or close - WHOLE_CAP, close - WHOLE_CAP)
+        out.append((whole - LAG, max(whole, close - PROBE) - LAG, close - LAG))
+        prev = close
+    return out
 
 
 def product_share(path):
@@ -161,11 +183,8 @@ def main():
               f"{len(keep)} kept (flow {keep[0][0] if keep else 0:.2f}-{keep[-1][0] if keep else 0:.2f})")
         return
 
-    prev = None
     from sync_amas import EXCLUDED_LOTS
-    for lot in lots:
-        close = ts(lot["packaged_at"])
-        start, prev = max(prev or close - WINDOW, close - WINDOW) - LAG, close
+    for lot, (_, start, end) in zip(lots, lot_windows([ts(l["packaged_at"]) for l in lots])):
         wt = latest.get((lot["id"], tests["me_organic_wt"]))
         den = latest.get((lot["id"], tests["bulk_density"]))
         if wt is None or not den or lot["lot_number"] in EXCLUDED_LOTS:
@@ -174,7 +193,7 @@ def main():
 
         photos = []   # (reading_id, storage path, taken_at), bursts in full
         for r in rows:
-            if start < ts(r["created_at"]) <= close - LAG:
+            if start < ts(r["created_at"]) <= end:
                 group = (r.get("mesures") or {}).get("groupe") or [r["storage_path"]]
                 photos += [(r["lot_number_text"], p, r["created_at"]) for p in group]
         if not photos:

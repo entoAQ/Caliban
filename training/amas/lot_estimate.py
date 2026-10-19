@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Estimate lots' ME% from all their inline photos with the trained model.
 
-For every lot with a lab ME% (and any lot named with --lots), takes every
-inline photo in the lot's window (bursts included, same window as
-pull_amas.py), runs the detector tile by tile on the measured crop and
-pools sum(MEO box area) / sum(product px) over the lot.
+For every lot, takes every inline photo of the bag (bursts included,
+pull_amas.lot_windows()), runs the detector tile by tile on the measured
+crop and pools sum(MEO box area) / sum(product px).
 
-The scale from that ratio to lab ME% (lab = k x ratio, the density factor)
-is fitted on the lots the model trained on; the other lots -- the val lots
-and lots never labelled at all -- are estimated blind with it: an ME% with
-an 80% range from a bootstrap over the lot's readings, and the band.
+Anything set against the lab uses the probe window only -- the last 45
+minutes of the bag, the part the lab's probe reaches: the scale from that
+ratio to lab ME% (lab = k x ratio, the density factor) is fitted on the lots
+the model trained on, and the other lots -- the val lots and lots never
+labelled at all -- are estimated blind with it: an ME% with an 80% range
+from a bootstrap over the window's readings, and the band. The last column
+is the whole bag with the same scale: the lot's own estimate, which is not
+compared with the lab.
 
 Photos are cached in INLINE_LABELING_DIR/amas/all/ (Supabase keeps them only a
 few days); --download-only fetches them without running the model.
@@ -31,7 +34,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, http  # noqa: E402
-from pull_amas import BUCKET, CHUTE_MOUNTED, LAG, WINDOW, ts  # noqa: E402
+from pull_amas import BUCKET, CHUTE_MOUNTED, lot_windows, ts  # noqa: E402
 from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
 from sync_amas import EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS  # noqa: E402
 
@@ -74,16 +77,16 @@ def fetch_lots(url, auth):
         ("source", "eq.inline"), ("excluded_reason", "is.null"), ("storage_path", "not.is.null"),
         ("operator_instruction", "not.is.null"), ("created_at", f"gte.{CHUTE_MOUNTED}"),
         ("order", "created_at")])
-    out, prev = [], None
-    for lot in lots:
-        close = ts(lot["packaged_at"])
-        start, prev = max(prev or close - WINDOW, close - WINDOW) - LAG, close
+    out = []
+    for lot, (whole, probe, end) in zip(lots, lot_windows([ts(l["packaged_at"]) for l in lots])):
         wt = latest.get((lot["id"], tests["me_organic_wt"]))
         den = latest.get((lot["id"], tests["bulk_density"]))
-        readings = [(r["lot_number_text"], (r.get("mesures") or {}).get("groupe") or [r["storage_path"]])
-                    for r in rows if start < ts(r["created_at"]) <= close - LAG]
+        # "readings": the probe window, for the lab; "whole": the bag.
+        whole_r = [(r["lot_number_text"], (r.get("mesures") or {}).get("groupe") or [r["storage_path"]],
+                    ts(r["created_at"]) > probe) for r in rows if whole < ts(r["created_at"]) <= end]
         out.append({"lot": lot["lot_number"], "lab": round(100 * wt / den, 2) if wt is not None and den else None,
-                    "readings": readings})
+                    "readings": [(rid, g) for rid, g, in_probe in whole_r if in_probe],
+                    "whole": [(rid, g) for rid, g, _ in whole_r]})
     return out
 
 
@@ -101,7 +104,7 @@ def main():
     CACHE.mkdir(parents=True, exist_ok=True)
     got = gone = 0
     for lot in lots:
-        for _, paths in lot["readings"]:
+        for _, paths in lot["whole"]:
             for p in paths:
                 dest = CACHE / Path(p).name
                 if dest.exists():
@@ -139,16 +142,21 @@ def main():
                        for b, c in zip(res.boxes.xyxy.tolist(), res.boxes.cls.tolist()) if int(c) == 0)
         return meo, prod
 
+    def pooled(pr):
+        return 100 * sum(m for m, _ in pr) / max(1, sum(p for _, p in pr)) if pr else None
+
     for lot in lots:
-        per_reading = []
-        for _, paths in lot["readings"]:
+        measured = {}
+        for rid, paths in lot["whole"]:
             ms = [photo(CACHE / Path(p).name) for p in paths if (CACHE / Path(p).name).exists()]
             if ms:
-                per_reading.append((sum(m for m, _ in ms), sum(p for _, p in ms)))
-        lot["per_reading"] = per_reading
-        lot["ratio"] = (100 * sum(m for m, _ in per_reading) / max(1, sum(p for _, p in per_reading))
-                        if per_reading else None)
-        print(f"  {lot['lot']}: {len(per_reading)} readings read", flush=True)
+                measured[rid] = (sum(m for m, _ in ms), sum(p for _, p in ms))
+        lot["per_reading"] = [measured[rid] for rid, _ in lot["readings"] if rid in measured]
+        lot["ratio"] = pooled(lot["per_reading"])
+        lot["whole_ratio"] = pooled(list(measured.values()))
+        lot["whole_n"] = len(measured)
+        print(f"  {lot['lot']}: {len(lot['per_reading'])} readings in the probe window, {len(measured)} in the bag",
+              flush=True)
 
     cal = [l for l in lots if l["lot"] in trained and l["lab"] is not None and l["ratio"] and l["lot"] not in NO_FIT_LOTS]
     k = sum(l["lab"] * l["ratio"] for l in cal) / sum(l["ratio"] ** 2 for l in cal)
@@ -157,18 +165,20 @@ def main():
     (ROOT / "amas_runs" / args.name / "scale.json").write_text(
         json.dumps({"yolo_scale": round(k, 3), "lots": len(cal)}), encoding="utf-8")
     random.seed(3)
-    print(f"{'lot':15s} {'used':10s} readings  estimate  80% range     band     lab    lab band")
+    print(f"{'lot':15s} {'used':10s} readings  estimate  80% range     band     lab    lab band   whole bag (readings)")
     for l in lots:
         if not l["ratio"]:
+            if l["whole_ratio"]:
+                print(f"{l['lot']:15s} {'':10s} {0:5d}   {'':48s}   {k * l['whole_ratio']:6.2f} ({l['whole_n']})")
             continue
         pr = l["per_reading"]
         bs = sorted(k * 100 * sum(m for m, _ in s) / max(1, sum(p for _, p in s))
                     for s in (random.choices(pr, k=len(pr)) for _ in range(1000)))
         est = k * l["ratio"]
         used = "not fitted" if l["lot"] in NO_FIT_LOTS else "training" if l["lot"] in trained else "BLIND"
-        lab = f"{l['lab']:5.2f}   {band(l['lab'])}" if l["lab"] is not None else "  -"
+        lab = f"{l['lab']:5.2f}   {band(l['lab']):6s}" if l["lab"] is not None else "  -            "
         print(f"{l['lot']:15s} {used:10s} {len(pr):5d}   {est:6.2f}   {bs[100]:5.2f}-{bs[900]:5.2f}   "
-              f"{band(est):7s} {lab}")
+              f"{band(est):7s} {lab}   {k * l['whole_ratio']:6.2f} ({l['whole_n']})")
 
 
 if __name__ == "__main__":

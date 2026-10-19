@@ -3,8 +3,9 @@
 
 For every lot with a real lab ME% (estimates noted "Estimation...", the
 excluded lots and the no-fit lots left out, as everywhere in this folder)
-whose window holds readings decided by the detector (prompt yolo-...),
-pools them as the screen's estimate does -- scale x 100 x sum(MEO) /
+whose probe window (the last 45 minutes of the bag, the part the lab's
+probe reaches: pull_amas.lot_windows()) holds readings decided by the
+detector (prompt yolo-...), pools them as the screen's estimate does -- scale x 100 x sum(MEO) /
 sum(product) over the lot's photos -- and sets it beside the lab.
 
 Written to INLINE_LABELING_DIR/scorecard.csv (one row per lot) and
