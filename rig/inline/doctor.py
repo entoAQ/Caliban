@@ -472,6 +472,35 @@ def check_flash(full):
     return check("flash", "Flash", "ok", f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK.")
 
 
+# Seconds per burst above which the detector is called slow: a burst of 8
+# took 5 s on 2026-10-18, so 20 s means something is wrong (heat, memory).
+DETECTOR_SLOW_S = 20
+
+
+def check_detector(full):
+    """The MEO detector (meo_detect.py) on the last burst, as the loop recorded
+    it. Caliban refuses readings without it when it decides with the
+    detector (inline_settings.decider = yolo)."""
+    d = load_state().get("detector") or {}
+    if not d:
+        return check("detector", "Détecteur MEO", "off", "Pas encore utilisé depuis le démarrage.")
+    if not d.get("ok"):
+        err = d.get("error") or "erreur inconnue"
+        if err.startswith("absent"):
+            return check("detector", "Détecteur MEO", "fail", "Pas installé sur ce Pi.",
+                         manual="Prévenir l'AQ : installer onnxruntime sur Ariel "
+                                "(pip3 install --user --break-system-packages --no-deps onnxruntime "
+                                "flatbuffers protobuf packaging), puis redémarrer les lectures.")
+        return check("detector", "Détecteur MEO", "fail", f"En erreur à la dernière lecture ({err[:80]}).",
+                     fix="restart_loop")
+    s, n = d.get("s"), d.get("photos")
+    detail = f"{n} photo(s) en {s} s (modèle {d.get('version')}), il y a {minutes(age_s(d.get('at')))}."
+    if s is not None and s > DETECTOR_SLOW_S:
+        return check("detector", "Détecteur MEO", "warn", "Lent : " + detail,
+                     manual="Vérifier la température du Pi (vcgencmd measure_temp) et la mémoire libre (free -h).")
+    return check("detector", "Détecteur MEO", "ok", detail)
+
+
 def tray_busy():
     """A capture is in progress (poller.py's busy marker, fresh)."""
     try:
@@ -554,7 +583,8 @@ def check_calibration(full):
 
 
 CHECKS_ARIEL = [check_power, check_disk, check_clock, check_wifi, check_caliban, check_key,
-                check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash]
+                check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash,
+                check_detector]
 CHECKS_TRAY = [check_power, check_disk_tray, check_clock, check_wifi, check_caliban, check_key,
                check_update, check_poller, check_camera_tray, check_tof, check_calibration]
 CHECKS = CHECKS_TRAY if TRAY else CHECKS_ARIEL

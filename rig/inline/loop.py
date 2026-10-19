@@ -187,21 +187,29 @@ def detect_burst(paths):
     decides as its settings say (prompts, or a refusal)."""
     global _detector_missing
     if _detector_missing:
+        detector_status.clear(); detector_status.update(ok=False, at=iso(now_utc()), error=_detector_missing)
         return None
     try:
         import meo_detect
         photos = [meo_detect.measure(p) for p in paths]
     except ImportError as e:
         log(f"MEO detector not available ({e}): readings go without it")
-        _detector_missing = True
+        _detector_missing = f"absent : {e}"
+        detector_status.clear(); detector_status.update(ok=False, at=iso(now_utc()), error=_detector_missing)
         return None
     except Exception as e:
         log(f"MEO detector failed: {type(e).__name__}: {e}")
+        detector_status.clear(); detector_status.update(ok=False, at=iso(now_utc()), error=f"{type(e).__name__}: {e}"[:200])
         return None
+    detector_status.clear(); detector_status.update(ok=True, at=iso(now_utc()), error=None, version=meo_detect.version(),
+                           photos=len(photos), s=round(sum(p["ms"] for p in photos) / 1000, 1))
     return {"version": meo_detect.version(), "photos": photos}
 
 
-_detector_missing = False
+_detector_missing = None
+# The last burst's detector result, kept in the state file for the doctor
+# (doctor.py check_detector): ok, when, how long, or what went wrong.
+detector_status = {}
 
 
 def request_reading(reading_id, paths, covers=None, det=None):
@@ -468,6 +476,7 @@ def take_reading(state):
     # The MEO detector on this Pi (Caliban decides with it when its
     # inline_settings.decider is "yolo"). A few seconds per burst.
     det = detect_burst(paths)
+    state["detector"] = dict(detector_status)
     if det:
         p = det["photos"]
         log(f"{reading_id}: detector {sum(x['meo_n'] for x in p)} MEO pieces, "
