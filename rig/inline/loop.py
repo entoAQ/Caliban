@@ -53,7 +53,7 @@ CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
-HISTORY_KEEP = 36          # three hours at five minutes
+HISTORY_KEEP = 150         # the screen's two-hour trend at one reading a minute
 # A capture is a few seconds; with every flash retry used (6 tries, 10 s
 # apart, flashcam.DEFAULTS) about 65 s. Past this, libcamera has wedged inside
 # this process and nothing here can free it -- see watchdog.
@@ -524,6 +524,8 @@ def take_reading(state):
         "decision_pct": reply.get("decision_pct"),
         "decision_n": reply.get("decision_n"),
         "decision_min": reply.get("decision_min"),
+        # Minutes pooled when the detector decides over a window (0: median).
+        "decision_window_min": reply.get("decision_window_min") or 0,
         # On the lab ME% scale through Caliban's calibration line, when set;
         # the screen shows this rather than the prompt's band.
         "calibrated_pct": reply.get("calibrated_pct"),

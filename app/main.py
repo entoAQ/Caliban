@@ -3643,6 +3643,15 @@ INLINE_DEFAULTS = {
     "decision_readings": 1,
     "decision_min_readings": 1,
     "decision_max_age_min": 30,
+    # With the detector deciding: pool every reading of the last
+    # decision_window_min minutes (none from before the last confirmation) as
+    # one sample -- yolo_scale x 100 x sum(MEO) / sum(product), as a lot is
+    # estimated -- instead of the median above. Photos 8 s apart are 70% alike
+    # (2026-10-19, 52 bursts), so one photo a minute over ten minutes judges far
+    # more of the stream than a burst of 4-8 every few minutes, for the same
+    # flashes. decision_min_readings still applies, counted in readings.
+    # 0 = the median, as before.
+    "decision_window_min": 0,
     # Photos per reading. Above 1 the Pi takes a burst of group_size photos,
     # group_spacing_s apart, and sends them together for a group prompt
     # (chute-g1) to judge as one tray-sized sample -- see rig/prompt_chute_g1.sql.
@@ -3690,7 +3699,7 @@ def inline_settings():
                 settings[key] = overrides[key].strip()
         for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
                     "decision_readings", "decision_min_readings", "decision_max_age_min",
-                    "group_size", "group_spacing_s", "group_max"):
+                    "decision_window_min", "group_size", "group_spacing_s", "group_max"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3732,7 +3741,10 @@ def inline_settings():
     settings["increase_medium_at"] = max(settings["increase_medium_at"], settings["increase_at"])
     settings["alert_at"] = max(settings["alert_at"], settings["increase_medium_at"])
     settings["decision_readings"] = max(1, min(30, settings["decision_readings"]))
-    settings["decision_min_readings"] = max(1, min(settings["decision_readings"], settings["decision_min_readings"]))
+    settings["decision_window_min"] = max(0, min(60, settings["decision_window_min"]))
+    # Over a window, the minimum is a count of readings in it, not of a median's.
+    cap = 60 if settings["decision_window_min"] else settings["decision_readings"]
+    settings["decision_min_readings"] = max(1, min(cap, settings["decision_min_readings"]))
     settings["decision_max_age_min"] = max(5, min(240, settings["decision_max_age_min"]))
     settings["group_size"] = max(1, min(8, settings["group_size"]))
     settings["group_spacing_s"] = max(3, min(60, settings["group_spacing_s"]))
@@ -3786,6 +3798,39 @@ def inline_decision(estimate_pct, prompt_version, settings, since_ack_s=None):
         except Exception as e:
             print(f"[inline decision lookup failed] {type(e).__name__}: {e}")
     return round(statistics.median(values), 2), len(values)
+
+
+def inline_window_decision(yolo, prompt_version, settings, since_ack_s=None):
+    """(decision_pct, n) for the detector: this reading and every one from the
+    same model in the last decision_window_min minutes (none from before the
+    operator's last confirmation, as in inline_decision), pooled as one sample
+    -- yolo_scale x 100 x sum(MEO px) / sum(product px). n is the number of
+    readings pooled. A lookup failure falls back to this reading alone."""
+    meo, product, n = float(yolo["meo_px"]), float(yolo["product_px"]), 1
+    horizon = settings["decision_window_min"] * 60
+    if since_ack_s is not None:
+        horizon = min(horizon, max(0, since_ack_s))
+    if horizon > 0:
+        start = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=horizon)
+        try:
+            rows = (
+                supabase.table("vision_band_estimates")
+                .select("mesures")
+                .eq("source", "inline")
+                .eq("prompt_version", prompt_version)
+                .not_.is_("operator_instruction", "null")
+                .is_("excluded_reason", "null")
+                .gte("created_at", start.isoformat())
+                .limit(200)
+                .execute()
+            ).data or []
+            for r in rows:
+                y = (r.get("mesures") or {}).get("yolo") or {}
+                if y.get("product_px"):
+                    meo, product, n = meo + float(y.get("meo_px") or 0), product + float(y["product_px"]), n + 1
+        except Exception as e:
+            print(f"[inline window lookup failed] {type(e).__name__}: {e}")
+    return round(settings["yolo_scale"] * 100 * meo / product, 2), n
 
 
 def inline_calibrated(value, settings):
@@ -3889,6 +3934,8 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "decision_pct": decider.get("decision_pct"),
         "decision_n": decider.get("decision_n"),
         "decision_min": settings["decision_min_readings"],
+        # Minutes pooled when the detector decides over a window (0: a median).
+        "decision_window_min": settings["decision_window_min"] if settings["decider"] == "yolo" else 0,
         # This reading on the lab scale, and the line that put it there (None
         # without a calibration: the screen then shows the band).
         "calibrated_pct": decider.get("calibrated_pct"),
@@ -4015,8 +4062,12 @@ async def inline_reading(
         decider = results[0]
         # The detector's estimate is on the lab scale already: no calibration line.
         dec_settings = {**settings, "calibration": None} if use_yolo else settings
-        decision_pct, decision_n = inline_decision(
-            decider.get("estimate_pct"), decider.get("prompt_version"), dec_settings, since_ack)
+        if use_yolo and settings["decision_window_min"]:
+            decision_pct, decision_n = inline_window_decision(
+                decider["measures"]["yolo"], decider.get("prompt_version"), settings, since_ack)
+        else:
+            decision_pct, decision_n = inline_decision(
+                decider.get("estimate_pct"), decider.get("prompt_version"), dec_settings, since_ack)
         # The line is straight and rising, so the median of calibrated values
         # is the calibrated median: calibrating after the median is the same.
         decision_pct = inline_calibrated(decision_pct, dec_settings)

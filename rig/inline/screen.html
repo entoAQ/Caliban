@@ -171,7 +171,7 @@
   <div id="ack-error"></div>
 
   <div id="trend-box">
-    <h2>Dernières lectures — ligne : médiane décisive</h2>
+    <h2>Dernières lectures — ligne : valeur décisive</h2>
     <svg id="trend"></svg>
   </div>
 
@@ -345,10 +345,18 @@ function render() {
   // Calibrated (Caliban inline_settings.calibration): the reading in
   // approximate lab ME%, which is what the thresholds are in. Otherwise the
   // prompt's own band.
-  $('band').textContent = r.calibrated_pct != null ? `≈ ${num(r.calibrated_pct)} % ME`
+  // Over a window (detector, one photo a minute), the big number is the
+  // window's pooled value -- what the instruction is decided on -- not the
+  // last photo alone, which swings with whatever piece fell past it.
+  const pooled = r.decision_window_min > 0 && r.decision_pct != null;
+  $('band').textContent = pooled ? `≈ ${num(r.decision_pct)} % ME`
+    : r.calibrated_pct != null ? `≈ ${num(r.calibrated_pct)} % ME`
     : r.band ? `${String(r.band).replace(/\s*%$/, '').replace(/\./g, ',')} %` : '—';
   $('age').textContent = `${hhmm(r.at)} · ${agoText(r.at)}`;
-  $('decision').textContent = r.decision_pct != null && r.decision_n > 1
+  $('decision').textContent = pooled
+    ? `Moyenne ${r.decision_window_min} min (${r.decision_n} photo${r.decision_n > 1 ? 's' : ''})`
+      + (r.calibrated_pct != null ? ` · dernière photo ${num(r.calibrated_pct)} %` : '')
+    : r.decision_pct != null && r.decision_n > 1
     ? `Médiane ${r.decision_n} lectures : ${num(r.decision_pct)} %${r.calibrated_pct != null ? ' ME' : ''}` : '';
 
   let sub = '', steps = [];
@@ -545,7 +553,7 @@ function renderTrend(history, thresholds) {
       const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
       out += `<circle cx="${x(p.t)}" cy="${y(p.estimate_pct)}" r="4" fill="${c}" opacity=".8"/>`;
     }
-    // Then the decision median over them, one polyline per run of readings
+    // Then the decision value (median or window average) over them, one polyline per run of readings
     // with no gap between them. Readings from before the median existed fall
     // back to their own value.
     let run = [];
