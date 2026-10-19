@@ -8,3 +8,6 @@ __pycache__/
 
 # The inline rig's deployed model is the exception: Ariel runs it from here.
 !rig/inline/models/*.onnx
+
+# Tim's own notes.
+/retraining.txt
