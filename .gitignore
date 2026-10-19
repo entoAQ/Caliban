@@ -1,0 +1,10 @@
+# Python bytecode: made by running the code, differs per machine and version.
+__pycache__/
+*.pyc
+
+# YOLO starting weights that ultralytics downloads when training
+# (training/amas/train_meo.py); fetched again whenever needed.
+*.pt
+
+# The inline rig's deployed model is the exception: Ariel runs it from here.
+!rig/inline/models/*.onnx
