@@ -1,1 +1,5 @@
-{"version": "meo-20261018-1624", "trained_on_tiles": 678, "yolo_scale_fitted": 2.553}
+﻿{
+    "trained_on_tiles":  925,
+    "version":  "meo-20261019-1653",
+    "yolo_scale_fitted":  2.37
+}
