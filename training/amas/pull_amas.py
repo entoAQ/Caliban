@@ -31,6 +31,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import sys
 import urllib.error
 import urllib.parse
@@ -105,6 +106,9 @@ def pick(photos, n, url, auth):
     measured = []
     for rid, path, taken in cands:
         dest = AMAS / Path(path).name
+        cached = AMAS / "all" / dest.name   # lot_estimate.py's copy, kept after Storage drops it
+        if not dest.exists() and cached.exists():
+            shutil.copyfile(cached, dest)
         if not dest.exists():
             try:
                 dest.write_bytes(http("GET", f"{url}/storage/v1/object/{BUCKET}/{path}", auth, raw=True))
