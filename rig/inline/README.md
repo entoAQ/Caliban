@@ -58,11 +58,15 @@ account to log into, nothing to log out of, and it still says something useful
 when the network is down. `screen.py`'s docstring has the full reasoning.
 
 It shows the current instruction (same wording and colours as the tray
-operator screen), recent readings against the 3 % and 8 % lines, the last
+operator screen), recent readings against the decrease and increase lines (4 % and 6 % since
+2026-10-20, from `inline_settings`), the last
 photo, and the health of camera, flash and network. A reading older than 15
 minutes has its instruction withdrawn.
 
-AUGMENTER and DIMINUER ask the operator to confirm. When the instruction names
+AUGMENTER and DIMINUER ask the operator to confirm. They say how far to turn
+the destoner's handle: DIMINUER (under 4 %) 2 cm clockwise; AUGMENTER 2 cm
+anti-clockwise from 6 %, 4 cm from 10 %; 4-6 % no change (`INSTRUCTIONS` in
+`screen.html`, thresholds in `handle_cm.sql`). When the instruction names
 a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
 destoner's own gauge and confirms; that value then stays in the "Réglage
 destoner" bar at the top until the next one, so anyone passing can check the

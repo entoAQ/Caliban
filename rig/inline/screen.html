@@ -197,13 +197,16 @@
 // operator who moves between the two never re-learns what a colour means.
 // actBg/actFg are the full-screen colours of the action look: the same hues,
 // saturated, because this screen is read from metres away, not held in a hand.
+// turn: how far to move the destoner's handle (AQ, 2026-10-20). The ME% lines
+// behind each key are Caliban's inline_settings: decrease below 4, increase
+// from 6, medium (and major) from 10.
 const INSTRUCTIONS = {
-  increase_minor:  { title: 'AUGMENTER', sev: 'léger',  bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917' },
-  increase_medium: { title: 'AUGMENTER', sev: 'modéré', bg: '#fde68a', border: '#d97706', fg: '#78350f', arrow: '▲', actBg: '#ea580c', actFg: '#ffffff' },
-  increase_major:  { title: 'AUGMENTER', sev: 'majeur', bg: '#fecaca', border: '#dc2626', fg: '#7f1d1d', arrow: '▲', actBg: '#dc2626', actFg: '#ffffff' },
-  increase:        { title: 'AUGMENTER', sev: '',       bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917' },
+  increase_minor:  { title: 'AUGMENTER', sev: 'léger',  bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917', turn: '2 cm dans le sens antihoraire' },
+  increase_medium: { title: 'AUGMENTER', sev: 'modéré', bg: '#fde68a', border: '#d97706', fg: '#78350f', arrow: '▲', actBg: '#ea580c', actFg: '#ffffff', turn: '4 cm dans le sens antihoraire' },
+  increase_major:  { title: 'AUGMENTER', sev: 'majeur', bg: '#fecaca', border: '#dc2626', fg: '#7f1d1d', arrow: '▲', actBg: '#dc2626', actFg: '#ffffff', turn: '4 cm dans le sens antihoraire' },
+  increase:        { title: 'AUGMENTER', sev: '',       bg: '#fef3c7', border: '#f59e0b', fg: '#78350f', arrow: '▲', actBg: '#f59e0b', actFg: '#1c1917', turn: '2 cm dans le sens antihoraire' },
   hold:            { title: 'AUCUN CHANGEMENT', sev: '', bg: '#064e3b', border: '#10b981', fg: '#ecfdf5' },
-  decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a', arrow: '▼', actBg: '#2563eb', actFg: '#ffffff' },
+  decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a', arrow: '▼', actBg: '#2563eb', actFg: '#ffffff', turn: '2 cm dans le sens horaire' },
 };
 const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748b', fg: '#f8fafc' };
 // Trial mode (Caliban's inline_settings.mode = 'shadow'): the reading is real
@@ -366,7 +369,7 @@ function render() {
   } else if (stale) {
     sub = `Dernière lecture ${agoText(r.at)} — ne pas régler le destoner sur cette base.`;
   } else if (trial) {
-    sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') : '—'}. `
+    sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') + (read.turn ? ', poignée ' + read.turn : '') : '—'}. `
         + "Ne rien régler d'après cet écran : suivre l'échantillonnage au plateau.";
   } else if (actionable && s.ack) {
     sub = 'Réglage confirmé — vérification des lectures suivantes';
@@ -377,12 +380,12 @@ function render() {
   } else if (shown.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
              'Peu ou pas de larves dans les rejets : aucun réglage',
-             shown.target ? `Sinon : régler à la valeur ci-dessous` : "Sinon : diminuer l'agressivité du destoner"];
+             shown.target ? `Sinon : régler à la valeur ci-dessous` : `Sinon : tourner la poignée de ${ins.turn}`];
   } else if (isIncrease(shown.instruction)) {
     // With a value to set, the value box below says what to do; the card
     // keeps only how far out the reading is.
     sub = shown.target ? (ins.sev ? `Écart ${ins.sev}` : '')
-                       : "l'agressivité du destoner" + (ins.sev ? ` — ${ins.sev}` : '');
+                       : `Tourner la poignée de ${ins.turn}` + (ins.sev ? ` — écart ${ins.sev}` : '');
   }
   $('sub').textContent = sub;
   $('sub').hidden = !sub;
