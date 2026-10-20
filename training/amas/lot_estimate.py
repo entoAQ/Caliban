@@ -12,7 +12,8 @@ the model trained on, and the other lots -- the val lots and lots never
 labelled at all -- are estimated blind with it: an ME% with an 80% range
 from a bootstrap over the window's readings, and the band. The last column
 is the whole bag with the same scale: the lot's own estimate, which is not
-compared with the lab.
+compared with the lab. The table is also saved as amas_runs/<name>/lots.json
+for compare_models.py.
 
 Photos are cached in INLINE_LABELING_DIR/amas/all/ (Supabase keeps them only a
 few days); --download-only fetches them without running the model.
@@ -165,6 +166,7 @@ def main():
     (ROOT / "amas_runs" / args.name / "scale.json").write_text(
         json.dumps({"yolo_scale": round(k, 3), "lots": len(cal)}), encoding="utf-8")
     random.seed(3)
+    rows = []
     print(f"{'lot':15s} {'used':10s} readings  estimate  80% range     band     lab    lab band   whole bag (readings)")
     for l in lots:
         if not l["ratio"]:
@@ -176,9 +178,13 @@ def main():
                     for s in (random.choices(pr, k=len(pr)) for _ in range(1000)))
         est = k * l["ratio"]
         used = "not fitted" if l["lot"] in NO_FIT_LOTS else "training" if l["lot"] in trained else "BLIND"
+        rows.append({"lot": l["lot"], "used": used, "readings": len(pr), "estimate": round(est, 3),
+                     "lab": l["lab"], "whole_bag": round(k * l["whole_ratio"], 3) if l["whole_ratio"] else None})
         lab = f"{l['lab']:5.2f}   {band(l['lab']):6s}" if l["lab"] is not None else "  -            "
         print(f"{l['lot']:15s} {used:10s} {len(pr):5d}   {est:6.2f}   {bs[100]:5.2f}-{bs[900]:5.2f}   "
               f"{band(est):7s} {lab}   {k * l['whole_ratio']:6.2f} ({l['whole_n']})")
+    (ROOT / "amas_runs" / args.name / "lots.json").write_text(
+        json.dumps({"yolo_scale": round(k, 3), "lots": rows}, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

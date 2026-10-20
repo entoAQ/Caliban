@@ -9,11 +9,12 @@
 #   1. export the labelled tiles                      (export_amas.py)
 #   2. train a new model                              (train_meo.py)
 #   3. read every lab lot with it, fit the scale      (lot_estimate.py)
-#   4. export it for Ariel into rig\inline\models\    (meo.onnx + meo.json)
-#   5. pre-fill the unlabelled tiles with it          (prelabel_amas.py)
-# Nothing reaches Ariel or the screen until you push and change the scale in
-# Supabase -- see what it prints at the end. To throw a run away instead:
-#   git checkout rig\inline\models
+#   4. export it for Ariel into its holding folder    (amas_runs\<name>\ariel\)
+#   5. score it against the model on Ariel            (compare_models.py)
+#   6. pre-fill the unlabelled tiles with it          (prelabel_amas.py)
+# rig\inline\models (what Ariel runs) is not touched: a new model waits in
+# its holding folder until promote.ps1 moves it there, and only if step 5 says
+# it is better. Nothing reaches Ariel until that is pushed and the scale set.
 
 param([int]$Epochs = 30)
 # Not "Stop": Python writes its progress to stderr, which Windows PowerShell
@@ -41,40 +42,40 @@ function Step($title, $script, $arguments) {
 }
 
 Write-Host "Retraining as $name (log: $log)"
-Step "1/5 Export labelled tiles" "export_amas.py" @()
-Step "2/5 Train ($Epochs rounds)" "train_meo.py" @("--epochs", $Epochs, "--name", $name)
-Step "3/5 Lot estimates and scale" "lot_estimate.py" @("--name", $name)
+Step "1/6 Export labelled tiles" "export_amas.py" @()
+Step "2/6 Train ($Epochs rounds)" "train_meo.py" @("--epochs", $Epochs, "--name", $name)
+Step "3/6 Lot estimates and scale" "lot_estimate.py" @("--name", $name)
 
-Write-Host "`n=== 4/5 Export for Ariel ===" -ForegroundColor Cyan
+Write-Host "`n=== 4/6 Export for Ariel (holding folder) ===" -ForegroundColor Cyan
 $weights = Join-Path $runs "$name\weights\best.pt"
 & python -c "from ultralytics import YOLO; YOLO(r'$weights').export(format='onnx', imgsz=416, opset=12, simplify=False, dynamic=False)" 2>&1 |
     Tee-Object -FilePath $log -Append | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Host "Stopped: export for Ariel failed (see $log)." -ForegroundColor Red; exit 1 }
 $scale = (Get-Content (Join-Path $runs "$name\scale.json") | ConvertFrom-Json).yolo_scale
 $tiles = (Get-ChildItem (Join-Path (Split-Path $runs) "amas_yolo\images\train")).Count
-Copy-Item (Join-Path $runs "$name\weights\best.onnx") (Join-Path $repo "rig\inline\models\meo.onnx") -Force
+$hold = Join-Path $runs "$name\ariel"
+New-Item -ItemType Directory -Force $hold | Out-Null
+Copy-Item (Join-Path $runs "$name\weights\best.onnx") (Join-Path $hold "meo.onnx") -Force
 @{ version = $name; trained_on_tiles = $tiles; yolo_scale_fitted = $scale } | ConvertTo-Json |
-    Set-Content -Encoding utf8 (Join-Path $repo "rig\inline\models\meo.json")
-Write-Host "model copied to rig\inline\models (version $name, scale $scale)"
+    Set-Content -Encoding utf8 (Join-Path $hold "meo.json")
+Write-Host "model held in $hold (version $name, scale $scale)"
 
-Step "5/5 Pre-fill the queue" "prelabel_amas.py" @("--name", $name)
+Step "5/6 Against the model on Ariel" "compare_models.py" @("--name", $name)
+$verdict = Get-Content (Join-Path $runs "$name\compare.json") | ConvertFrom-Json
+
+Step "6/6 Pre-fill the queue" "prelabel_amas.py" @("--name", $name)
 
 Write-Host "`n=== Done ===" -ForegroundColor Green
-Write-Host @"
-Check the table in step 3 (lots against the lab) before using it. If it is
-better than the model on Ariel now:
-
-  1. Push it (from the Caliban folder):
-       git add rig/inline/models
-       git commit -m "Inline: MEO detector $name"
-       git push
-     Ariel pulls it within 5 minutes and restarts its loop by itself,
-     which loads the new model.
-
-  2. Set its scale in Supabase (SQL editor):
-       update system_config set value = (value::jsonb || '{"yolo_scale": $scale}'::jsonb)::text
-       where key = 'inline_settings';
-
-Do both together: the scale belongs to this model.
-If it is not better: git checkout rig/inline/models  (keeps Ariel's model).
+if ($verdict.better) {
+    Write-Host @"
+$name scored better than $($verdict.live) on $($verdict.lots.Count) blind lots (step 5).
+To put it on Ariel, from the Caliban folder:
+  powershell -ExecutionPolicy Bypass -File training\amas\promote.ps1 -Name $name
 "@
+} else {
+    Write-Host @"
+$name did NOT score better than $($verdict.live) (step 5); Ariel keeps its model.
+It stays in its holding folder ($hold); the pre-filled boxes are still worth
+reviewing in Label Studio.
+"@
+}
