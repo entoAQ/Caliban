@@ -3996,7 +3996,10 @@ def inline_detector(raw, n_photos):
     """Ariel's MEO detector numbers for a burst (the detecteur form field:
     {"version", "photos": [{"meo_px", "meo_n", "product_px", "ms"}, ...]}),
     checked, or None when absent or unusable -- one entry per photo, product
-    seen on at least one."""
+    seen on at least one. Each photo's MEO boxes ([x0, y0, x1, y1, score] as
+    fractions of the photo) and the measured crop are kept when Ariel sends
+    them, for SGSC to draw on the photo; anything malformed there is dropped,
+    never the reading."""
     if not (raw or "").strip():
         return None
     try:
@@ -4010,7 +4013,32 @@ def inline_detector(raw, n_photos):
         return None
     if sum(r["product_px"] for r in rows) <= 0:
         return None
-    return {"version": str(det.get("version") or "meo")[:40], "photos": rows}
+    for row, ph in zip(rows, photos):
+        boxes = _fractions(ph.get("boxes"), 5, 200)
+        if boxes is not None:
+            row["boxes"] = boxes
+    out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
+    crop = _fractions([det.get("crop")], 2, 1)
+    if crop:
+        out["crop"] = crop[0]
+    return out
+
+
+def _fractions(items, width, most):
+    """items as at most `most` lists of `width` numbers, each 0-1 rounded to
+    4 places, or None if it is not that shape at all."""
+    if not isinstance(items, list):
+        return None
+    out = []
+    for it in items[:most]:
+        try:
+            vals = [round(float(v), 4) for v in it][:width]
+        except (TypeError, ValueError):
+            return None
+        if len(vals) != width or not all(0.0 <= v <= 1.0 for v in vals):
+            return None
+        out.append(vals)
+    return out
 
 
 def yolo_band_result(group, det, settings, reading_id):

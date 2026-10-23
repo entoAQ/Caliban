@@ -32,6 +32,9 @@ COLS, ROWS = 3, 2
 SIZE = 416
 CONF = 0.25
 IOU = 0.7
+# Boxes sent per photo for review (SGSC draws them on the photo); a photo
+# with more than this keeps the most confident ones. The sums use them all.
+MAX_BOXES = 150
 MEO = 0  # class 0 of MEO / Peau / Incertain (/ Prépupe from the next retrain)
 
 _session = None
@@ -132,7 +135,11 @@ def detect_tiles(tiles):
 
 
 def measure(path):
-    """One photo -> {"meo_px", "meo_n", "product_px", "ms"}."""
+    """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"}.
+
+    boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
+    the whole photo's width and height -- the same on the full photo and on
+    Caliban's smaller review copy -- so SGSC can draw what was counted."""
     t0 = time.monotonic()
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
@@ -140,14 +147,20 @@ def measure(path):
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
-    meo_px, meo_n = 0.0, 0
-    for found in detect_tiles(tiles):
-        for c, x0, y0, x1, y1, _ in found:
+    meo_px, meo_n, boxes = 0.0, 0, []
+    ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
+    for k, found in enumerate(detect_tiles(tiles)):
+        tx, ty = ox + (k % COLS) * cw // COLS, oy + (k // COLS) * ch // ROWS
+        for c, x0, y0, x1, y1, score in found:
             if c == MEO:
                 meo_px += (x1 - x0) * (y1 - y0)
                 meo_n += 1
+                # Plain floats: numpy's do not go through json.dumps.
+                boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
+                              round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
+    boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
     return {"meo_px": round(float(meo_px), 1), "meo_n": int(meo_n), "product_px": int(product_mask(crop).sum()),
-            "ms": int((time.monotonic() - t0) * 1000)}
+            "ms": int((time.monotonic() - t0) * 1000), "boxes": boxes}
 
 
 if __name__ == "__main__":

@@ -203,7 +203,9 @@ def detect_burst(paths):
         return None
     detector_status.clear(); detector_status.update(ok=True, at=iso(now_utc()), error=None, version=meo_detect.version(),
                            photos=len(photos), s=round(sum(p["ms"] for p in photos) / 1000, 1))
-    return {"version": meo_detect.version(), "photos": photos}
+    # The measured area, as fractions of the photo, for SGSC to outline.
+    return {"version": meo_detect.version(), "photos": photos,
+            "crop": [meo_detect.CROP_LEFT, meo_detect.CROP_TOP]}
 
 
 _detector_missing = None
