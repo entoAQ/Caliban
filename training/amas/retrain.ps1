@@ -4,19 +4,21 @@
 #
 #   powershell -ExecutionPolicy Bypass -File training\amas\retrain.ps1
 #   powershell -ExecutionPolicy Bypass -File training\amas\retrain.ps1 -Epochs 40
+#   powershell -ExecutionPolicy Bypass -File training\amas\retrain.ps1 -Arch yolox-nano
 #
-# About 1-1.5 hours on this laptop; keep it awake and plugged in. Steps:
+# About 3 hours on this laptop (YOLOX-Tiny, 30 rounds; Nano about half the
+# training time); keep it awake and plugged in. Steps:
 #   1. export the labelled tiles                      (export_amas.py)
-#   2. train a new model                              (train_meo.py)
+#   2. train a new model, exported for Ariel          (train_meo.py)
 #   3. read every lab lot with it, fit the scale      (lot_estimate.py)
-#   4. export it for Ariel into its holding folder    (amas_runs\<name>\ariel\)
+#   4. put the scale with it in its holding folder    (amas_runs\<name>\ariel\)
 #   5. score it against the model on Ariel            (compare_models.py)
 #   6. pre-fill the unlabelled tiles with it          (prelabel_amas.py)
 # rig\inline\models (what Ariel runs) is not touched: a new model waits in
 # its holding folder until promote.ps1 moves it there, and only if step 5 says
 # it is better. Nothing reaches Ariel until that is pushed and the scale set.
 
-param([int]$Epochs = 30)
+param([int]$Epochs = 30, [string]$Arch = "yolox-tiny")
 # Not "Stop": Python writes its progress to stderr, which Windows PowerShell
 # would then treat as a failure. Each step checks the exit code instead.
 $ErrorActionPreference = "Continue"
@@ -43,22 +45,18 @@ function Step($title, $script, $arguments) {
 
 Write-Host "Retraining as $name (log: $log)"
 Step "1/6 Export labelled tiles" "export_amas.py" @()
-Step "2/6 Train ($Epochs rounds)" "train_meo.py" @("--epochs", $Epochs, "--name", $name)
+Step "2/6 Train $Arch ($Epochs rounds)" "train_meo.py" @("--epochs", $Epochs, "--name", $name, "--arch", $Arch)
 Step "3/6 Lot estimates and scale" "lot_estimate.py" @("--name", $name)
 
-Write-Host "`n=== 4/6 Export for Ariel (holding folder) ===" -ForegroundColor Cyan
-$weights = Join-Path $runs "$name\weights\best.pt"
-& python -c "from ultralytics import YOLO; YOLO(r'$weights').export(format='onnx', imgsz=416, opset=12, simplify=False, dynamic=False)" 2>&1 |
-    Tee-Object -FilePath $log -Append | Out-Null
-if ($LASTEXITCODE -ne 0) { Write-Host "Stopped: export for Ariel failed (see $log)." -ForegroundColor Red; exit 1 }
+Write-Host "`n=== 4/6 Scale into the holding folder ===" -ForegroundColor Cyan
+# train_meo.py exported the model there (meo.onnx, and meo.json with its
+# kind); the scale fitted in step 3 belongs with it.
 $scale = (Get-Content (Join-Path $runs "$name\scale.json") | ConvertFrom-Json).yolo_scale
-$tiles = (Get-ChildItem (Join-Path (Split-Path $runs) "amas_yolo\images\train")).Count
 $hold = Join-Path $runs "$name\ariel"
-New-Item -ItemType Directory -Force $hold | Out-Null
-Copy-Item (Join-Path $runs "$name\weights\best.onnx") (Join-Path $hold "meo.onnx") -Force
-@{ version = $name; trained_on_tiles = $tiles; yolo_scale_fitted = $scale } | ConvertTo-Json |
-    Set-Content -Encoding utf8 (Join-Path $hold "meo.json")
-Write-Host "model held in $hold (version $name, scale $scale)"
+$meta = Get-Content (Join-Path $hold "meo.json") | ConvertFrom-Json
+$meta | Add-Member -NotePropertyName yolo_scale_fitted -NotePropertyValue $scale -Force
+$meta | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $hold "meo.json")
+Write-Host "model held in $hold (version $name, $($meta.arch), scale $scale)"
 
 Step "5/6 Against the model on Ariel" "compare_models.py" @("--name", $name)
 $verdict = Get-Content (Join-Path $runs "$name\compare.json") | ConvertFrom-Json

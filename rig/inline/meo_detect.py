@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MEO detector for the inline rig: the YOLO model trained on the boxed tiles
+"""MEO detector for the inline rig: the model trained on the boxed tiles
 (training/amas/), run on Ariel itself.
 
 Each photo is cut to the measured area (below the top 22%, right of the left
@@ -13,6 +13,16 @@ scale x 100 x sum(meo_px) / sum(product_px).
 No PyTorch: the model is exported to ONNX (models/meo.onnx) and run with
 onnxruntime (pip install onnxruntime), with numpy and Pillow for the rest.
 The session is made once and kept, ~100 MB.
+
+Two kinds of model, told apart by "arch" in models/meo.json:
+  "yolox-tiny" -- YOLOX (Apache-2.0), trained by training/amas/train_meo.py
+                  from 2026-10-23: free to use in production and to keep
+                  private.
+  none         -- the YOLO11n models before it (Ultralytics, AGPL-3.0), read
+                  until the first YOLOX model is promoted.
+The two take their input differently (below); everything after the boxes is
+the same. The training scripts run this same file on the laptop (use()), so
+what is scored there is what Ariel runs.
 
     python3 meo_detect.py photo.jpg [more.jpg ...]    # per-photo numbers + timing
 """
@@ -31,7 +41,7 @@ CROP_TOP, CROP_LEFT = 0.22, 0.10
 COLS, ROWS = 3, 2
 SIZE = 416
 CONF = 0.25
-IOU = 0.7
+IOU = {"yolox": 0.45, "yolo11": 0.7}  # each family's own default
 # Boxes sent per photo for review (SGSC draws them on the photo); a photo
 # with more than this keeps the most confident ones. The sums use them all.
 MAX_BOXES = 150
@@ -40,12 +50,30 @@ MEO = 0  # class 0 of MEO / Peau / Incertain (/ Prépupe from the next retrain)
 _session = None
 
 
-def version():
+def use(model):
+    """Run another model file than Ariel's (the training scripts); its
+    meo.json beside it says which kind it is."""
+    global MODEL, VERSION_FILE, _session
+    MODEL = str(model)
+    VERSION_FILE = os.path.join(os.path.dirname(MODEL), "meo.json")
+    _session = None
+
+
+def _meta():
     try:
-        with open(VERSION_FILE) as f:
-            return json.load(f).get("version") or "meo"
+        # utf-8-sig: PowerShell writes meo.json with a BOM.
+        with open(VERSION_FILE, encoding="utf-8-sig") as f:
+            return json.load(f)
     except (OSError, ValueError):
-        return "meo"
+        return {}
+
+
+def version():
+    return _meta().get("version") or "meo"
+
+
+def arch():
+    return "yolox" if str(_meta().get("arch") or "").startswith("yolox") else "yolo11"
 
 
 def session():
@@ -81,7 +109,24 @@ def _letterbox(tile):
     return out, r, left, top
 
 
-def _nms(boxes, scores):
+def letterbox_yolox(tile):
+    """YOLOX's input: resized to fit SIZE x SIZE keeping proportions, grey
+    (114) padding right and below only. train_meo.py uses this same function."""
+    h, w = tile.shape[:2]
+    r = min(SIZE / h, SIZE / w)
+    nw, nh = int(w * r), int(h * r)
+    out = np.full((SIZE, SIZE, 3), 114, np.uint8)
+    out[:nh, :nw] = np.asarray(Image.fromarray(tile).resize((nw, nh), Image.BILINEAR))
+    return out, r
+
+
+def yolox_input(img):
+    """SIZE x SIZE RGB uint8 -> the network's input: BGR, 0-255, as YOLOX's
+    COCO weights were trained."""
+    return np.ascontiguousarray(img[..., ::-1].transpose(2, 0, 1), dtype=np.float32)[None]
+
+
+def _nms(boxes, scores, iou_max):
     order = scores.argsort()[::-1]
     keep = []
     while order.size:
@@ -95,7 +140,7 @@ def _nms(boxes, scores):
         inter = np.clip(x1 - x0, 0, None) * np.clip(y1 - y0, 0, None)
         area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
         iou = inter / (area[i] + area[rest] - inter + 1e-9)
-        order = rest[iou <= IOU]
+        order = rest[iou <= iou_max]
     return keep
 
 
@@ -104,12 +149,19 @@ def detect_tiles(tiles):
     in the tile's own pixels."""
     s = session()
     name = s.get_inputs()[0].name
+    kind = arch()
     out = []
     for tile in tiles:
-        img, r, left, top = _letterbox(tile)
-        x = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
-        pred = s.run(None, {name: x})[0][0].T          # (anchors, 4 + classes)
-        cls_scores = pred[:, 4:]
+        if kind == "yolox":
+            img, r = letterbox_yolox(tile)
+            left = top = 0
+            pred = s.run(None, {name: yolox_input(img)})[0][0]   # (anchors, 4 + objectness + classes)
+            cls_scores = pred[:, 5:] * pred[:, 4:5]
+        else:
+            img, r, left, top = _letterbox(tile)
+            x = (img.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
+            pred = s.run(None, {name: x})[0][0].T          # (anchors, 4 + classes)
+            cls_scores = pred[:, 4:]
         cls = cls_scores.argmax(axis=1)
         score = cls_scores[np.arange(len(cls)), cls]
         m = score >= CONF
@@ -119,11 +171,11 @@ def detect_tiles(tiles):
         b, cls, score = pred[m, :4], cls[m], score[m]
         xyxy = np.stack([b[:, 0] - b[:, 2] / 2, b[:, 1] - b[:, 3] / 2,
                          b[:, 0] + b[:, 2] / 2, b[:, 1] + b[:, 3] / 2], axis=1)
-        # Per-class NMS, as ultralytics does by default.
+        # Per-class NMS, as both families do by default.
         found = []
         for c in np.unique(cls):
             idx = np.where(cls == c)[0]
-            for k in _nms(xyxy[idx], score[idx]):
+            for k in _nms(xyxy[idx], score[idx], IOU[kind]):
                 j = idx[k]
                 x0, y0, x1, y1 = xyxy[j]
                 x0, x1 = (x0 - left) / r, (x1 - left) / r

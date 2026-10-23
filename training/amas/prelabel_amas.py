@@ -19,10 +19,15 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "labelstudio"))
+sys.path.insert(0, str(HERE.parents[1] / "rig" / "inline"))
 from common import ROOT, ls  # noqa: E402
 from sync_amas import AMAS, find_project  # noqa: E402
+import meo_detect  # noqa: E402
 
 CLASSES = ["MEO", "Peau", "Incertain", "Prépupe"]
 
@@ -35,10 +40,16 @@ def main():
     ap.add_argument("--force", action="store_true", help="pre-fill even when the model looks far off")
     args = ap.parse_args()
 
-    from ultralytics import YOLO
-    weights = ROOT / "amas_runs" / args.name / "weights" / "best.pt"
-    model = YOLO(str(weights))
+    # The run's model as exported for Ariel, read by Ariel's own code.
+    weights = ROOT / "amas_runs" / args.name / "ariel" / "meo.onnx"
+    meo_detect.use(weights)
+    meo_detect.CONF = args.conf
     version = f"{args.name}-{int(weights.stat().st_mtime)}"
+
+    def predict(path):
+        """-> (tile height, width, [(class, x0, y0, x1, y1, score)] in tile px)"""
+        a = np.asarray(Image.open(path).convert("RGB"))
+        return a.shape[0], a.shape[1], meo_detect.detect_tiles([a])[0]
     pid = find_project()
 
     tasks, page = [], 1
@@ -55,8 +66,7 @@ def main():
     # Hand labels run ~2 MEO per tile. A model drawing many times that is not
     # ready: correcting a flood of boxes is slower than drawing from scratch.
     sample = todo[::max(1, len(todo) // 60)]
-    per_tile = sum(len(model.predict(str(AMAS / "tiles" / t["data"]["tile"]), imgsz=416, conf=args.conf,
-                                     device="cpu", verbose=False)[0].boxes) for t in sample) / max(1, len(sample))
+    per_tile = sum(len(predict(AMAS / "tiles" / t["data"]["tile"])[2]) for t in sample) / max(1, len(sample))
     print(f"model draws {per_tile:.1f} boxes per tile on a sample of {len(sample)}")
     if per_tile > 6 and not (args.force or args.dry_run):
         raise SystemExit("Too many boxes for a usable pre-fill: train longer or raise --conf. Nothing changed.")
@@ -64,10 +74,9 @@ def main():
     n_boxes = 0
     for i, t in enumerate(todo):
         img = AMAS / "tiles" / t["data"]["tile"]
-        r = model.predict(str(img), imgsz=416, conf=args.conf, device="cpu", verbose=False)[0]
-        h, w = r.orig_shape
+        h, w, found = predict(img)
         result = []
-        for (x0, y0, x1, y1), c, s in zip(r.boxes.xyxy.tolist(), r.boxes.cls.tolist(), r.boxes.conf.tolist()):
+        for c, x0, y0, x1, y1, s in found:
             result.append({"from_name": "box", "to_name": "image", "type": "rectanglelabels",
                            "original_width": w, "original_height": h, "image_rotation": 0, "score": s,
                            "value": {"x": 100 * x0 / w, "y": 100 * y0 / h, "width": 100 * (x1 - x0) / w,

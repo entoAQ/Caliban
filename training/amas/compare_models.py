@@ -36,8 +36,8 @@ MIN_READINGS = 3
 def table(name, need=()):
     f = ROOT / "amas_runs" / name / "lots.json"
     if not f.exists() or not set(need) <= {r["lot"] for r in json.loads(f.read_text(encoding="utf-8"))["lots"]}:
-        if not (ROOT / "amas_runs" / name / "weights" / "best.pt").exists():
-            sys.exit(f"No lot table or weights for {name} in {ROOT / 'amas_runs'}.")
+        if not (ROOT / "amas_runs" / name / "ariel" / "meo.onnx").exists():
+            sys.exit(f"No lot table or model for {name} in {ROOT / 'amas_runs'}.")
         print(f"No up-to-date lot table for {name}; running lot_estimate.py on it (about 10 minutes)...", flush=True)
         subprocess.run([sys.executable, str(Path(__file__).with_name("lot_estimate.py")), "--name", name],
                        check=True, stdout=subprocess.DEVNULL)

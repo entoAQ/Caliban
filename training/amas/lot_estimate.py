@@ -3,7 +3,9 @@
 
 For every lot, takes every inline photo of the bag (bursts included,
 pull_amas.lot_windows()), runs the detector tile by tile on the measured
-crop and pools sum(MEO box area) / sum(product px).
+crop and pools sum(MEO box area) / sum(product px). The detector is the
+run's model as exported for Ariel (amas_runs/<name>/ariel/meo.onnx), read by
+Ariel's own rig/inline/meo_detect.py, so the numbers are Ariel's.
 
 Anything set against the lab uses the probe window only -- the last 45
 minutes of the bag, the part the lab's probe reaches: the scale from that
@@ -34,9 +36,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "labelstudio"))
+sys.path.insert(0, str(HERE.parents[1] / "rig" / "inline"))
 from common import ROOT, http  # noqa: E402
 from pull_amas import BUCKET, CHUTE_MOUNTED, lot_windows, ts  # noqa: E402
-from tile_amas import COLS, CROP_LEFT, CROP_TOP, ROWS  # noqa: E402
 from sync_amas import EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS  # noqa: E402
 
 CACHE = ROOT / "amas" / "all"
@@ -119,29 +121,19 @@ def main():
     if args.download_only:
         return
 
-    import numpy as np
-    from PIL import Image
-    from ultralytics import YOLO
-    model = YOLO(str(ROOT / "amas_runs" / args.name / "weights" / "best.pt"))
+    import meo_detect
+    onnx = ROOT / "amas_runs" / args.name / "ariel" / "meo.onnx"
+    if not onnx.exists():
+        sys.exit(f"No model for Ariel in {onnx.parent} (train_meo.py makes it).")
+    meo_detect.use(onnx)
+    meo_detect.CONF = args.conf
     data = ROOT / "amas_yolo"
     trained = {json.loads((ROOT / "amas" / "tiles" / "tiles.json").read_text(encoding="utf-8"))[f.name]["lot_number"]
                for f in (data / "images" / "train").glob("*.jpg")}
 
     def photo(path):
-        a = np.asarray(Image.open(path).convert("RGB"), dtype=np.float32)
-        h, w = a.shape[:2]
-        crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
-        mx, mn = crop.max(axis=2), crop.min(axis=2)
-        prod = int((((mx - mn) / np.maximum(mx, 1) > 0.28) & (crop[..., 0] > crop[..., 2] + 15) & (mx > 50)).sum())
-        ch, cw = crop.shape[:2]
-        tiles = [crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS][..., ::-1].astype(np.uint8)
-                 for r in range(ROWS) for c in range(COLS)]
-        meo = 0.0
-        for res in model.predict([np.ascontiguousarray(t) for t in tiles], imgsz=416, conf=args.conf,
-                                 device="cpu", verbose=False):
-            meo += sum(float((b[2] - b[0]) * (b[3] - b[1]))
-                       for b, c in zip(res.boxes.xyxy.tolist(), res.boxes.cls.tolist()) if int(c) == 0)
-        return meo, prod
+        m = meo_detect.measure(path)
+        return m["meo_px"], m["product_px"]
 
     def pooled(pr):
         return 100 * sum(m for m, _ in pr) / max(1, sum(p for _, p in pr)) if pr else None
