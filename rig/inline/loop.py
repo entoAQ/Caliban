@@ -428,6 +428,13 @@ def take_reading(state):
         log(f"{reading_id}: product covers {cov:.0%} of the view -- not analysed")
         line.update(product=False, coverage=cov)
         return IDLE_RECHECK_S
+    # The pixel share needs no reference, so it still holds when the reference
+    # is stale (flash or camera moved) and the tile coverage passes an empty chute.
+    prod = measured.get("product")
+    if prod is not None and prod < cam_settings["min_product"]:
+        log(f"{reading_id}: product share {prod:.3f} -- not analysed")
+        line.update(product=False, coverage=cov)
+        return IDLE_RECHECK_S
     line.update(product=True, coverage=cov)
 
     share = measured.get("ambient_share")
@@ -475,6 +482,9 @@ def take_reading(state):
         if c_k is not None and c_k < cam_settings["min_coverage"]:
             log(f"{reading_id}-{k}: product covers {c_k:.0%} -- left out of the burst")
             continue
+        if m_k.get("product") is not None and m_k["product"] < cam_settings["min_product"]:
+            log(f"{reading_id}-{k}: product share {m_k['product']:.3f} -- left out of the burst")
+            continue
         paths.append(p)
         covers.append(m_k.get("product"))
     if target:
@@ -503,6 +513,10 @@ def take_reading(state):
 
     if error:
         log(f"reading {reading_id} refused: {error}")
+        if error.startswith("409"):
+            # Caliban saw too little product to measure: an empty chute, not a fault.
+            state.setdefault("line", {}).update(product=False)
+            return IDLE_RECHECK_S
         if error.startswith("422"):
             # A black or blank frame. On this rig that is nearly always the
             # flash: batteries flat, or the flash asleep.

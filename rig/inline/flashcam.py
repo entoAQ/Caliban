@@ -122,6 +122,12 @@ DEFAULTS = {
     # flow, for sizing a burst. Crop as the chute prompts' (top, left share).
     "product_crop": [0.22, 0.10],
     "product_min_sat": 0.28,
+    # Below this product share a photo is not analysed, whatever the tile
+    # coverage says. The detector's ME% divides by product pixels, so an
+    # empty chute with one false box reads thousands of percent (3909 % on
+    # 2026-10-23, 39 product px, after the flash was moved and the reference
+    # no longer matched). Running flow measures 0.25-0.40.
+    "min_product": 0.02,
     # During a stop, fire the flash this often anyway: the TT520III falls
     # into a sleep only its button wakes after ~10 min without a trigger.
     "keepalive_s": 480,

@@ -3843,6 +3843,14 @@ def inline_calibrated(value, settings):
     return round(max(0.0, cal["slope"] * float(value) + cal["intercept"]), 2)
 
 
+# Fewer product pixels per photo than this and the detector's ME% is refused
+# (409): it divides by them, and an empty chute with a few false boxes read
+# 3909 % on 2026-10-23 (39 px). Running flow is 240k-380k px; ~1 % of the
+# crop. The rig skips such photos itself (flashcam min_product); this is the
+# backstop for a rig running older code.
+YOLO_MIN_PRODUCT_PX = 10_000
+
+
 def inline_detector(raw, n_photos):
     """Ariel's MEO detector numbers for a burst (the detecteur form field:
     {"version", "photos": [{"meo_px", "meo_n", "product_px", "ms"}, ...]}),
@@ -4029,6 +4037,10 @@ async def inline_reading(
         raise HTTPException(status_code=503, detail="Détecteur MEO absent sur Ariel : lecture non analysée.")
 
     if use_yolo:
+        product_px = sum(p["product_px"] for p in det["photos"])
+        if product_px < YOLO_MIN_PRODUCT_PX * len(det["photos"]):
+            print(f"[inline] {reading_id}: {product_px} product px over {len(det['photos'])} photo(s) -- refused")
+            raise HTTPException(status_code=409, detail="Pas assez de produit dans la photo : lecture non analysée.")
         pair = None
         results, escalated, photo_mean, photo_std = yolo_band_result(group, det, settings, reading_id)
     else:
