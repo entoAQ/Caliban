@@ -66,7 +66,14 @@ minutes has its instruction withdrawn.
 AUGMENTER and DIMINUER ask the operator to confirm. They say how far to turn
 the destoner's handle: DIMINUER (under 4 %) 2 cm clockwise; AUGMENTER 2 cm
 anti-clockwise from 6 %, 4 cm from 10 %; 4-6 % no change (`INSTRUCTIONS` in
-`screen.html`, thresholds in `handle_cm.sql`). When the instruction names
+`screen.html`, thresholds in `handle_cm.sql`). With `adaptive_turns.sql`
+(2026-10-23): after a confirmed turn the screen waits 5 minutes ("Réglage en
+cours") before counting photos again; an AUGMENTER right after a confirmed one
+is sized on what that turn did, in whole cm from 2 to 6 (never more than 10);
+after 12 cm in a row, or ME% higher after a turn, it stops asking for turns
+and asks for AQ; DIMINUER is not repeated within 15 minutes, nor after 2 in a
+row until ME% has been back at 4 % -- turning clockwise does not show in ME%,
+and the handle has an end. When the instruction names
 a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
 destoner's own gauge and confirms; that value then stays in the "Réglage
 destoner" bar at the top until the next one, so anyone passing can check the

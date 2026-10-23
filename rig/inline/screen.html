@@ -247,6 +247,15 @@ function agoText(iso) {
   return m < 1 ? "à l'instant" : `il y a ${m} min`;
 }
 const isIncrease = i => typeof i === 'string' && i.startsWith('increase');
+// How far to turn: Caliban's turn_cm when it sent one (sized from the last
+// turn, app/main.py inline_turn), else the fixed text above. Checked here too:
+// only a whole number of cm from 2 to 10 is ever shown (AQ, 2026-10-23).
+function turnText(r, ins) {
+  const cm = r && r.turn_cm;
+  if (Number.isInteger(cm) && cm >= 2 && cm <= 10 && (isIncrease(r.instruction) || r.instruction === 'decrease'))
+    return `${cm} cm dans le sens ${r.instruction === 'decrease' ? 'horaire' : 'antihoraire'}`;
+  return (ins && ins.turn) || '';
+}
 
 // The local page has no business being dragged, zoomed or long-pressed.
 document.addEventListener('contextmenu', e => e.preventDefault());
@@ -369,23 +378,34 @@ function render() {
   } else if (stale) {
     sub = `Dernière lecture ${agoText(r.at)} — ne pas régler le destoner sur cette base.`;
   } else if (trial) {
-    sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') + (read.turn ? ', poignée ' + read.turn : '') : '—'}. `
+    sub = `Le banc lirait : ${read ? read.title + (read.sev ? ' (' + read.sev + ')' : '') + (turnText(shown, read) ? ', poignée ' + turnText(shown, read) : '') : '—'}. `
         + "Ne rien régler d'après cet écran : suivre l'échantillonnage au plateau.";
   } else if (actionable && s.ack) {
     sub = 'Réglage confirmé — vérification des lectures suivantes';
   } else if (shown.instruction === 'hold') {
-    sub = warming
+    // After a turn the chute still carries product from before it for a few
+    // minutes (Caliban settle_min); those photos are not counted.
+    sub = r.settle_left_s > 0
+      ? `Réglage en cours — vérification dans ${Math.max(1, Math.ceil(r.settle_left_s / 60))} min`
+      : r.turn_basis === 'decrease_limit'
+      ? 'ME% bas, déjà diminué plusieurs fois : ne plus tourner la poignée. Vérifier visuellement les rejets.'
+      : r.turn_basis === 'decrease_pause'
+      ? 'ME% bas, déjà diminué : attendre avant de diminuer encore. Vérifier visuellement les rejets.'
+      : warming
       ? `Vérification en cours : ${r.decision_n}/${r.decision_min} lectures depuis le démarrage ou le dernier réglage`
       : 'Garder le réglage actuel du destoner';
   } else if (shown.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
              'Peu ou pas de larves dans les rejets : aucun réglage',
-             shown.target ? `Sinon : régler à la valeur ci-dessous` : `Sinon : tourner la poignée de ${ins.turn}`];
+             shown.target ? `Sinon : régler à la valeur ci-dessous` : `Sinon : tourner la poignée de ${turnText(shown, ins)}`];
   } else if (isIncrease(shown.instruction)) {
     // With a value to set, the value box below says what to do; the card
     // keeps only how far out the reading is.
-    sub = shown.target ? (ins.sev ? `Écart ${ins.sev}` : '')
-                       : `Tourner la poignée de ${ins.turn}` + (ins.sev ? ` — écart ${ins.sev}` : '');
+    // At the run's limit (turn_basis 'limit'): no turn at all, AQ instead.
+    sub = shown.turn_basis === 'limit' ? 'Ne plus tourner la poignée : aviser l\'AQ'
+        : shown.target ? (ins.sev ? `Écart ${ins.sev}` : '')
+        : `Tourner la poignée de ${turnText(shown, ins)}` + (ins.sev ? ` — écart ${ins.sev}` : '')
+          + (shown.turn_basis === 'adaptive' ? ' (selon l\'effet du dernier réglage)' : '');
   }
   $('sub').textContent = sub;
   $('sub').hidden = !sub;
@@ -401,7 +421,11 @@ function render() {
   $('alert').hidden = !alert;
   if (alert) {
     $('alert').innerHTML = "⚠ Aviser l'AQ immédiatement" + (shown.alert_reason === 'streak'
-      ? `<small>Encore AUGMENTER après le réglage — l'ajustement n'a pas suffi</small>` : '');
+      ? `<small>Encore AUGMENTER après le réglage — l'ajustement n'a pas suffi</small>`
+      : shown.alert_reason === 'turn_limit'
+      ? `<small>Plusieurs réglages sans retour dans la cible — vérifier le destoner avant de tourner davantage</small>`
+      : shown.alert_reason === 'turn_wrong_way'
+      ? `<small>ME% plus haut après le dernier réglage — vérifier le destoner avant de tourner encore</small>` : '');
   }
 
   // Once confirmed, the value lives in the setting bar at the top; the box

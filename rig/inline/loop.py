@@ -212,7 +212,60 @@ _detector_missing = None
 detector_status = {}
 
 
-def request_reading(reading_id, paths, covers=None, det=None):
+# Fixed turns per instruction, when an ack predates turn_cm (Caliban LADDER_CM).
+LADDER_CM = {"increase_medium": 4, "increase_major": 4}
+# Confirmed turns further apart than this are not one run of turns.
+RUN_GAP_S = 90 * 60
+# A run of DIMINUER older than this is over: a new shift starts afresh.
+DECREASE_RUN_MAX_S = 4 * 3600
+
+
+def ack_runs(acks, history, decrease_below):
+    """(increase_run_cm, decrease_run) for Caliban's turn limits (app/main.py
+    inline_turn), from the confirmations, newest last.
+
+    increase_run_cm: cm anticlockwise over the AUGMENTER turns confirmed one
+    after another, each within RUN_GAP_S of the next and of now -- the handle
+    has an end, and the run is how far towards it this episode has gone.
+    decrease_run: DIMINUER turns confirmed one after another, ended by any
+    other confirmation, by a pooled ME% at decrease_below or above after the
+    last of them (history), or by being over DECREASE_RUN_MAX_S old."""
+    now = now_utc()
+
+    def at(a):
+        try:
+            return datetime.fromisoformat(a["at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    run_cm, newer = 0, now
+    for a in reversed(acks):
+        t, ins = at(a), a.get("instruction") or ""
+        if t is None or not ins.startswith("increase") or a.get("choice") not in ("adjusted", "set") \
+                or (newer - t).total_seconds() > RUN_GAP_S:
+            break
+        try:
+            run_cm += max(0, int(a.get("turn_cm") or LADDER_CM.get(ins, 2)))
+        except (TypeError, ValueError):
+            run_cm += LADDER_CM.get(ins, 2)
+        newer = t
+
+    run = 0
+    for a in reversed(acks):
+        t = at(a)
+        if t is None or a.get("instruction") != "decrease" or a.get("choice") != "adjusted" \
+                or (now - t).total_seconds() > DECREASE_RUN_MAX_S:
+            break
+        if run == 0 and decrease_below is not None:
+            back = [p for p in history or [] if p.get("decision_pct") is not None
+                    and (p.get("at") or "") > a["at"] and p["decision_pct"] >= decrease_below]
+            if back:
+                break
+        run += 1
+    return run_cm, run
+
+
+def request_reading(reading_id, paths, covers=None, det=None, state=None):
     """POST the photo, or a burst of them (the first as `file`, the rest as
     `more`, judged together by a group prompt), with each photo's product
     coverage when measured. Returns (reply or None,
@@ -236,6 +289,17 @@ def request_reading(reading_id, paths, covers=None, det=None):
             data["last_ack_instruction"] = acks[-1].get("instruction") or ""
         except (KeyError, TypeError, ValueError):
             pass
+        # What that turn was and the runs before it, for Caliban to size the
+        # next turn from and to stop asking before the handle's end.
+        last = acks[-1]
+        data["last_ack_choice"] = last.get("choice") or ""
+        for key in ("decision_pct", "turn_cm"):
+            if last.get(key) is not None:
+                data[f"last_ack_{key}"] = str(last[key])
+        state = state or {}
+        below = (state.get("thresholds") or {}).get("decrease_below")
+        run_cm, run = ack_runs(acks, state.get("history"), below)
+        data["increase_run_cm"], data["decrease_run"] = str(run_cm), str(run)
     handles = [open(p, "rb") for p in paths]
     try:
         files = [("file" if i == 0 else "more", (os.path.basename(p), h, "image/jpeg"))
@@ -507,7 +571,7 @@ def take_reading(state):
             f"{sum(x['ms'] for x in p) / 1000:.1f} s for {len(p)} photo(s)")
 
     try:
-        reply, error = request_reading(reading_id, paths, covers, det)
+        reply, error = request_reading(reading_id, paths, covers, det, state)
     except requests.RequestException as e:
         log(f"Caliban unreachable for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, network="down", message="Pas de connexion à Caliban — lecture non analysée")
@@ -557,6 +621,11 @@ def take_reading(state):
         # On the lab ME% scale through Caliban's calibration line, when set;
         # the screen shows this rather than the prompt's band.
         "calibrated_pct": reply.get("calibrated_pct"),
+        # How far to turn (whole cm; None: the screen's fixed text), what it
+        # was sized on, and seconds left before the photos after a turn count.
+        "turn_cm": reply.get("turn_cm"),
+        "turn_basis": reply.get("turn_basis"),
+        "settle_left_s": reply.get("settle_left_s") or 0,
     }
     state["mode"] = reply.get("mode") or "shadow"
     state["thresholds"] = reply.get("thresholds") or state.get("thresholds")

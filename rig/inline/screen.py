@@ -294,6 +294,11 @@ class Handler(server.BaseHTTPRequestHandler):
         # Caliban, so AUGMENTER again after a confirmed AUGMENTER can alert AQ.
         ack = {"reading_id": reading_id, "choice": choice, "at": now_iso(),
                "instruction": shown.get("instruction")}
+        # And what it was decided on and how far it said to turn: Caliban
+        # sizes the next turn from what this one did (app/main.py inline_turn).
+        for key in ("decision_pct", "turn_cm"):
+            if shown.get(key) is not None:
+                ack[key] = shown[key]
         if choice == "set":
             # The value comes from the instruction on screen, never from the
             # request: the operator confirms the number they were shown.
