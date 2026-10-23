@@ -214,17 +214,19 @@ _detector_missing = None
 detector_status = {}
 
 
-# Fixed turns per instruction, when an ack predates turn_cm (Caliban LADDER_CM).
+# Fixed turns per instruction, when an ack does not say (Caliban TURN_UNITS).
 LADDER_CM = {"increase_medium": 4, "increase_major": 4}
+LADDER_QT = {"increase_medium": 2, "increase_major": 2}
 # Confirmed turns further apart than this are not one run of turns.
 RUN_GAP_S = 90 * 60
 # A run of DIMINUER older than this is over: a new shift starts afresh.
 DECREASE_RUN_MAX_S = 4 * 3600
 
 
-def ack_runs(acks, history, decrease_below):
-    """(increase_run_cm, decrease_run) for Caliban's turn limits (app/main.py
-    inline_turn), from the confirmations, newest last.
+def ack_runs(acks, history, decrease_below, unit="cm"):
+    """(increase_run, decrease_run) for Caliban's turn limits (app/main.py
+    inline_turn), from the confirmations, newest last; increase_run in
+    `unit` ("cm" or "quarter"), from turns confirmed in that unit only.
 
     increase_run_cm: cm anticlockwise over the AUGMENTER turns confirmed one
     after another, each within RUN_GAP_S of the next and of now -- the handle
@@ -246,10 +248,13 @@ def ack_runs(acks, history, decrease_below):
         if t is None or not ins.startswith("increase") or a.get("choice") not in ("adjusted", "set") \
                 or (newer - t).total_seconds() > RUN_GAP_S:
             break
+        key, ladder, base = ("turn_qt", LADDER_QT, 1) if unit == "quarter" else ("turn_cm", LADDER_CM, 2)
+        if (a.get("turn_unit") or "cm") != unit:
+            break   # turns counted the other way: a new run
         try:
-            run_cm += max(0, int(a.get("turn_cm") or LADDER_CM.get(ins, 2)))
+            run_cm += max(0, int(a.get(key) or ladder.get(ins, base)))
         except (TypeError, ValueError):
-            run_cm += LADDER_CM.get(ins, 2)
+            run_cm += ladder.get(ins, base)
         newer = t
 
     run = 0
@@ -295,13 +300,14 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
         # next turn from and to stop asking before the handle's end.
         last = acks[-1]
         data["last_ack_choice"] = last.get("choice") or ""
-        for key in ("decision_pct", "turn_cm"):
+        for key in ("decision_pct", "turn_cm", "turn_qt"):
             if last.get(key) is not None:
                 data[f"last_ack_{key}"] = str(last[key])
         state = state or {}
         below = (state.get("thresholds") or {}).get("decrease_below")
-        run_cm, run = ack_runs(acks, state.get("history"), below)
-        data["increase_run_cm"], data["decrease_run"] = str(run_cm), str(run)
+        run_cm, run = ack_runs(acks, state.get("history"), below, "cm")
+        run_qt, _ = ack_runs(acks, state.get("history"), below, "quarter")
+        data["increase_run_cm"], data["increase_run_qt"], data["decrease_run"] = str(run_cm), str(run_qt), str(run)
     handles = [open(p, "rb") for p in paths]
     try:
         files = [("file" if i == 0 else "more", (os.path.basename(p), h, "image/jpeg"))
@@ -626,6 +632,8 @@ def take_reading(state):
         # How far to turn (whole cm; None: the screen's fixed text), what it
         # was sized on, and seconds left before the photos after a turn count.
         "turn_cm": reply.get("turn_cm"),
+        "turn_qt": reply.get("turn_qt"),
+        "turn_unit": reply.get("turn_unit") or "cm",
         "turn_basis": reply.get("turn_basis"),
         "settle_left_s": reply.get("settle_left_s") or 0,
     }

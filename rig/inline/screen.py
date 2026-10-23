@@ -296,7 +296,7 @@ class Handler(server.BaseHTTPRequestHandler):
                "instruction": shown.get("instruction")}
         # And what it was decided on and how far it said to turn: Caliban
         # sizes the next turn from what this one did (app/main.py inline_turn).
-        for key in ("decision_pct", "turn_cm"):
+        for key in ("decision_pct", "turn_cm", "turn_qt", "turn_unit"):
             if shown.get(key) is not None:
                 ack[key] = shown[key]
         if choice == "set":

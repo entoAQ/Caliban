@@ -73,7 +73,10 @@ is sized on what that turn did, in whole cm from 2 to 6 (never more than 10);
 after 12 cm in a row, or ME% higher after a turn, it stops asking for turns
 and asks for AQ; DIMINUER is not repeated within 15 minutes, nor after 2 in a
 row until ME% has been back at 4 % -- turning clockwise does not show in ME%,
-and the handle has an end. When the instruction names
+and the handle has an end. With `quarter_turns.sql` (from 2026-10-24) the turns
+are quarter turns of the crank instead of cm: a quarter turn from 6 %, a half
+turn from 10 %, a quarter turn clockwise under 4 %; whole quarters only, never
+more than one full turn at a time, two full turns in a row at most. When the instruction names
 a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
 destoner's own gauge and confirms; that value then stays in the "Réglage
 destoner" bar at the top until the next one, so anyone passing can check the

@@ -247,13 +247,27 @@ function agoText(iso) {
   return m < 1 ? "à l'instant" : `il y a ${m} min`;
 }
 const isIncrease = i => typeof i === 'string' && i.startsWith('increase');
-// How far to turn: Caliban's turn_cm when it sent one (sized from the last
-// turn, app/main.py inline_turn), else the fixed text above. Checked here too:
-// only a whole number of cm from 2 to 10 is ever shown (AQ, 2026-10-23).
+// How far to turn, from Caliban (app/main.py inline_turn): turn_qt quarter
+// turns of the crank when turn_unit is "quarter" (from 2026-10-24), else
+// turn_cm cm round the handle; without a number, the unit's fixed turn for the
+// instruction. Checked here too: only a whole number within the unit's
+// limits is ever shown -- 2 to 10 cm, a quarter to one full turn (AQ).
+// "de 2 cm dans le sens…" / "d'un quart de tour dans le sens…".
+function turnPhrase(r, ins) {
+  const t = turnText(r, ins);
+  return /^un /.test(t) ? "d'" + t : 'de ' + t;
+}
+const QUARTERS = { 1: "un quart de tour", 2: "un demi-tour", 3: "trois quarts de tour", 4: "un tour complet" };
+const LADDER_QT = { increase_minor: 1, increase: 1, increase_medium: 2, increase_major: 2, decrease: 1 };
 function turnText(r, ins) {
-  const cm = r && r.turn_cm;
-  if (Number.isInteger(cm) && cm >= 2 && cm <= 10 && (isIncrease(r.instruction) || r.instruction === 'decrease'))
-    return `${cm} cm dans le sens ${r.instruction === 'decrease' ? 'horaire' : 'antihoraire'}`;
+  if (!r || !(isIncrease(r.instruction) || r.instruction === 'decrease')) return (ins && ins.turn) || '';
+  const way = r.instruction === 'decrease' ? 'horaire' : 'antihoraire';
+  if (r.turn_unit === 'quarter') {
+    const q = Number.isInteger(r.turn_qt) && r.turn_qt >= 1 && r.turn_qt <= 4 ? r.turn_qt : LADDER_QT[r.instruction];
+    return q ? `${QUARTERS[q]} dans le sens ${way}` : '';
+  }
+  const cm = r.turn_cm;
+  if (Number.isInteger(cm) && cm >= 2 && cm <= 10) return `${cm} cm dans le sens ${way}`;
   return (ins && ins.turn) || '';
 }
 
@@ -397,14 +411,14 @@ function render() {
   } else if (shown.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
              'Peu ou pas de larves dans les rejets : aucun réglage',
-             shown.target ? `Sinon : régler à la valeur ci-dessous` : `Sinon : tourner la poignée de ${turnText(shown, ins)}`];
+             shown.target ? `Sinon : régler à la valeur ci-dessous` : `Sinon : tourner la poignée ${turnPhrase(shown, ins)}`];
   } else if (isIncrease(shown.instruction)) {
     // With a value to set, the value box below says what to do; the card
     // keeps only how far out the reading is.
     // At the run's limit (turn_basis 'limit'): no turn at all, AQ instead.
     sub = shown.turn_basis === 'limit' ? 'Ne plus tourner la poignée : aviser l\'AQ'
         : shown.target ? (ins.sev ? `Écart ${ins.sev}` : '')
-        : `Tourner la poignée de ${turnText(shown, ins)}` + (ins.sev ? ` — écart ${ins.sev}` : '')
+        : `Tourner la poignée ${turnPhrase(shown, ins)}` + (ins.sev ? ` — écart ${ins.sev}` : '')
           + (shown.turn_basis === 'adaptive' ? ' (selon l\'effet du dernier réglage)' : '');
   }
   $('sub').textContent = sub;

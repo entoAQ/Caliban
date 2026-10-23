@@ -3673,6 +3673,14 @@ INLINE_DEFAULTS = {
     # stops asking for more and asks for AQ instead: the handle has a physical
     # end, and past the gate's closed point a turn reverses its effect.
     "turn_run_max_cm": 12,
+    # The same in quarter turns of the crank (turn_unit "quarter"): at most
+    # one full turn at a time, two in a row. turn_gain_per_quarter is the
+    # ME% a quarter turn is expected to move; 0 until measured, which keeps
+    # the fixed quarter turns (adaptive sizing off, its safety stops still on).
+    "turn_unit": "cm",
+    "turn_max_qt": 4,
+    "turn_run_max_qt": 8,
+    "turn_gain_per_quarter": 0.0,
     # DIMINUER does not show in ME% (about -0.1 point per cm over 27 turns),
     # so nothing confirms it worked and it used to come back every five
     # minutes (18 in a row overnight 2026-10-22, ~36 cm). After one, none for
@@ -3722,14 +3730,14 @@ def inline_settings():
         print(f"[inline_settings lookup failed] {type(e).__name__}: {e}")
         overrides = None
     if isinstance(overrides, dict):
-        for key in ("variant", "high_variant", "low_variant", "mode", "decider"):
+        for key in ("variant", "high_variant", "low_variant", "mode", "decider", "turn_unit"):
             if isinstance(overrides.get(key), str):
                 settings[key] = overrides[key].strip()
         for key in ("repeats", "escalate_repeats", "interval_min", "alert_consecutive_increase",
                     "decision_readings", "decision_min_readings", "decision_max_age_min",
                     "decision_window_min", "group_size", "group_spacing_s", "group_max",
                     "settle_min", "turn_max_cm", "turn_run_max_cm", "decrease_pause_min",
-                    "decrease_max_in_row"):
+                    "decrease_max_in_row", "turn_max_qt", "turn_run_max_qt"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3739,7 +3747,7 @@ def inline_settings():
         # so the tray's limits -- and the clamps operator_settings puts on
         # them -- do not carry over. Only their order is enforced, below.
         for key in ("increase_at", "increase_medium_at", "decrease_below", "alert_at", "group_target_cover",
-                    "yolo_scale", "turn_gain_per_cm"):
+                    "yolo_scale", "turn_gain_per_cm", "turn_gain_per_quarter"):
             try:
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3780,6 +3788,12 @@ def inline_settings():
     settings["turn_gain_per_cm"] = max(0.25, min(4.0, settings["turn_gain_per_cm"]))
     settings["turn_max_cm"] = max(TURN_MIN_CM, min(TURN_HARD_MAX_CM, settings["turn_max_cm"]))
     settings["turn_run_max_cm"] = max(settings["turn_max_cm"], min(40, settings["turn_run_max_cm"]))
+    if settings["turn_unit"] not in TURN_UNITS:
+        settings["turn_unit"] = "cm"
+    qt = TURN_UNITS["quarter"]
+    settings["turn_max_qt"] = max(qt["min"], min(qt["hard_max"], settings["turn_max_qt"]))
+    settings["turn_run_max_qt"] = max(settings["turn_max_qt"], min(16, settings["turn_run_max_qt"]))
+    settings["turn_gain_per_quarter"] = max(0.0, min(4.0, settings["turn_gain_per_quarter"]))
     settings["decrease_pause_min"] = max(0, min(120, settings["decrease_pause_min"]))
     settings["decrease_max_in_row"] = max(0, min(10, settings["decrease_max_in_row"]))
     settings["group_size"] = max(1, min(8, settings["group_size"]))
@@ -3793,38 +3807,64 @@ def inline_settings():
     return settings
 
 
-# Handle turns, in cm. Whatever the settings or the arithmetic say, a turn on
-# the screen is a whole number of cm from TURN_MIN_CM to TURN_HARD_MAX_CM
-# (Tim, 2026-10-23: never more than 10 cm, never a fraction).
-TURN_MIN_CM = 2
-TURN_HARD_MAX_CM = 10
-# The fixed turns (rig/inline/screen.html INSTRUCTIONS, handle_cm.sql).
+# Handle turns. turn_unit says what the screen counts them in: "cm" round the
+# handle, or "quarter" turns of the crank (from 2026-10-24: a quarter turn is
+# the same for everyone, cm along the rim was not). Whatever the settings or
+# the arithmetic say, a turn on the screen is a whole number of units between
+# the unit's min and hard max (Tim, 2026-10-23: never more than 10 cm, never a
+# fraction; 2026-10-24: never more than one full turn at a time).
+TURN_UNITS = {
+    "cm":      {"min": 2, "hard_max": 10,
+                "ladder": {"increase_minor": 2, "increase": 2, "increase_medium": 4, "increase_major": 4,
+                           "decrease": 2}},
+    "quarter": {"min": 1, "hard_max": 4,
+                "ladder": {"increase_minor": 1, "increase": 1, "increase_medium": 2, "increase_major": 2,
+                           "decrease": 1}},
+}
+TURN_MIN_CM = TURN_UNITS["cm"]["min"]
+TURN_HARD_MAX_CM = TURN_UNITS["cm"]["hard_max"]
 # ME% points higher after an AUGMENTER turn than before it that stop the
 # turns (inline_turn): more than the pooled 10 minutes wander on their own.
 TURN_WRONG_WAY_PTS = 2.0
-LADDER_CM = {"increase_minor": 2, "increase": 2, "increase_medium": 4, "increase_major": 4, "decrease": 2}
+
+
+def safe_turn(n, unit="cm", cap=None):
+    """n rounded to a whole number of the unit within its min..min(cap, hard
+    max), or None when it is not a usable number at all."""
+    u = TURN_UNITS.get(unit, TURN_UNITS["cm"])
+    try:
+        n = float(n)
+    except (TypeError, ValueError):
+        return None
+    if n != n or abs(n) == float("inf"):
+        return None
+    top = u["hard_max"] if cap is None else min(cap, u["hard_max"])
+    return int(max(u["min"], min(top, round(n))))
 
 
 def safe_turn_cm(cm, cap=TURN_HARD_MAX_CM):
-    """cm rounded to a whole number within TURN_MIN_CM..min(cap,
-    TURN_HARD_MAX_CM), or None when it is not a usable number at all."""
-    try:
-        cm = float(cm)
-    except (TypeError, ValueError):
-        return None
-    if cm != cm or abs(cm) == float("inf"):
-        return None
-    return int(max(TURN_MIN_CM, min(min(cap, TURN_HARD_MAX_CM), round(cm))))
+    return safe_turn(cm, "cm", cap)
+
+
+def turn_limits(settings):
+    """(unit, largest turn, most in a row, ME% moved per unit expected -- 0
+    when not known, which keeps the fixed turns) for settings' turn_unit."""
+    if settings["turn_unit"] == "quarter":
+        return "quarter", settings["turn_max_qt"], settings["turn_run_max_qt"], settings["turn_gain_per_quarter"]
+    return "cm", settings["turn_max_cm"], settings["turn_run_max_cm"], settings["turn_gain_per_cm"]
 
 
 def inline_turn(instruction, decision_pct, settings, ctx):
-    """(instruction, turn_cm, basis, alert_reason): how far to turn for this
-    instruction. ctx is what Ariel says about the confirmations before
-    (inline_ack_context). basis: 'ladder' (the fixed 2 / 4 cm), 'adaptive'
-    (sized from the last turn), 'limit' (no more turning, AQ instead: the run
-    of turns reached turn_run_max_cm, or ME% rose after the last one), and
-    for a DIMINUER held back 'decrease_pause' / 'decrease_limit', with the
-    instruction turned into hold. alert_reason is set only for 'limit'."""
+    """(instruction, turn, basis, alert_reason): how far to turn for this
+    instruction, in whole units of settings' turn_unit. ctx is what Ariel says
+    about the confirmations before (inline_ack_context), in the same unit.
+    basis: 'ladder' (the fixed turns), 'adaptive' (sized from the last turn),
+    'limit' (no more turning, AQ instead: the run of turns reached its most,
+    or ME% rose after the last one), and for a DIMINUER held back
+    'decrease_pause' / 'decrease_limit', with the instruction turned into
+    hold. alert_reason is set only for 'limit'."""
+    unit, most, run_most, expected = turn_limits(settings)
+    ladder = TURN_UNITS[unit]["ladder"]
     if instruction == "decrease":
         run = ctx.get("decrease_run") or 0
         if settings["decrease_max_in_row"] and run >= settings["decrease_max_in_row"]:
@@ -3833,39 +3873,39 @@ def inline_turn(instruction, decision_pct, settings, ctx):
         if (settings["decrease_pause_min"] and run >= 1 and since is not None
                 and since < settings["decrease_pause_min"] * 60):
             return "hold", None, "decrease_pause", None
-        return instruction, LADDER_CM["decrease"], "ladder", None
+        return instruction, ladder["decrease"], "ladder", None
     if not (instruction or "").startswith("increase"):
         return instruction, None, None, None
 
-    cm, basis = LADDER_CM.get(instruction, TURN_MIN_CM), "ladder"
-    before, last_cm = ctx.get("last_decision_pct"), ctx.get("last_turn_cm")
+    n, basis = ladder.get(instruction, TURN_UNITS[unit]["min"]), "ladder"
+    before, last = ctx.get("last_decision_pct"), ctx.get(f"last_turn_{unit}")
     if (settings["adaptive_turns"] and decision_pct is not None
             and (ctx.get("last_instruction") or "").startswith("increase")
             and ctx.get("last_choice") in ("adjusted", "set")
-            and before is not None and last_cm and last_cm > 0):
-        # ME% moved per cm by the last turn, held to half..double the effect
-        # expected: a turn that did little or went the wrong way makes the
-        # next one larger, never smaller, than the plain estimate.
+            and before is not None and last and last > 0):
         # Clearly worse after turning the right way: the gate may be past its
         # closed point, where a turn does the opposite -- no more turns, AQ.
         if decision_pct - before >= TURN_WRONG_WAY_PTS:
             return instruction, None, "limit", "turn_wrong_way"
-        expected = settings["turn_gain_per_cm"]
-        gain = min(2 * expected, max(0.5 * expected, (before - decision_pct) / last_cm))
-        target = (settings["decrease_below"] + settings["increase_at"]) / 2
-        sized = safe_turn_cm((decision_pct - target) / gain, settings["turn_max_cm"])
-        if sized is not None:
-            cm, basis = sized, "adaptive"
-    room = settings["turn_run_max_cm"] - (ctx.get("increase_run_cm") or 0)
-    if room < TURN_MIN_CM:
+        if expected > 0:
+            # ME% moved per unit by the last turn, held to half..double the
+            # effect expected: a turn that did little or went the wrong way
+            # makes the next one larger, never smaller, than the plain estimate.
+            gain = min(2 * expected, max(0.5 * expected, (before - decision_pct) / last))
+            target = (settings["decrease_below"] + settings["increase_at"]) / 2
+            sized = safe_turn((decision_pct - target) / gain, unit, most)
+            if sized is not None:
+                n, basis = sized, "adaptive"
+    room = run_most - (ctx.get(f"increase_run_{unit}") or 0)
+    if room < TURN_UNITS[unit]["min"]:
         return instruction, None, "limit", "turn_limit"
-    return instruction, safe_turn_cm(min(cm, room)), basis, None
+    return instruction, safe_turn(min(n, room), unit, most), basis, None
 
 
 def inline_ack_context(since_ack_s, last_ack_instruction, fields):
     """What the turn rules need about earlier confirmations, from Ariel's form
-    fields. All optional: an older loop.py sends none of them and gets the
-    fixed turns with no limits."""
+    fields, the turns in cm and in quarter turns. All optional: an older
+    loop.py sends none of them and gets the fixed turns with no limits."""
     def num(key, cast=float):
         try:
             v = cast(str(fields.get(key) or "").strip())
@@ -3878,7 +3918,9 @@ def inline_ack_context(since_ack_s, last_ack_instruction, fields):
         "last_choice": str(fields.get("last_ack_choice") or "").strip() or None,
         "last_decision_pct": num("last_ack_decision_pct"),
         "last_turn_cm": num("last_ack_turn_cm"),
+        "last_turn_quarter": num("last_ack_turn_qt"),
         "increase_run_cm": max(0, num("increase_run_cm") or 0),
+        "increase_run_quarter": max(0, num("increase_run_qt") or 0),
         "decrease_run": max(0, num("decrease_run", int) or 0),
     }
 
@@ -4113,10 +4155,15 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "decision_min": settings["decision_min_readings"],
         # Minutes pooled when the detector decides over a window (0: a median).
         "decision_window_min": settings["decision_window_min"] if settings["decider"] == "yolo" else 0,
-        # How far to turn the handle (whole cm, TURN_MIN_CM..TURN_HARD_MAX_CM;
-        # None: the screen's own fixed text), what it was sized on, and the
-        # seconds still left before the photos after a turn count.
-        "turn_cm": safe_turn_cm(decider["turn_cm"]) if decider.get("turn_cm") is not None else None,
+        # How far to turn the handle -- whole cm (turn_cm) or whole quarter
+        # turns (turn_qt), within TURN_UNITS; None: the screen's own fixed
+        # text in turn_unit -- what it was sized on, and the seconds still
+        # left before the photos after a turn count.
+        "turn_unit": decider.get("turn_unit") or settings["turn_unit"],
+        "turn_cm": safe_turn(decider["turn"], "cm")
+                   if decider.get("turn") is not None and (decider.get("turn_unit") or "cm") == "cm" else None,
+        "turn_qt": safe_turn(decider["turn"], "quarter")
+                   if decider.get("turn") is not None and decider.get("turn_unit") == "quarter" else None,
         "turn_basis": decider.get("turn_basis"),
         "settle_left_s": decider.get("settle_left_s") or 0,
         # This reading on the lab scale, and the line that put it there (None
@@ -4155,6 +4202,8 @@ async def inline_reading(
     last_ack_choice: str = Form(""),
     last_ack_decision_pct: str = Form(""),
     last_ack_turn_cm: str = Form(""),
+    last_ack_turn_qt: str = Form(""),
+    increase_run_qt: str = Form(""),
     increase_run_cm: str = Form(""),
     decrease_run: str = Form(""),
     # The rest of a burst (inline_settings.group_size > 1): judged with file
@@ -4196,7 +4245,8 @@ async def inline_reading(
         done = None
     if done:
         consigne = (done[0].get("mesures") or {}).get("consigne") or {}
-        done[0]["turn_cm"], done[0]["turn_basis"] = consigne.get("turn_cm"), consigne.get("basis")
+        done[0]["turn"], done[0]["turn_basis"] = consigne.get("turn", consigne.get("turn_cm")), consigne.get("basis")
+        done[0]["turn_unit"] = consigne.get("unit") or "cm"
         return _inline_response(reading_id, done[0], settings)
 
     contents = await file.read()
@@ -4261,6 +4311,7 @@ async def inline_reading(
         ctx = inline_ack_context(since_ack, last_ack_instruction.strip() or None, {
             "last_ack_choice": last_ack_choice, "last_ack_decision_pct": last_ack_decision_pct,
             "last_ack_turn_cm": last_ack_turn_cm, "increase_run_cm": increase_run_cm,
+            "last_ack_turn_qt": last_ack_turn_qt, "increase_run_qt": increase_run_qt,
             "decrease_run": decrease_run})
         # A turn of the handle -- an older loop.py does not say which choice,
         # and a turn is what nearly every confirmation is.
@@ -4279,10 +4330,11 @@ async def inline_reading(
         decider["decision_pct"], decider["decision_n"] = decision_pct, decision_n
         instruction, alert, reason = inline_instruction(
             decision_pct, decision_n, settings, last_ack_instruction.strip() or None)
-        instruction, turn_cm, turn_basis, limit_reason = inline_turn(instruction, decision_pct, settings, ctx)
+        instruction, turn, turn_basis, limit_reason = inline_turn(instruction, decision_pct, settings, ctx)
         if limit_reason:
             alert, reason = True, limit_reason
-        decider["turn_cm"], decider["turn_basis"] = turn_cm, turn_basis
+        decider["turn_unit"], decider["turn_basis"] = settings["turn_unit"], turn_basis
+        decider["turn"] = turn
         decider["settle_left_s"] = settling_s(since_ack, settings, turned) if use_yolo else 0
         # Teams for the inline rig waits for a card written for this rule; the
         # tray's "n AUGMENTER in a row" message would misdescribe it.
@@ -4369,7 +4421,8 @@ async def inline_reading(
             # sized from it, and turns can be checked against what followed.
             mesures["consigne"] = {"decision_pct": decider.get("decision_pct"),
                                    "decision_n": decider.get("decision_n"),
-                                   "turn_cm": decider.get("turn_cm"), "basis": decider["turn_basis"]}
+                                   "turn": decider.get("turn"), "unit": decider.get("turn_unit"),
+                                   "basis": decider["turn_basis"]}
         if mesures:
             row["mesures"] = mesures
         try:
