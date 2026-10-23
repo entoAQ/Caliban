@@ -420,19 +420,22 @@ def take_reading(state):
     state["last_capture"] = measured
     state["last_flash_at"] = iso(now_utc())
 
-    # Product in view? Compared with the empty-chute reference; without one,
-    # coverage is None and the photo goes as before.
+    # Product in view? Decided on the pixel product share, which needs no
+    # reference. The tile coverage against the empty-chute reference failed
+    # both ways on 2026-10-23 once the flash was re-aimed: it passed a bare
+    # chute (39 product px, read 3909 %) and then, with a fresh reference,
+    # held back a line carrying 0.13 product share at 13 % coverage. It now
+    # only decides when the share cannot be measured.
     cov = measured.get("coverage")
-    line = state.setdefault("line", {})
-    if cov is not None and cov < cam_settings["min_coverage"]:
-        log(f"{reading_id}: product covers {cov:.0%} of the view -- not analysed")
-        line.update(product=False, coverage=cov)
-        return IDLE_RECHECK_S
-    # The pixel share needs no reference, so it still holds when the reference
-    # is stale (flash or camera moved) and the tile coverage passes an empty chute.
     prod = measured.get("product")
-    if prod is not None and prod < cam_settings["min_product"]:
-        log(f"{reading_id}: product share {prod:.3f} -- not analysed")
+    line = state.setdefault("line", {})
+    if prod is not None:
+        if prod < cam_settings["min_product"]:
+            log(f"{reading_id}: product share {prod:.3f} -- not analysed")
+            line.update(product=False, coverage=cov)
+            return IDLE_RECHECK_S
+    elif cov is not None and cov < cam_settings["min_coverage"]:
+        log(f"{reading_id}: product covers {cov:.0%} of the view -- not analysed")
         line.update(product=False, coverage=cov)
         return IDLE_RECHECK_S
     line.update(product=True, coverage=cov)
@@ -478,12 +481,14 @@ def take_reading(state):
         except Exception as e:
             log(f"{reading_id}-{k}: burst photo failed: {type(e).__name__}: {e}")
             continue
-        c_k = m_k.get("coverage")
-        if c_k is not None and c_k < cam_settings["min_coverage"]:
+        # Same rule as the first photo: the product share, else the coverage.
+        c_k, p_k = m_k.get("coverage"), m_k.get("product")
+        if p_k is not None:
+            if p_k < cam_settings["min_product"]:
+                log(f"{reading_id}-{k}: product share {p_k:.3f} -- left out of the burst")
+                continue
+        elif c_k is not None and c_k < cam_settings["min_coverage"]:
             log(f"{reading_id}-{k}: product covers {c_k:.0%} -- left out of the burst")
-            continue
-        if m_k.get("product") is not None and m_k["product"] < cam_settings["min_product"]:
-            log(f"{reading_id}-{k}: product share {m_k['product']:.3f} -- left out of the burst")
             continue
         paths.append(p)
         covers.append(m_k.get("product"))
