@@ -30,6 +30,9 @@ Usage:
     python train_meo.py                   # 80 epochs, YOLOX-Tiny
     python train_meo.py --epochs 3 --name smoke
     python train_meo.py --arch yolox-nano
+
+Cut off part-way, the same command again carries on from the last round
+finished (weights/resume.pth).
 """
 
 import argparse
@@ -232,11 +235,27 @@ def main():
                         warmup_lr_start=0, no_aug_epochs=plain_epochs, min_lr_ratio=0.05)
     opt = optimiser(model, torch, lr)
     ema = ModelEMA(model, 0.9998)
-    step = 0
-    with open(out / "results.csv", "w", newline="", encoding="utf-8") as f:
+    step, first = 0, 0
+    # Saved after every round, so a run cut off (laptop asleep, window
+    # closed) carries on from its last round when started again with the
+    # same --name, instead of from the beginning.
+    state = out / "weights" / "resume.pth"
+    if state.exists():
+        st = torch.load(state, weights_only=False)
+        if st["epochs"] == args.epochs and st["arch"] == args.arch:
+            model.load_state_dict(st["model"])
+            ema.ema.load_state_dict(st["ema"])
+            ema.updates = st["ema_updates"]
+            opt.load_state_dict(st["opt"])
+            rng.setstate(st["rng"])
+            torch.set_rng_state(st["torch_rng"])
+            step, first = st["step"], st["epoch"]
+            print(f"carrying on after round {first}/{args.epochs}", flush=True)
+    with open(out / "results.csv", "a" if first else "w", newline="", encoding="utf-8") as f:
         log = csv.writer(f)
-        log.writerow(["epoch", "loss", "iou_loss", "conf_loss", "cls_loss", "seconds"])
-        for epoch in range(args.epochs):
+        if not first:
+            log.writerow(["epoch", "loss", "iou_loss", "conf_loss", "cls_loss", "seconds"])
+        for epoch in range(first, args.epochs):
             model.train()
             use_mosaic = epoch < args.epochs - plain_epochs
             order = list(range(len(train)))
@@ -259,6 +278,11 @@ def main():
             f.flush()
             print(f"  round {epoch + 1}/{args.epochs}  loss {sums[0] / n:.3f}  "
                   f"{'mosaic' if use_mosaic else 'plain'}  {secs:.0f} s", flush=True)
+            torch.save({"epochs": args.epochs, "arch": args.arch, "epoch": epoch + 1, "step": step,
+                        "model": model.state_dict(), "ema": ema.ema.state_dict(), "ema_updates": ema.updates,
+                        "opt": opt.state_dict(), "rng": rng.getstate(), "torch_rng": torch.get_rng_state()},
+                       f"{state}.tmp")
+            os.replace(f"{state}.tmp", state)
 
     best = ema.ema
     torch.save({"model": best.state_dict(), "arch": args.arch, "classes": CLASSES}, out / "weights" / "last.pth")
