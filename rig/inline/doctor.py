@@ -778,6 +778,8 @@ try:
     print(json.dumps({"ok": True, "flash_level": m.get("flash_level"), "clipped_pct": m.get("clipped_pct")}))
 except flashcam.FlashNotFired as e:
     print(json.dumps({"ok": False, "why": "nofire", "error": str(e)}))
+except flashcam.FlashTiming as e:
+    print(json.dumps({"ok": False, "why": "timing", "error": str(e)}))
 except Exception as e:
     print(json.dumps({"ok": False, "why": "camera", "error": type(e).__name__ + ": " + str(e)}))
 """ % (HERE, TEST_PHOTO)
@@ -803,7 +805,31 @@ def fix_test_flash():
         return True, "Photo prise, le flash fonctionne.", {"attachment_file": TEST_PHOTO}
     if res.get("why") == "nofire":
         return False, "Le flash ne s'est pas déclenché : le réveiller (un bouton) ou changer les piles, puis réessayer."
+    if res.get("why") == "timing":
+        return False, ("Le flash s'est déclenché mais à côté de la prise de vue, à chaque essai : "
+                       "lancer « Vérifier la caméra ».")
     return False, f"La caméra n'a pas pris de photo : {res.get('error', '')[:150]}"
+
+
+def fix_check_camera():
+    """camcheck.py: listed, link errors, frame timing, how late the flash went
+    out -- for a flash timing fault. Like the flash test, it needs the camera,
+    so the loop lets go first and is put back only if it was running. Any
+    finding is a failed result, so a warning is not shown as a green tick."""
+    was_running = is_active(LOOP)
+    if was_running:
+        sudo_systemctl("stop", LOOP)
+        time.sleep(2)
+    try:
+        rc, out = run([sys.executable, os.path.join(HERE, "camcheck.py")], timeout=90, cwd=HERE)
+    finally:
+        if was_running:
+            sudo_systemctl("start", LOOP)
+    res = last_json(out)
+    if res is None:
+        return False, f"Vérification impossible : {out[-200:]}", {"output": out}
+    report = "\n".join(l for l in out.splitlines() if not l.startswith("{"))
+    return res.get("status") == "ok", res.get("detail", ""), {"output": report}
 
 
 def fix_send_logs():
@@ -954,6 +980,7 @@ FIXES = {
     "restart_loop":   ("Redémarrer les lectures", fix_restart_loop),
     "test_flash":     ("Tester le flash", fix_test_flash),
     "test_photo":     ("Photo de contrôle", fix_test_flash),
+    "check_camera":   ("Vérifier la caméra", fix_check_camera),
     "send_logs":      ("Envoyer le journal", fix_send_logs),
     "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
     "reboot":         ("Redémarrer le Pi", fix_reboot),
@@ -975,7 +1002,7 @@ if TRAY:
 # test only means something after someone has woken the flash by hand, and
 # the code update restarts this process from under the rest of the run.
 NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code",
-                     "test_photo", "send_logs", "rollback_code"}
+                     "test_photo", "check_camera", "send_logs", "rollback_code"}
 # These end this process: say "started" to Caliban before running them.
 ENDS_PROCESS = {"reboot", "update_code", "rollback_code"}
 

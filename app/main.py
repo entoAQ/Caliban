@@ -4268,6 +4268,7 @@ DOCTOR_DEVICES = {
             "restart_kiosk": "Rouvrir le navigateur",
             "restore_kiosk": "Rétablir le plein écran",
             "test_flash": "Tester le flash",
+            "check_camera": "Vérifier la caméra",
             "free_disk": "Libérer de l'espace",
             "update_code": "Remettre le logiciel à jour",
             "rollback_code": "Revenir à la version précédente",
