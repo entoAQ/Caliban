@@ -18,7 +18,9 @@
 # its holding folder until promote.ps1 moves it there, and only if step 5 says
 # it is better. Nothing reaches Ariel until that is pushed and the scale set.
 
-param([int]$Epochs = 30, [string]$Arch = "yolox-tiny")
+# Cut off part-way (laptop asleep, window closed)? Run it again with the
+# -Name it printed at the start: the training carries on from its last round.
+param([int]$Epochs = 30, [string]$Arch = "yolox-tiny", [string]$Name = "")
 # Not "Stop": Python writes its progress to stderr, which Windows PowerShell
 # would then treat as a failure. Each step checks the exit code instead.
 $ErrorActionPreference = "Continue"
@@ -28,7 +30,7 @@ $ErrorActionPreference = "Continue"
 $env:PYTHONIOENCODING = "utf-8"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repo = Resolve-Path (Join-Path $here "..\..")
-$name = "meo-" + (Get-Date -Format "yyyyMMdd-HHmm")
+$name = if ($Name) { $Name } else { "meo-" + (Get-Date -Format "yyyyMMdd-HHmm") }
 $runs = Join-Path $(if ($env:INLINE_LABELING_DIR) { $env:INLINE_LABELING_DIR } else { Join-Path $HOME "inline_labeling" }) "amas_runs"
 $log = Join-Path $runs "$name.log"
 New-Item -ItemType Directory -Force $runs | Out-Null
