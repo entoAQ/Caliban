@@ -77,6 +77,9 @@ def main():
         h, w, found = predict(img)
         result = []
         for c, x0, y0, x1, y1, s in found:
+            # numpy's floats do not go through json.dumps (the YOLO11 export
+            # gives float32 corners).
+            x0, y0, x1, y1, s = (float(v) for v in (x0, y0, x1, y1, s))
             result.append({"from_name": "box", "to_name": "image", "type": "rectanglelabels",
                            "original_width": w, "original_height": h, "image_rotation": 0, "score": s,
                            "value": {"x": 100 * x0 / w, "y": 100 * y0 / h, "width": 100 * (x1 - x0) / w,
