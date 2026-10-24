@@ -32,6 +32,12 @@ AMAS = ROOT / "amas"
 # labels still train the model, but its lots are not used for calibration
 # or the lot checks, and its unlabelled tiles are left out of the queue.
 FIRST_LOT = "20261016"
+# Ariel's box rebuilt (2026-10-24): camera turned, aperture closed, flash
+# 1/32 and gain 2.0 -- crisper, darker photos with harder shadows. Photos
+# from here on are what the model has to read now, so pull_amas.py takes
+# them by default and reorder_amas.py puts them first in the queue. The
+# older labels still train the model.
+CURRENT_LOOK = "2026-10-24T18:40:00Z"
 # Lots never to be compared with the lab or labelled (Tim, 2026-10-18).
 EXCLUDED_LOTS = {"20261018-BB04"}
 # Lots whose lab result is kept but does not match their photos (Tim,

@@ -23,9 +23,9 @@ Needs SUPABASE_URL and SUPABASE_SERVICE_KEY, and numpy + opencv for the
 product share.
 
 Usage:
-    python pull_amas.py                  # new lots since the refocus, 19 photos each
+    python pull_amas.py                  # new lots since the box rebuild, 19 photos each
     python pull_amas.py --per-lot 25
-    python pull_amas.py --training 50    # 50 photos since the refocus, no lab needed
+    python pull_amas.py --training 50    # 50 photos since the box rebuild, no lab needed
 """
 
 import argparse
@@ -52,6 +52,9 @@ CHUTE_MOUNTED = "2026-10-13T12:30:00Z"
 # photos are taken from here on only: the set already labelled is from
 # before, and softer photos are not added to it.
 REFOCUSED = "2026-10-18T14:20:00Z"
+# Superseded as the default by the box rebuild (2026-10-24), when the photos
+# changed look again; the refocus stays for --since by hand.
+from sync_amas import CURRENT_LOOK  # noqa: E402
 # Lot windows, from the bagging scale's trace (2026-10-19, 51 bags over
 # 10-15..10-18): the operator confirms a lot about 2 minutes after its last
 # top-up, and product reaches the scale 0-2 minutes after passing Ariel. So a
@@ -125,8 +128,8 @@ def pick(photos, n, url, auth):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--per-lot", type=int, default=19)
-    ap.add_argument("--since", default=REFOCUSED,
-                    help="only photos from this time on, UTC (default: the lens refocus)")
+    ap.add_argument("--since", default=CURRENT_LOOK,
+                    help="only photos from this time on, UTC (default: the box rebuild, sync_amas.CURRENT_LOOK)")
     ap.add_argument("--training", type=int, default=0, metavar="N",
                     help="instead: N photos since --since whatever their lot, lab result or not, "
                          "for training only (spread across flow)")
