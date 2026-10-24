@@ -142,6 +142,12 @@ DEFAULTS = {
     # keep-alive photos during stops and sparse moments, which is enough.
     "flash_chroma_tol": 0.03,
     "flash_min_tiles": 0.60,
+    # The camera mounted upside down (the box rebuilt on 2026-10-24 fits its
+    # cables that way): turn every accepted photo half a turn, so the crop,
+    # the reference and the detector see the chute the way round they were
+    # set up on. Set in ~/inline_camera.json; the flash check before it works
+    # on the sensor's own rows and is unaffected.
+    "rotate_180": False,
 }
 
 REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
@@ -451,6 +457,9 @@ def capture(path, settings=None, log=print, keep=None):
             even = lit and min(shares) >= s["band_min_share"] * max(shares)
             fired_any |= lit
             if even:
+                if s.get("rotate_180"):
+                    array = array[::-1, ::-1].copy()
+                    top, bottom = bottom, top
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 Image.fromarray(array[..., ::-1]).save(path, quality=92)
                 if keep is not None:
