@@ -38,7 +38,7 @@ from common import ROOT, ls  # noqa: E402
 from sync_amas import AMAS, find_project  # noqa: E402
 import meo_detect  # noqa: E402
 
-CLASSES = ["MEO", "Peau", "Incertain", "Prépupe", "Poussière"]
+CLASSES = ["MEO", "Peau", "Incertain", "Bicolore", "Poussière"]
 NESTED = 0.6   # share of the smaller box's area inside the other
 
 

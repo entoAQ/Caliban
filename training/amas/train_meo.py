@@ -60,7 +60,7 @@ TILES = ROOT / "amas" / "tiles"
 RUNS = ROOT / "amas_runs"
 ARCHES = ("yolox-tiny", "yolox-nano")
 WEIGHTS_URL = "https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/{}.pth"
-CLASSES = 5  # MEO / Peau / Incertain / Prépupe / Poussière (data.yaml)
+CLASSES = 5  # MEO / Peau / Incertain / Bicolore / Poussière (data.yaml)
 SIZE = meo_detect.SIZE
 MAX_LABELS = 120
 
