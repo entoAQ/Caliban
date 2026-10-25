@@ -53,12 +53,15 @@ Step "3/6 Lot estimates and scale" "lot_estimate.py" @("--name", $name)
 Write-Host "`n=== 4/6 Scale into the holding folder ===" -ForegroundColor Cyan
 # train_meo.py exported the model there (meo.onnx, and meo.json with its
 # kind); the scale fitted in step 3 belongs with it.
-$scale = (Get-Content (Join-Path $runs "$name\scale.json") | ConvertFrom-Json).yolo_scale
+$fit = Get-Content (Join-Path $runs "$name\scale.json") | ConvertFrom-Json
+$scale = $fit.yolo_scale
 $hold = Join-Path $runs "$name\ariel"
 $meta = Get-Content (Join-Path $hold "meo.json") | ConvertFrom-Json
 $meta | Add-Member -NotePropertyName yolo_scale_fitted -NotePropertyValue $scale -Force
+# With inline_settings.dust_mask on, this one instead (lot_estimate.py).
+$meta | Add-Member -NotePropertyName yolo_scale_dust_fitted -NotePropertyValue $fit.yolo_scale_dust -Force
 $meta | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $hold "meo.json")
-Write-Host "model held in $hold (version $name, $($meta.arch), scale $scale)"
+Write-Host "model held in $hold (version $name, $($meta.arch), scale $scale; with dust_mask $($fit.yolo_scale_dust))"
 
 Step "5/6 Against the model on Ariel" "compare_models.py" @("--name", $name)
 $verdict = Get-Content (Join-Path $runs "$name\compare.json") | ConvertFrom-Json

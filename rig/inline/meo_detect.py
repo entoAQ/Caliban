@@ -224,18 +224,22 @@ class Background:
         self.frames.append((now, np.ascontiguousarray(a[::step, ::step])))
 
 
-def measure(path, background=None):
+def measure(path, background=None, at=None):
     """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"}, and
     with a Background that has enough photos, "clean": the same three counts
     without the dust (see Background). The photo then joins the background.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
-    Caliban's smaller review copy -- so SGSC can draw what was counted."""
+    Caliban's smaller review copy -- so SGSC can draw what was counted.
+
+    at: when the photo was taken (time.time() scale), for the background's
+    age limit; now when not given -- right on Ariel, which measures as it
+    shoots. lot_estimate.py passes it, measuring days-old photos."""
     t0 = time.monotonic()
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
-    now = time.time()
+    now = time.time() if at is None else at
     dust = background.dust(a.shape, now) if background is not None else None
     step = background.step(w) if background is not None else 1
     clean_px, clean_n = 0.0, 0
