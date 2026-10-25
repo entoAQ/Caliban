@@ -9,10 +9,19 @@ when the tile is submitted, so every pre-filled box is still checked by eye
 
 Rerun after retraining: the old predictions are replaced.
 
+Nested boxes are dropped: where a box lies mostly (NESTED, 60%) inside a
+more confident box of the same class, only the confident one is kept. The
+YOLO11 models' own NMS (IoU 0.7) lets a box drawn around a whole clump and
+a second around part of it both through -- 425 such pairs in the pre-fills
+of 2026-10-25 -- and each one left unfixed is a doubled label.
+--tidy applies the same to the pre-fills already in Label Studio, without
+running a model.
+
 Usage:
     python prelabel_amas.py                    # model from amas_runs/meo
     python prelabel_amas.py --name meo --conf 0.3
     python prelabel_amas.py --dry-run          # count boxes, change nothing
+    python prelabel_amas.py --tidy             # drop nested boxes from the existing pre-fills
 """
 
 import argparse
@@ -30,6 +39,58 @@ from sync_amas import AMAS, find_project  # noqa: E402
 import meo_detect  # noqa: E402
 
 CLASSES = ["MEO", "Peau", "Incertain", "Prépupe", "Poussière"]
+NESTED = 0.6   # share of the smaller box's area inside the other
+
+
+def drop_nested(boxes):
+    """[(class, x0, y0, x1, y1, score)] -> the same without any box that lies
+    NESTED or more inside a more confident box of the same class."""
+    kept = []
+    for b in sorted(boxes, key=lambda b: -b[5]):
+        c, x0, y0, x1, y1 = b[:5]
+        area = max((x1 - x0) * (y1 - y0), 1e-9)
+        if not any(k[0] == c and
+                   max(0, min(x1, k[3]) - max(x0, k[1])) * max(0, min(y1, k[4]) - max(y0, k[2]))
+                   >= NESTED * min(area, (k[3] - k[1]) * (k[4] - k[2]))
+                   for k in kept):
+            kept.append(b)
+    return kept
+
+
+def unlabelled():
+    """-> (project id, the tasks nobody has labelled, drafted or skipped yet)"""
+    pid = find_project()
+    tasks, page = [], 1
+    while True:
+        resp = ls("GET", "/api/tasks", project=pid, page=page, page_size=100, fields="all")
+        batch = resp["tasks"] if isinstance(resp, dict) else resp
+        tasks += batch
+        if len(batch) < 100:
+            break
+        page += 1
+    return pid, [t for t in tasks if not (t.get("total_annotations") or t.get("draft_exists")
+                                          or t.get("cancelled_annotations"))]
+
+
+def tidy(tasks, dry_run):
+    """Drop nested boxes from the pre-fills already on the unlabelled tasks."""
+    changed = dropped = 0
+    for t in tasks:
+        for p in t.get("predictions") or []:
+            if not isinstance(p, dict):
+                continue
+            res = p.get("result") or []
+            boxes = [(r["value"]["rectanglelabels"][0], r["value"]["x"], r["value"]["y"],
+                      r["value"]["x"] + r["value"]["width"], r["value"]["y"] + r["value"]["height"],
+                      r.get("score") or 0.0, i) for i, r in enumerate(res)]
+            keep = {b[6] for b in drop_nested(boxes)}
+            if len(keep) == len(res):
+                continue
+            changed += 1
+            dropped += len(res) - len(keep)
+            if not dry_run:
+                ls("PATCH", f"/api/predictions/{p['id']}", {"result": [r for i, r in enumerate(res) if i in keep]})
+    print(f"{'Would drop' if dry_run else 'Dropped'} {dropped} nested boxes on {changed} tiles")
 
 
 def main():
@@ -38,7 +99,11 @@ def main():
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="pre-fill even when the model looks far off")
+    ap.add_argument("--tidy", action="store_true", help="only drop nested boxes from the existing pre-fills")
     args = ap.parse_args()
+    if args.tidy:
+        tidy(unlabelled()[1], args.dry_run)
+        return
 
     # The run's model as exported for Ariel, read by Ariel's own code.
     weights = ROOT / "amas_runs" / args.name / "ariel" / "meo.onnx"
@@ -49,19 +114,8 @@ def main():
     def predict(path):
         """-> (tile height, width, [(class, x0, y0, x1, y1, score)] in tile px)"""
         a = np.asarray(Image.open(path).convert("RGB"))
-        return a.shape[0], a.shape[1], meo_detect.detect_tiles([a])[0]
-    pid = find_project()
-
-    tasks, page = [], 1
-    while True:
-        resp = ls("GET", "/api/tasks", project=pid, page=page, page_size=100, fields="all")
-        batch = resp["tasks"] if isinstance(resp, dict) else resp
-        tasks += batch
-        if len(batch) < 100:
-            break
-        page += 1
-    todo = [t for t in tasks if not (t.get("total_annotations") or t.get("draft_exists")
-                                     or t.get("cancelled_annotations"))]
+        return a.shape[0], a.shape[1], drop_nested(meo_detect.detect_tiles([a])[0])
+    pid, todo = unlabelled()
 
     # Hand labels run ~2 MEO per tile. A model drawing many times that is not
     # ready: correcting a flood of boxes is slower than drawing from scratch.
