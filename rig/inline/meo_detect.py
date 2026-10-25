@@ -45,7 +45,7 @@ IOU = {"yolox": 0.45, "yolo11": 0.7}  # each family's own default
 # Boxes sent per photo for review (SGSC draws them on the photo); a photo
 # with more than this keeps the most confident ones. The sums use them all.
 MAX_BOXES = 150
-MEO = 0  # class 0 of MEO / Peau / Incertain (/ Prépupe from the next retrain)
+MEO = 0  # class 0 of MEO / Peau / Incertain / Prépupe (/ Poussière from the next retrain)
 
 _session = None
 
@@ -186,8 +186,48 @@ def detect_tiles(tiles):
     return out
 
 
-def measure(path):
-    """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"}.
+class Background:
+    """The chute without the product moving over it: the per-pixel median of
+    the last few photos. Larvae and ME fall through between photos (a minute
+    apart, or 12 s in a burst), so they drop out of the median; what stays is
+    the plate and whatever is stuck to it. Where that background is itself
+    product-coloured (product_mask), it is dust -- the frass that builds up
+    along the top and in the top-right corner of the rebuilt box, which the
+    detector boxed as MEO: 52% of the MEO area on 2026-10-25, the ME ratio
+    about 45% too high. measure() leaves boxes centred on dust, and dust
+    pixels, out of its "clean" numbers.
+
+    Kept in memory by the loop, a reduced copy of each photo (every STEP-th
+    pixel, ~500 px wide -- the dust lies in patches): 8 of them are ~3 MB. Nothing until MIN photos
+    from the last MAX_AGE_S are in -- after a restart or a stop, the first
+    photos go without "clean"."""
+    KEEP, MIN, MAX_AGE_S, WIDTH = 8, 5, 900, 500
+
+    def __init__(self):
+        self.frames = []    # (time.time(), reduced RGB)
+
+    def step(self, w):
+        return max(1, round(w / self.WIDTH))
+
+    def dust(self, shape, now):
+        """Dust mask at the reduced size for a photo of `shape`, or None."""
+        self.frames = [(t, f) for t, f in self.frames if now - t < self.MAX_AGE_S][-self.KEEP:]
+        step = self.step(shape[1])
+        same = [f for _, f in self.frames if f.shape == (-(-shape[0] // step), -(-shape[1] // step), 3)]
+        if len(same) < self.MIN:
+            return None
+        # The middle value by partition: a fraction of np.median's time on the Pi.
+        return product_mask(np.partition(np.stack(same), len(same) // 2, axis=0)[len(same) // 2])
+
+    def add(self, a, now):
+        step = self.step(a.shape[1])
+        self.frames.append((now, np.ascontiguousarray(a[::step, ::step])))
+
+
+def measure(path, background=None):
+    """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"}, and
+    with a Background that has enough photos, "clean": the same three counts
+    without the dust (see Background). The photo then joins the background.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -195,6 +235,10 @@ def measure(path):
     t0 = time.monotonic()
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
+    now = time.time()
+    dust = background.dust(a.shape, now) if background is not None else None
+    step = background.step(w) if background is not None else 1
+    clean_px, clean_n = 0.0, 0
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
@@ -207,12 +251,25 @@ def measure(path):
             if c == MEO:
                 meo_px += (x1 - x0) * (y1 - y0)
                 meo_n += 1
+                if dust is not None and not dust[min(dust.shape[0] - 1, int((ty + (y0 + y1) / 2) // step)),
+                                                 min(dust.shape[1] - 1, int((tx + (x0 + x1) / 2) // step))]:
+                    clean_px += (x1 - x0) * (y1 - y0)
+                    clean_n += 1
                 # Plain floats: numpy's do not go through json.dumps.
                 boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
                               round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
     boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
-    return {"meo_px": round(float(meo_px), 1), "meo_n": int(meo_n), "product_px": int(product_mask(crop).sum()),
-            "ms": int((time.monotonic() - t0) * 1000), "boxes": boxes}
+    product = product_mask(crop)
+    out = {"meo_px": round(float(meo_px), 1), "meo_n": int(meo_n), "product_px": int(product.sum()),
+           "boxes": boxes}
+    if dust is not None:
+        full = dust.repeat(step, axis=0).repeat(step, axis=1)[int(h * CROP_TOP):h, int(w * CROP_LEFT):w]
+        out["clean"] = {"meo_px": round(float(clean_px), 1), "meo_n": int(clean_n),
+                        "product_px": int((product & ~full).sum())}
+    if background is not None:
+        background.add(a, now)
+    out["ms"] = int((time.monotonic() - t0) * 1000)
+    return out
 
 
 if __name__ == "__main__":

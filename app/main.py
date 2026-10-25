@@ -3714,6 +3714,14 @@ INLINE_DEFAULTS = {
     "decider": "ai",
     "yolo_scale": 3.19,
     "ai_fallback": False,
+    # The detector's numbers without the dust stuck to the chute (Ariel's
+    # meo_detect.Background: boxes on, and product pixels of, whatever stays
+    # put over the last few photos). Ariel sends them next to the raw ones
+    # once it has five photos of background; every reading keeps both
+    # (measures.yolo.clean / .raw), and this says which the estimate uses.
+    # The raw ones are what yolo_scale was fitted on: refit it on the clean
+    # ones before turning this on.
+    "dust_mask": False,
 }
 
 
@@ -3752,7 +3760,7 @@ def inline_settings():
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
-        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns"):
+        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
         # A straight line from the prompt's value to lab ME%, fitted on lots
@@ -4059,6 +4067,14 @@ def inline_detector(raw, n_photos):
         boxes = _fractions(ph.get("boxes"), 5, 200)
         if boxes is not None:
             row["boxes"] = boxes
+        # Without the dust (Ariel's meo_detect.Background), once it has a
+        # background; a malformed one is dropped, never the reading.
+        try:
+            c = ph["clean"]
+            row["clean"] = {"meo_px": max(0.0, float(c["meo_px"])), "meo_n": max(0, int(c["meo_n"])),
+                            "product_px": max(0, int(c["product_px"]))}
+        except (KeyError, TypeError, ValueError):
+            pass
     out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:
@@ -4096,9 +4112,21 @@ def yolo_band_result(group, det, settings, reading_id):
         if why:
             print(f"[capture refused] {reading_id}: {why}")
             raise HTTPException(status_code=422, detail=why)
-    meo = sum(p["meo_px"] for p in det["photos"])
-    product = sum(p["product_px"] for p in det["photos"])
-    pieces = sum(p["meo_n"] for p in det["photos"])
+    def sums(photos):
+        return (round(sum(p["meo_px"] for p in photos), 1), sum(p["product_px"] for p in photos),
+                sum(p["meo_n"] for p in photos))
+
+    meo, product, pieces = sums(det["photos"])
+    extra = {}
+    # The dust-free numbers when every photo has them (inline_settings.
+    # dust_mask): the pooled window and the lot estimates then add those up.
+    clean = [p.get("clean") for p in det["photos"]]
+    if all(clean):
+        c_meo, c_product, c_pieces = sums(clean)
+        extra["clean"] = {"meo_px": c_meo, "product_px": c_product, "meo_n": c_pieces}
+        if settings["dust_mask"] and c_product > 0:
+            extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
+            meo, product, pieces = c_meo, c_product, c_pieces
     ratio = meo / product
     estimate = round(settings["yolo_scale"] * 100 * ratio, 2)
     result = {
@@ -4109,7 +4137,8 @@ def yolo_band_result(group, det, settings, reading_id):
         "repeat_count": 1,
         "justification": f"Détecteur : {pieces} morceau(x) de MEO sur {len(group)} photo(s).",
         "measures": {"yolo": {**det, "ratio_pct": round(100 * ratio, 4), "scale": settings["yolo_scale"],
-                              "meo_px": round(meo, 1), "product_px": product, "meo_n": pieces}},
+                              "meo_px": round(meo, 1), "product_px": product, "meo_n": pieces,
+                              "dust_mask": "raw" in extra, **extra}},
     }
     return [result], False, photo_mean, photo_std
 

@@ -189,9 +189,16 @@ def detect_burst(paths):
     if _detector_missing:
         detector_status.clear(); detector_status.update(ok=False, at=iso(now_utc()), error=_detector_missing)
         return None
+    global _background
     try:
         import meo_detect
-        photos = [meo_detect.measure(p) for p in paths]
+        # One background for the life of the loop: the photos of the last
+        # few readings, so dust stuck to the chute is told from product
+        # falling through (meo_detect.Background). Caliban uses the dust-free
+        # numbers when its inline_settings.dust_mask is on.
+        if _background is None:
+            _background = meo_detect.Background()
+        photos = [meo_detect.measure(p, _background) for p in paths]
     except ImportError as e:
         log(f"MEO detector not available ({e}): readings go without it")
         _detector_missing = f"absent : {e}"
@@ -209,6 +216,7 @@ def detect_burst(paths):
 
 
 _detector_missing = None
+_background = None
 # The last burst's detector result, kept in the state file for the doctor
 # (doctor.py check_detector): ok, when, how long, or what went wrong.
 detector_status = {}
@@ -575,8 +583,10 @@ def take_reading(state):
     state["detector"] = dict(detector_status)
     if det:
         p = det["photos"]
-        log(f"{reading_id}: detector {sum(x['meo_n'] for x in p)} MEO pieces, "
-            f"{sum(x['ms'] for x in p) / 1000:.1f} s for {len(p)} photo(s)")
+        clean = [x["clean"] for x in p if "clean" in x]
+        log(f"{reading_id}: detector {sum(x['meo_n'] for x in p)} MEO pieces"
+            + (f" ({sum(c['meo_n'] for c in clean)} off the dust)" if clean else "")
+            + f", {sum(x['ms'] for x in p) / 1000:.1f} s for {len(p)} photo(s)")
 
     try:
         reply, error = request_reading(reading_id, paths, covers, det, state)
