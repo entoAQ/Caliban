@@ -6,7 +6,7 @@ whether or not the rest of its photo is done. Writes to
 INLINE_LABELING_DIR/amas_yolo/:
 
     images/{train,val}/, labels/{train,val}/, data.yaml
-        the tiles, classes 0 MEO, 1 Peau, 2 Incertain, 3 Prépupe. Split by lot (every
+        the tiles, classes 0 MEO, 1 Peau, 2 Incertain, 3 Prépupe, 4 Poussière. Split by lot (every
         4th lot in packaging order to val), so val tiles never share a lot
         with training ones.
     lots.csv
@@ -30,7 +30,7 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 from common import ROOT, ls  # noqa: E402
 from sync_amas import AMAS, EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS, find_project  # noqa: E402
 
-CLASSES = ["MEO", "Peau", "Incertain", "Prépupe"]
+CLASSES = ["MEO", "Peau", "Incertain", "Prépupe", "Poussière"]
 TILES = AMAS / "tiles"
 OUT = ROOT / "amas_yolo"
 

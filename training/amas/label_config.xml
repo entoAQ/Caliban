@@ -5,6 +5,7 @@
     <Label value="Peau" background="#2b8cff" hotkey="2"/>
     <Label value="Incertain" background="#9a9a9a" hotkey="3"/>
     <Label value="Prépupe" background="#a020f0" hotkey="4"/>
+    <Label value="Poussière" background="#00b3a4" hotkey="5"/>
   </RectangleLabels>
   <Choices name="usable" toName="image" choice="single" showInline="true">
     <Choice value="Inutilisable"/>
