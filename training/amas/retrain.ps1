@@ -20,7 +20,8 @@
 
 # Cut off part-way (laptop asleep, window closed)? Run it again with the
 # -Name it printed at the start: the training carries on from its last round.
-param([int]$Epochs = 30, [string]$Arch = "yolox-tiny", [string]$Name = "")
+#   ... -NoDust     train without the Poussière boxes (dust left to Ariel's dust mask)
+param([int]$Epochs = 30, [string]$Arch = "yolox-tiny", [string]$Name = "", [switch]$NoDust)
 # Not "Stop": Python writes its progress to stderr, which Windows PowerShell
 # would then treat as a failure. Each step checks the exit code instead.
 $ErrorActionPreference = "Continue"
@@ -46,7 +47,7 @@ function Step($title, $script, $arguments) {
 }
 
 Write-Host "Retraining as $name (log: $log)"
-Step "1/6 Export labelled tiles" "export_amas.py" @()
+Step "1/6 Export labelled tiles" "export_amas.py" $(if ($NoDust) { @("--no-dust") } else { @() })
 Step "2/6 Train $Arch ($Epochs rounds)" "train_meo.py" @("--epochs", $Epochs, "--name", $name, "--arch", $Arch)
 Step "3/6 Lot estimates and scale" "lot_estimate.py" @("--name", $name)
 

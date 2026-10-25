@@ -15,9 +15,17 @@ INLINE_LABELING_DIR/amas_yolo/:
         model is trained: if hand-boxed MEO does not follow the lab, a model
         copying it will not either.
 
+With --no-dust, Poussière boxes are left out (the tiles still go in), so
+the model gets no dust class to move MEO into and dust is left to Ariel's
+dust mask (meo_detect.Background, inline_settings.dust_mask). The class list
+stays the same, so the model's outputs line up either way.
+
 Usage:
     python export_amas.py
+    python export_amas.py --no-dust
 """
+
+import argparse
 
 import csv
 import json
@@ -36,6 +44,9 @@ OUT = ROOT / "amas_yolo"
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--no-dust", action="store_true", help="leave the Poussière boxes out")
+    args = ap.parse_args()
     pid = find_project()
     if pid is None:
         raise SystemExit("No MEO project: run sync_amas.py first.")
@@ -68,7 +79,8 @@ def main():
         early = d["lot_number"] < FIRST_LOT or d.get("lab_me_pct") is None or d["lot_number"] in NO_FIT_LOTS
         if d["lot_number"] in EXCLUDED_LOTS:
             continue
-        boxes = [r for r in res if r["type"] == "rectanglelabels"]
+        boxes = [r for r in res if r["type"] == "rectanglelabels"
+                 and not (args.no_dust and r["value"]["rectanglelabels"][0] == "Poussière")]
         split = "val" if d["lot_number"] in val_lots and not early else "train"
         shutil.copy2(TILES / name, OUT / "images" / split / name)
         lines, meo_px, n_meo = [], 0.0, 0
