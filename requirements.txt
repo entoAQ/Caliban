@@ -32,3 +32,8 @@ openai>=1.54.0
 # unlike the cryptography case above there is no compiled-binary/glibc
 # mismatch to worry about on App Service's runtime.
 pillow>=10.0.0
+
+# --- Reject photos: larva share by colour (app/reject_colour.py) ---
+# Plain array arithmetic on the photo, no AI call. Manylinux wheels, same
+# as pillow.
+numpy>=1.26

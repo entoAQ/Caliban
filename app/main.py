@@ -41,6 +41,7 @@ from fastapi.responses import JSONResponse, Response
 from app.supabase_client import supabase, get_current_operator
 from app import sharepoint_client
 from app import command_wakeup
+from app import reject_colour
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "contamination_v1")
 MODEL_PATH = os.environ.get("MODEL_PATH", "models/best.pt")
@@ -5177,12 +5178,53 @@ def _run_reject_vision(command_id, contents, media_type):
         print(f"[reject_stream_readings insert failed] {command_id}: {type(e).__name__}: {e}")
 
 
+def _store_reject_colour(command_id, contents):
+    """Measure a reject photo's larva share by colour (app/reject_colour.py,
+    no AI call) and store it, one row per capture. Best-effort: returns the
+    row, or None if measuring or storing failed (e.g. rig/
+    reject_colour_readings.sql not run yet)."""
+    try:
+        row = {"command_id": command_id, **reject_colour.measure(contents)}
+    except Exception as e:
+        print(f"[reject colour failed] {command_id}: {type(e).__name__}: {e}")
+        return None
+    try:
+        supabase.table("reject_colour_readings").upsert(row, on_conflict="command_id").execute()
+    except Exception as e:
+        print(f"[reject_colour_readings upsert failed] {command_id}: {type(e).__name__}: {e}")
+        return None
+    return row
+
+
+def _reject_colour_row(command_id, operator):
+    """The capture's colour reading; a photo taken before the measurement
+    existed is measured now, the first time someone opens it."""
+    try:
+        resp = (
+            supabase.table("reject_colour_readings")
+            .select("*").eq("command_id", command_id).limit(1).execute()
+        )
+    except Exception as e:
+        print(f"[reject_colour_readings read failed] {command_id}: {type(e).__name__}: {e}")
+        return None
+    if resp.data:
+        return resp.data[0]
+    try:
+        contents, _lot, _path = _load_rig_capture(
+            command_id, operator, is_operator=False, allowed_kinds=("capture_reject",)
+        )
+    except Exception:
+        return None
+    return _store_reject_colour(command_id, contents)
+
+
 @app.get("/admin/reject-readings/{command_id}")
 def admin_reject_reading(command_id: str, operator: dict = Depends(require_role("qc"))):
     """The reject-vision reading for one capture, if the background task has
     produced one yet -- polled from the Rejets tab rather than pushed, same
     reasoning as everywhere else a background vision call's result is
-    fetched after the fact."""
+    fetched after the fact. Also the colour measurement (`colour`), measured
+    on the spot for a photo that has none yet."""
     resp = (
         supabase.table("reject_stream_readings")
         .select("*")
@@ -5192,7 +5234,35 @@ def admin_reject_reading(command_id: str, operator: dict = Depends(require_role(
         .execute()
     )
     rows = resp.data or []
-    return {"reading": rows[0] if rows else None}
+    return {"reading": rows[0] if rows else None, "colour": _reject_colour_row(command_id, operator)}
+
+
+@app.post("/admin/reject-colour/{command_id}/weights")
+def admin_reject_colour_weights(command_id: str, body: dict,
+                                operator: dict = Depends(require_role("qc"))):
+    """Record a weighed reject tray -- the same tray as the photo, larvae
+    picked out and weighed against the rest -- to calibrate the colour
+    measurement's area share against weight. Body: {"larva_g", "rest_g"}."""
+    try:
+        larva_g, rest_g = float(body["larva_g"]), float(body["rest_g"])
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Poids invalides.")
+    if larva_g < 0 or rest_g < 0 or larva_g + rest_g <= 0:
+        raise HTTPException(status_code=400, detail="Poids invalides.")
+    if _reject_colour_row(command_id, operator) is None:
+        raise HTTPException(status_code=409, detail="Pas de mesure couleur pour cette photo.")
+    resp = (
+        supabase.table("reject_colour_readings")
+        .update({
+            "weighed_larva_g": larva_g,
+            "weighed_rest_g": rest_g,
+            "weighed_by": operator["id"],
+            "weighed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        })
+        .eq("command_id", command_id)
+        .execute()
+    )
+    return {"colour": (resp.data or [None])[0]}
 
 
 @app.post("/admin/reject-readings/{command_id}/rerun")
@@ -5680,6 +5750,11 @@ async def capture_commands_complete(
             background_tasks.add_task(
                 _run_reject_vision, command_id, visible_contents, file.content_type or "image/jpeg",
             )
+        # The colour measurement costs nothing (no AI call), so every reject
+        # photo gets one, switch or no switch -- after the response, same as
+        # the vision call.
+        if update_resp.data[0].get("kind") == "capture_reject" and visible_contents:
+            background_tasks.add_task(_store_reject_colour, command_id, visible_contents)
 
         # Best-effort, same reasoning as the IR frame above: the operator is
         # waiting on the photo, and a ToF row is calibration data for later,
