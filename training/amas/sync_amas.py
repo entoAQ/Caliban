@@ -38,6 +38,8 @@ FIRST_LOT = "20261016"
 # them by default and reorder_amas.py puts them first in the queue. The
 # older labels still train the model.
 CURRENT_LOOK = "2026-10-24T18:40:00Z"
+# The same moment as tasks write taken_at ("...+00:00"), for comparing as text.
+LOOK_CUT = CURRENT_LOOK.replace("Z", "+00:00")
 # Lots never to be compared with the lab or labelled (Tim, 2026-10-18).
 EXCLUDED_LOTS = {"20261018-BB04"}
 # Lots whose lab result is kept but does not match their photos (Tim,
@@ -152,15 +154,21 @@ def main():
         have = set()
         print(f"Removed {len(whole)} whole-photo tasks, boxes of {len(done)} carried over to their tiles")
 
-    # Unlabelled tiles of lots before FIRST_LOT come out of the queue;
-    # labelled ones stay (export skips them).
-    early = [t["id"] for t in tasks_all if t["data"].get("tile") and t["data"]["tile"] in early_tiles
-             and not (t.get("total_annotations") or t.get("draft_exists") or t.get("cancelled_annotations"))]
-    if early:
-        ls("POST", "/api/dm/actions", {"selectedItems": {"all": False, "included": early}},
+    # Unlabelled tiles of lots before FIRST_LOT come out of the queue, and
+    # (Tim, 2026-10-25: enough old-look labels, label only the new look from
+    # here) unlabelled tiles from before CURRENT_LOOK; labelled ones stay
+    # (export skips them). Their tile files stay on disk.
+    def old_unlabelled(t):
+        tile = t["data"].get("tile")
+        return (tile and (tile in early_tiles or (t["data"].get("taken_at") or "") < LOOK_CUT)
+                and not (t.get("total_annotations") or t.get("draft_exists") or t.get("cancelled_annotations")))
+    early = [t["id"] for t in tasks_all if old_unlabelled(t)]
+    for i in range(0, len(early), 500):
+        ls("POST", "/api/dm/actions", {"selectedItems": {"all": False, "included": early[i:i + 500]}},
            id="delete_tasks", project=pid)
+    if early:
         have -= {t["data"]["tile"] for t in tasks_all if t["id"] in set(early)}
-        print(f"Removed {len(early)} unlabelled tiles of lots before {FIRST_LOT}")
+        print(f"Removed {len(early)} unlabelled tiles of lots before {FIRST_LOT} or photos before the current look")
 
     index = json.loads((AMAS / "tiles" / "tiles.json").read_text(encoding="utf-8"))
     # Photos shuffled by name hash so labelling order mixes lots and flows;
@@ -169,7 +177,8 @@ def main():
     new = [{"data": {"image": f"/data/local-files/?d=amas/tiles/{d['tile']}", "tile": d["tile"],
                      "photo": d["photo"], "reading_id": d["reading_id"], "taken_at": d["taken_at"]}}
            for d in order if d["tile"] not in have and (AMAS / "tiles" / d["tile"]).exists()
-           and (d["lot_number"] >= FIRST_LOT or d.get("training_only"))]
+           and (d["lot_number"] >= FIRST_LOT or d.get("training_only"))
+           and (d.get("taken_at") or "") >= LOOK_CUT]
     for task in new:
         if task["data"]["tile"] in carried:
             task["annotations"] = [{"result": carried[task["data"]["tile"]]}]
