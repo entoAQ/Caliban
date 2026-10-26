@@ -3653,6 +3653,14 @@ INLINE_DEFAULTS = {
     # flashes. decision_min_readings still applies, counted in readings.
     # 0 = the median, as before.
     "decision_window_min": 0,
+    # Over a window: no instruction that rests on one photo. Outside the
+    # no-change band, the decision is the window without whichever single
+    # photo pulls it furthest out (the lowest of the window-less-one values
+    # above increase_at, the highest below decrease_below). On 2026-10-23..26
+    # one photo alone made 39 of 119 AUGMENTER and 26 of 102 DIMINUER -- one
+    # of 84.6% turned a 1.2% window into a 12% AUGMENTER major. A real
+    # build-up is in most of the photos and still shows the same minute.
+    "decision_drop_one": False,
     # After a confirmed turn of the handle, the first settle_min minutes of
     # photos are left out of the decision: the product in the chute then is
     # still mostly what went through before the turn (2026-10-20: 10.7%
@@ -3761,7 +3769,7 @@ def inline_settings():
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
-        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask"):
+        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask", "decision_drop_one"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
         # A straight line from the prompt's value to lab ME%, fitted on lots
@@ -3993,13 +4001,17 @@ def inline_window_decision(yolo, prompt_version, settings, since_ack_s=None, tur
     readings pooled. A lookup failure falls back to this reading alone.
     turned: that confirmation was a turn of the handle; for its first
     settle_min minutes there is no decision yet ((None, 0): still settling),
-    and after them only the readings from then on count."""
-    meo, product, n = float(yolo["meo_px"]), float(yolo["product_px"]), 1
+    and after them only the readings from then on count.
+    With decision_drop_one, a pooled value outside the no-change band is
+    replaced by the window without its most influential photo
+    (window_drop_one). Returns (decision_pct, n, pooled_pct): the last is
+    the plain pooled value, the same as decision_pct without the rule."""
+    photos = [(float(yolo["meo_px"]), float(yolo["product_px"]))]
     horizon = settings["decision_window_min"] * 60
     if since_ack_s is not None:
         horizon = min(horizon, max(0, since_ack_s))
     if settling_s(since_ack_s, settings, turned):
-        return None, 0
+        return None, 0, None
     if turned and since_ack_s is not None:
         horizon = min(horizon, max(0, since_ack_s - settings["settle_min"] * 60))
     if horizon > 0:
@@ -4019,10 +4031,37 @@ def inline_window_decision(yolo, prompt_version, settings, since_ack_s=None, tur
             for r in rows:
                 y = (r.get("mesures") or {}).get("yolo") or {}
                 if y.get("product_px"):
-                    meo, product, n = meo + float(y.get("meo_px") or 0), product + float(y["product_px"]), n + 1
+                    photos.append((float(y.get("meo_px") or 0), float(y["product_px"])))
         except Exception as e:
             print(f"[inline window lookup failed] {type(e).__name__}: {e}")
-    return round(settings["yolo_scale"] * 100 * meo / product, 2), n
+    pooled = pooled_pct(photos, settings)
+    if settings["decision_drop_one"]:
+        return window_drop_one(photos, pooled, settings), len(photos), pooled
+    return pooled, len(photos), pooled
+
+
+def pooled_pct(photos, settings):
+    """yolo_scale x 100 x sum(MEO px) / sum(product px) over (meo_px,
+    product_px) pairs."""
+    return round(settings["yolo_scale"] * 100 * sum(m for m, _ in photos) / sum(p for _, p in photos), 2)
+
+
+def window_drop_one(photos, pooled, settings):
+    """The decision over a window that no single photo decides: pooled
+    unchanged inside the no-change band; above increase_at, the lowest
+    value the window takes with one photo left out; below decrease_below,
+    the highest. So AUGMENTER (DIMINUER) shows only when every photo but
+    one still says so, and the tier and turn come from that value too.
+    Never past the band's far side: a 12% window that is 1.2% without its
+    one wild photo is no change at decrease_below, not a DIMINUER."""
+    if len(photos) < 2 or settings["decrease_below"] <= pooled < settings["increase_at"]:
+        return pooled
+    meo, product = sum(m for m, _ in photos), sum(p for _, p in photos)
+    without = [pooled_pct([(meo - m, product - p)], settings) for m, p in photos]
+    if pooled >= settings["increase_at"]:
+        return max(min(without), settings["decrease_below"])
+    value = max(without)
+    return settings["decrease_below"] if value >= settings["increase_at"] else value
 
 
 def inline_calibrated(value, settings):
@@ -4348,8 +4387,12 @@ async def inline_reading(
         turned = (ctx["last_choice"] in (None, "adjusted", "set")
                   and bool(ctx["last_instruction"]))
         if use_yolo and settings["decision_window_min"]:
-            decision_pct, decision_n = inline_window_decision(
+            decision_pct, decision_n, pooled = inline_window_decision(
                 decider["measures"]["yolo"], decider.get("prompt_version"), settings, since_ack, turned)
+            if pooled != decision_pct:
+                # One photo would have decided otherwise (decision_drop_one):
+                # what the window said with it, for replaying the rule later.
+                decider["measures"]["fenetre"] = {"pooled_pct": pooled, "decision_pct": decision_pct}
         else:
             decision_pct, decision_n = inline_decision(
                 decider.get("estimate_pct"), decider.get("prompt_version"), dec_settings, since_ack)
