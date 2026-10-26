@@ -45,6 +45,14 @@ IOU = {"yolox": 0.45, "yolo11": 0.7}  # each family's own default
 # Boxes sent per photo for review (SGSC draws them on the photo); a photo
 # with more than this keeps the most confident ones. The area uses them all.
 MAX_BOXES = 150
+# The strip below the chute's lip where dust piles up (Tim's outline on a
+# photo of 2026-10-26), as (x, y) fractions of the photo. It holds ~16% of
+# the measured product but 22-39% of the MEO area (2026-10-24..26). measure()
+# sends the numbers without it as "strip"; Caliban uses them with
+# inline_settings.exclude_strip.
+STRIP = [(0.173, 0.0), (0.173, 0.018), (0.291, 0.118), (0.415, 0.195), (0.560, 0.279),
+         (0.705, 0.341), (0.839, 0.397), (1.0, 0.49), (1.0, 0.0)]
+_strips = {}
 MEO = 0  # class 0 of MEO / Peau / Incertain / Prépupe (/ Poussière from the next retrain)
 
 _session = None
@@ -227,10 +235,22 @@ class Background:
         self.frames.append((now, np.ascontiguousarray(a[::step, ::step])))
 
 
+def strip_mask(h, w):
+    """STRIP as a boolean mask of an h x w photo."""
+    if (h, w) not in _strips:
+        from PIL import ImageDraw
+        im = Image.new("1", (w, h), 0)
+        ImageDraw.Draw(im).polygon([(x * w, y * h) for x, y in STRIP], fill=1)
+        _strips[(h, w)] = np.asarray(im, bool)
+    return _strips[(h, w)]
+
+
 def measure(path, background=None, at=None):
-    """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"}, and
-    with a Background that has enough photos, "clean": the same three counts
-    without the dust (see Background). The photo then joins the background.
+    """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"};
+    "strip": the same three counts without STRIP (boxes centred in it and its
+    product pixels); and with a Background that has enough photos, "clean":
+    the same without the dust (see Background). The photo then joins the
+    background.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -249,8 +269,9 @@ def measure(path, background=None, at=None):
     # boxes one clump two or three times (a box inside a bigger one has a low
     # IoU, so NMS keeps both), and summing them read 13% more MEO than the
     # boxes cover on 1205 photos of 2026-10-24..26, up to 50% on a clumpy one.
-    covered, covered_clean = np.zeros((h, w), bool), np.zeros((h, w), bool)
-    clean_n = 0
+    covered, covered_clean, covered_strip = (np.zeros((h, w), bool) for _ in range(3))
+    clean_n = strip_n = 0
+    strip = strip_mask(h, w)
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
@@ -265,6 +286,9 @@ def measure(path, background=None, at=None):
                          slice(max(0, int(round(tx + x0))), int(round(tx + x1))))
                 covered[cover] = True
                 meo_n += 1
+                if not strip[min(h - 1, int(ty + (y0 + y1) / 2)), min(w - 1, int(tx + (x0 + x1) / 2))]:
+                    covered_strip[cover] = True
+                    strip_n += 1
                 if dust is not None and not dust[min(dust.shape[0] - 1, int((ty + (y0 + y1) / 2) // step)),
                                                  min(dust.shape[1] - 1, int((tx + (x0 + x1) / 2) // step))]:
                     covered_clean[cover] = True
@@ -275,7 +299,9 @@ def measure(path, background=None, at=None):
     boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
     product = product_mask(crop)
     out = {"meo_px": float(covered.sum()), "meo_n": int(meo_n), "product_px": int(product.sum()),
-           "boxes": boxes}
+           "boxes": boxes,
+           "strip": {"meo_px": float(covered_strip.sum()), "meo_n": int(strip_n),
+                     "product_px": int((product & ~strip[int(h * CROP_TOP):, int(w * CROP_LEFT):]).sum())}}
     if dust is not None:
         full = dust.repeat(step, axis=0).repeat(step, axis=1)[int(h * CROP_TOP):h, int(w * CROP_LEFT):w]
         out["clean"] = {"meo_px": float(covered_clean.sum()), "meo_n": int(clean_n),

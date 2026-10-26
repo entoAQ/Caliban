@@ -3731,6 +3731,12 @@ INLINE_DEFAULTS = {
     # The raw ones are what yolo_scale was fitted on: refit it on the clean
     # ones before turning this on.
     "dust_mask": False,
+    # The detector's numbers without the strip below the chute's lip where
+    # dust piles up (meo_detect.STRIP; Ariel sends them as "strip" from
+    # 2026-10-26). Takes precedence over dust_mask. Its own scale: lot_estimate
+    # fits it as yolo_scale_strip. The readings' prompt_version gets "+strip",
+    # so a window never pools them with readings measured the other way.
+    "exclude_strip": False,
 }
 
 
@@ -3769,7 +3775,8 @@ def inline_settings():
                 settings[key] = float(overrides[key])
             except (KeyError, TypeError, ValueError):
                 pass
-        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask", "decision_drop_one"):
+        for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask", "decision_drop_one",
+                    "exclude_strip"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
         # A straight line from the prompt's value to lab ME%, fitted on lots
@@ -4108,13 +4115,15 @@ def inline_detector(raw, n_photos):
         if boxes is not None:
             row["boxes"] = boxes
         # Without the dust (Ariel's meo_detect.Background), once it has a
-        # background; a malformed one is dropped, never the reading.
-        try:
-            c = ph["clean"]
-            row["clean"] = {"meo_px": max(0.0, float(c["meo_px"])), "meo_n": max(0, int(c["meo_n"])),
+        # background, and without the dust strip (meo_detect.STRIP); a
+        # malformed one is dropped, never the reading.
+        for key in ("clean", "strip"):
+            try:
+                c = ph[key]
+                row[key] = {"meo_px": max(0.0, float(c["meo_px"])), "meo_n": max(0, int(c["meo_n"])),
                             "product_px": max(0, int(c["product_px"]))}
-        except (KeyError, TypeError, ValueError):
-            pass
+            except (KeyError, TypeError, ValueError):
+                pass
     out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:
@@ -4164,21 +4173,33 @@ def yolo_band_result(group, det, settings, reading_id):
     if all(clean):
         c_meo, c_product, c_pieces = sums(clean)
         extra["clean"] = {"meo_px": c_meo, "product_px": c_product, "meo_n": c_pieces}
-        if settings["dust_mask"] and c_product > 0:
+        if settings["dust_mask"] and not settings["exclude_strip"] and c_product > 0:
             extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
             meo, product, pieces = c_meo, c_product, c_pieces
+    # Without the dust strip (inline_settings.exclude_strip), when every
+    # photo has those numbers; otherwise the reading stays as measured.
+    strip = [p.get("strip") for p in det["photos"]]
+    version = f"yolo-{det['version']}"
+    if all(strip):
+        s_meo, s_product, s_pieces = sums(strip)
+        extra["strip"] = {"meo_px": s_meo, "product_px": s_product, "meo_n": s_pieces}
+        if settings["exclude_strip"] and s_product > 0:
+            extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
+            meo, product, pieces = s_meo, s_product, s_pieces
+            version += "+strip"
     ratio = meo / product
     estimate = round(settings["yolo_scale"] * 100 * ratio, 2)
     result = {
         "band": band_for_pct(estimate, "coarse6"),
         "estimate_pct": estimate,
-        "prompt_version": f"yolo-{det['version']}",
+        "prompt_version": version,
         "model": "yolo-onnx (Ariel)",
         "repeat_count": 1,
         "justification": f"Détecteur : {pieces} morceau(x) de MEO sur {len(group)} photo(s).",
         "measures": {"yolo": {**det, "ratio_pct": round(100 * ratio, 4), "scale": settings["yolo_scale"],
                               "meo_px": round(meo, 1), "product_px": product, "meo_n": pieces,
-                              "dust_mask": "raw" in extra, **extra}},
+                              "dust_mask": "raw" in extra and not version.endswith("+strip"),
+                              "strip_excluded": version.endswith("+strip"), **extra}},
     }
     return [result], False, photo_mean, photo_std
 

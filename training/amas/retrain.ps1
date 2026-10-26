@@ -61,8 +61,10 @@ $meta = Get-Content (Join-Path $hold "meo.json") | ConvertFrom-Json
 $meta | Add-Member -NotePropertyName yolo_scale_fitted -NotePropertyValue $scale -Force
 # With inline_settings.dust_mask on, this one instead (lot_estimate.py).
 $meta | Add-Member -NotePropertyName yolo_scale_dust_fitted -NotePropertyValue $fit.yolo_scale_dust -Force
+# With inline_settings.exclude_strip on, this one (lot_estimate.py).
+$meta | Add-Member -NotePropertyName yolo_scale_strip_fitted -NotePropertyValue $fit.yolo_scale_strip -Force
 $meta | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $hold "meo.json")
-Write-Host "model held in $hold (version $name, $($meta.arch), scale $scale; with dust_mask $($fit.yolo_scale_dust))"
+Write-Host "model held in $hold (version $name, $($meta.arch), scale $scale; with dust_mask $($fit.yolo_scale_dust); with exclude_strip $($fit.yolo_scale_strip))"
 
 Step "5/6 Against the model on Ariel" "compare_models.py" @("--name", $name)
 $verdict = Get-Content (Join-Path $runs "$name\compare.json") | ConvertFrom-Json

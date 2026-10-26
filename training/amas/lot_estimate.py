@@ -40,7 +40,7 @@ sys.path.insert(0, str(HERE.parent / "labelstudio"))
 sys.path.insert(0, str(HERE.parents[1] / "rig" / "inline"))
 from common import ROOT, http  # noqa: E402
 from pull_amas import BUCKET, CHUTE_MOUNTED, lot_windows, ts  # noqa: E402
-from sync_amas import EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS  # noqa: E402
+from sync_amas import CURRENT_LOOK, EXCLUDED_LOTS, FIRST_LOT, NO_FIT_LOTS  # noqa: E402
 
 CACHE = ROOT / "amas" / "all"
 BANDS = [(3, "<3%"), (5, "3-5%"), (8, "5-8%"), (10, "8-10%"), (999, ">10%")]
@@ -90,8 +90,26 @@ def fetch_lots(url, auth):
                     ts(r["created_at"]) > probe) for r in rows if whole < ts(r["created_at"]) <= end]
         out.append({"lot": lot["lot_number"], "lab": round(100 * wt / den, 2) if wt is not None and den else None,
                     "readings": [(rid, g) for rid, g, in_probe in whole_r if in_probe],
-                    "whole": [(rid, g) for rid, g, _ in whole_r]})
+                    "whole": [(rid, g) for rid, g, _ in whole_r],
+                    # Every reading on the rebuilt box (sync_amas.CURRENT_LOOK).
+                    "current": bool(whole_r) and ts(rows_t(whole_r[0][0], rows)) >= ts(CURRENT_LOOK)})
     return out
+
+
+def rows_t(rid, rows):
+    return next(r["created_at"] for r in rows if r["lot_number_text"] == rid)
+
+
+def loo_miss(lots, key):
+    """Mean miss against the lab, each lot scaled by a fit on the others."""
+    ok = [l for l in lots if l[key]]
+    miss = []
+    for l in ok:
+        rest = [o for o in ok if o is not l]
+        if rest:
+            k = sum(o["lab"] * o[key] for o in rest) / sum(o[key] ** 2 for o in rest)
+            miss.append(abs(k * l[key] - l["lab"]))
+    return sum(miss) / max(1, len(miss)), len(miss)
 
 
 def main():
@@ -139,7 +157,9 @@ def main():
     # five photos (the first of a run, after a stop) a photo's raw numbers
     # stand in, close to what Ariel sends then.
     background = meo_detect.Background()
-    clean = {}
+    # And without the dust strip (meo_detect.STRIP, inline_settings.
+    # exclude_strip): a third scale, and how steady the strip's share is.
+    clean, strip = {}, {}
 
     def photo(path):
         # IL-YYYYMMDD-HHMMSS, burst photos -2, -3 ... about 12 s apart.
@@ -148,24 +168,32 @@ def main():
         m = meo_detect.measure(path, background, at)
         c = m.get("clean") or m
         clean[path.name] = (c["meo_px"], c["product_px"])
+        strip[path.name] = (m["strip"]["meo_px"], m["strip"]["product_px"])
         return m["meo_px"], m["product_px"]
 
     def pooled(pr):
         return 100 * sum(m for m, _ in pr) / max(1, sum(p for _, p in pr)) if pr else None
 
     for lot in lots:
-        measured, cleaned = {}, {}
+        measured, cleaned, stripped = {}, {}, {}
         for rid, paths in lot["whole"]:
             ok = [CACHE / Path(p).name for p in paths if (CACHE / Path(p).name).exists()]
             ms = [photo(p) for p in ok]
             if ms:
                 measured[rid] = (sum(m for m, _ in ms), sum(p for _, p in ms))
                 cleaned[rid] = (sum(clean[p.name][0] for p in ok), sum(clean[p.name][1] for p in ok))
+                stripped[rid] = (sum(strip[p.name][0] for p in ok), sum(strip[p.name][1] for p in ok))
         lot["per_reading"] = [measured[rid] for rid, _ in lot["readings"] if rid in measured]
         lot["ratio"] = pooled(lot["per_reading"])
         lot["whole_ratio"] = pooled(list(measured.values()))
         lot["whole_n"] = len(measured)
         lot["clean_ratio"] = pooled([cleaned[rid] for rid, _ in lot["readings"] if rid in cleaned])
+        probe = [rid for rid, _ in lot["readings"] if rid in stripped]
+        lot["strip_ratio"] = pooled([stripped[rid] for rid in probe])
+        # The strip's share of the probe window's MEO area and product.
+        lot["strip_share"] = (1 - sum(stripped[r][0] for r in probe) / max(1, sum(measured[r][0] for r in probe)),
+                              1 - sum(stripped[r][1] for r in probe) / max(1, sum(measured[r][1] for r in probe))
+                              ) if probe else None
         print(f"  {lot['lot']}: {len(lot['per_reading'])} readings in the probe window, {len(measured)} in the bag",
               flush=True)
 
@@ -181,12 +209,37 @@ def main():
         return sum(b) / max(1, len(b)), len(b)
     (m_raw, n_blind), (m_dust, _) = blind_miss(k, "ratio"), blind_miss(kd, "clean_ratio")
     print(f"dust mask: lab = {kd:.2f} x dust-free ratio; the blind lots ({n_blind}) miss by "
-          f"{m_dust:.2f} with it, {m_raw:.2f} without\n")
+          f"{m_dust:.2f} with it, {m_raw:.2f} without")
+    ks = sum(l["lab"] * l["strip_ratio"] for l in cal) / sum(l["strip_ratio"] ** 2 for l in cal)
+    m_strip, _ = blind_miss(ks, "strip_ratio")
+    print(f"dust strip out: lab = {ks:.2f} x ratio without the strip; the blind lots miss by "
+          f"{m_strip:.2f} with it out, {m_raw:.2f} with it in")
+    # Removing it is only fair if it takes about the same share of the MEO
+    # every lot: a share that swings with the lot would bias some lots.
+    shares = [l["strip_share"] for l in lots if l["strip_share"] and l["lab"] is not None]
+    if shares:
+        meo_sh = sorted(s[0] for s in shares)
+        print(f"  strip's share of the MEO area, lot by lot: median {100 * meo_sh[len(meo_sh) // 2]:.0f}%, "
+              f"middle 80% {100 * meo_sh[len(meo_sh) // 10]:.0f}-{100 * meo_sh[len(meo_sh) * 9 // 10]:.0f}%; "
+              f"of the product {100 * sorted(s[1] for s in shares)[len(shares) // 2]:.0f}%")
+    # The strip was drawn on the rebuilt box: what counts is the lots since,
+    # each scaled by a fit on the others (whatever the model trained on).
+    now = [l for l in lots if l["current"] and l["lab"] is not None and l["ratio"] and l["lot"] not in NO_FIT_LOTS]
+    if len(now) >= 3:
+        (a, n), (b, _) = loo_miss(now, "ratio"), loo_miss(now, "strip_ratio")
+        print(f"  lots on the rebuilt box ({n}), each scaled on the others: miss {b:.2f} with the strip out, "
+              f"{a:.2f} with it in")
+        for l in now:
+            print(f"    {l['lot']}: lab {l['lab']:5.2f}   strip's share of MEO {100 * l['strip_share'][0]:3.0f}%, "
+                  f"of product {100 * l['strip_share'][1]:3.0f}%")
+    print()
     # For retrain.ps1: the scale goes into Caliban's inline_settings.yolo_scale
-    # -- yolo_scale_dust instead, when dust_mask is turned on with it.
+    # -- yolo_scale_dust instead, when dust_mask is turned on with it, and
+    # yolo_scale_strip with exclude_strip.
     (ROOT / "amas_runs" / args.name / "scale.json").write_text(
-        json.dumps({"yolo_scale": round(k, 3), "yolo_scale_dust": round(kd, 3), "lots": len(cal),
-                    "blind_miss": round(m_raw, 3), "blind_miss_dust": round(m_dust, 3)}), encoding="utf-8")
+        json.dumps({"yolo_scale": round(k, 3), "yolo_scale_dust": round(kd, 3), "yolo_scale_strip": round(ks, 3),
+                    "lots": len(cal), "blind_miss": round(m_raw, 3), "blind_miss_dust": round(m_dust, 3),
+                    "blind_miss_strip": round(m_strip, 3)}), encoding="utf-8")
     random.seed(3)
     rows = []
     print(f"{'lot':15s} {'used':10s} readings  estimate  80% range     band     lab    lab band   whole bag (readings)")
