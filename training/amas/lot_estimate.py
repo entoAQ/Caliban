@@ -3,7 +3,7 @@
 
 For every lot, takes every inline photo of the bag (bursts included,
 pull_amas.lot_windows()), runs the detector tile by tile on the measured
-crop and pools sum(MEO box area) / sum(product px). The detector is the
+crop and pools MEO area (what the boxes cover) / product px. The detector is the
 run's model as exported for Ariel (amas_runs/<name>/ariel/meo.onnx), read by
 Ariel's own rig/inline/meo_detect.py, so the numbers are Ariel's.
 

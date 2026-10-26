@@ -43,7 +43,7 @@ SIZE = 416
 CONF = 0.25
 IOU = {"yolox": 0.45, "yolo11": 0.7}  # each family's own default
 # Boxes sent per photo for review (SGSC draws them on the photo); a photo
-# with more than this keeps the most confident ones. The sums use them all.
+# with more than this keeps the most confident ones. The area uses them all.
 MAX_BOXES = 150
 MEO = 0  # class 0 of MEO / Peau / Incertain / Prépupe (/ Poussière from the next retrain)
 
@@ -69,7 +69,10 @@ def _meta():
 
 
 def version():
-    return _meta().get("version") or "meo"
+    # "+union": MEO area counted once where boxes overlap (measure()), from
+    # 2026-10-26; readings without it summed the boxes, ~13% more on average,
+    # and were scaled for that. Caliban keeps it in prompt_version.
+    return (_meta().get("version") or "meo") + "+union"
 
 
 def arch():
@@ -242,33 +245,40 @@ def measure(path, background=None, at=None):
     now = time.time() if at is None else at
     dust = background.dust(a.shape, now) if background is not None else None
     step = background.step(w) if background is not None else 1
-    clean_px, clean_n = 0.0, 0
+    # MEO area is the area the boxes cover, each pixel once: the model often
+    # boxes one clump two or three times (a box inside a bigger one has a low
+    # IoU, so NMS keeps both), and summing them read 13% more MEO than the
+    # boxes cover on 1205 photos of 2026-10-24..26, up to 50% on a clumpy one.
+    covered, covered_clean = np.zeros((h, w), bool), np.zeros((h, w), bool)
+    clean_n = 0
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
-    meo_px, meo_n, boxes = 0.0, 0, []
+    meo_n, boxes = 0, []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
         tx, ty = ox + (k % COLS) * cw // COLS, oy + (k // COLS) * ch // ROWS
         for c, x0, y0, x1, y1, score in found:
             if c == MEO:
-                meo_px += (x1 - x0) * (y1 - y0)
+                cover = (slice(max(0, int(round(ty + y0))), int(round(ty + y1))),
+                         slice(max(0, int(round(tx + x0))), int(round(tx + x1))))
+                covered[cover] = True
                 meo_n += 1
                 if dust is not None and not dust[min(dust.shape[0] - 1, int((ty + (y0 + y1) / 2) // step)),
                                                  min(dust.shape[1] - 1, int((tx + (x0 + x1) / 2) // step))]:
-                    clean_px += (x1 - x0) * (y1 - y0)
+                    covered_clean[cover] = True
                     clean_n += 1
                 # Plain floats: numpy's do not go through json.dumps.
                 boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
                               round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
     boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
     product = product_mask(crop)
-    out = {"meo_px": round(float(meo_px), 1), "meo_n": int(meo_n), "product_px": int(product.sum()),
+    out = {"meo_px": float(covered.sum()), "meo_n": int(meo_n), "product_px": int(product.sum()),
            "boxes": boxes}
     if dust is not None:
         full = dust.repeat(step, axis=0).repeat(step, axis=1)[int(h * CROP_TOP):h, int(w * CROP_LEFT):w]
-        out["clean"] = {"meo_px": round(float(clean_px), 1), "meo_n": int(clean_n),
+        out["clean"] = {"meo_px": float(covered_clean.sum()), "meo_n": int(clean_n),
                         "product_px": int((product & ~full).sum())}
     if background is not None:
         background.add(a, now)
