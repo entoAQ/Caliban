@@ -4,7 +4,8 @@
 #   powershell -ExecutionPolicy Bypass -File training\amas\promote.ps1 -Name meo-20261019-1653
 #
 # Refuses unless compare_models.py found it better than the model there now;
-# -Force skips that check. Then it prints the push and the scale to set.
+# -Force skips that check. Always refuses a model not licensed Apache-2.0.
+# Then it prints the push and the scale to set.
 
 param([Parameter(Mandatory = $true)][string]$Name, [switch]$Force)
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -14,6 +15,12 @@ $hold = Join-Path $runs "$Name\ariel"
 $models = Join-Path $repo "rig\inline\models"
 
 if (-not (Test-Path (Join-Path $hold "meo.onnx"))) { Write-Host "No held model at $hold." -ForegroundColor Red; exit 1 }
+# Only Apache-2.0 models (YOLOX) go on Ariel: the YOLO11 ones are AGPL-3.0.
+# -Force does not skip this.
+$license = (Get-Content (Join-Path $hold "meo.json") | ConvertFrom-Json).license
+if (-not ("$license".StartsWith("Apache-2.0"))) {
+    Write-Host "$Name is licensed '$license', not Apache-2.0: not promoted. Train it with the default arch (yolox-tiny)." -ForegroundColor Red; exit 1
+}
 $cmp = Join-Path $runs "$Name\compare.json"
 $live = (Get-Content (Join-Path $models "meo.json") | ConvertFrom-Json).version
 if (-not $Force) {

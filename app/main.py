@@ -44,7 +44,6 @@ from app import command_wakeup
 from app import reject_colour
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "contamination_v1")
-MODEL_PATH = os.environ.get("MODEL_PATH", "models/best.pt")
 TRAINING_FOLDER = os.environ.get("SHAREPOINT_TRAINING_FOLDER", "TrainingPhotos")
 SCREENING_FOLDER = os.environ.get("SHAREPOINT_SCREENING_FOLDER", "ScreeningPhotos")
 POWER_AUTOMATE_API_KEY = os.environ.get("POWER_AUTOMATE_API_KEY")
@@ -136,25 +135,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         headers=headers,
     )
 
-_model = None
-_model_load_failed = False
-
-
-def get_model():
-    """Returns the loaded model, or None if no trained model exists yet --
-    never raises for the "not trained yet" case specifically, since a
-    missing model shouldn't block photo collection, only detection itself."""
-    global _model, _model_load_failed
-    if _model is not None or _model_load_failed:
-        return _model
-    if not os.path.exists(MODEL_PATH):
-        _model_load_failed = True
-        return None
-    from ultralytics import YOLO
-    _model = YOLO(MODEL_PATH)
-    return _model
-
-
 def verify_power_automate_key(x_api_key: str = Header(None)):
     """Separate auth path from the browser-facing endpoints below --
     Power Automate isn't a logged-in SGSC user, so it can't present a
@@ -191,7 +171,7 @@ def health():
     return {
         "status": "ok",
         "model_version": MODEL_VERSION,
-        "model_loaded": get_model() is not None,
+        "model_loaded": False,
         "started_at": STARTUP_TIME,
         "prompt_version": CALIBAN_PROMPT_VERSION,
         "prompt_hash": prompt_hash(DEFAULT_PROMPT_VARIANT),
@@ -412,43 +392,11 @@ async def detect(
     file: UploadFile = File(...),
     _: bool = Depends(verify_power_automate_key),
 ):
-    model = get_model()
-    if model is None:
-        return {"detection_status": "no_model", "model_version": None, "detections": [], "counts_by_class": {}}
-
-    contents = await file.read()
-    ext = os.path.splitext(file.filename)[1] or ".jpg"
-    tmp_path = f"/tmp/{uuid.uuid4().hex}{ext}"
-    with open(tmp_path, "wb") as f:
-        f.write(contents)
-
-    start = time.time()
-    results = model.predict(tmp_path, verbose=False)[0]
-    elapsed_ms = int((time.time() - start) * 1000)
-    os.remove(tmp_path)
-
-    names = results.names
-    detections_out = []
-    for box in results.boxes:
-        cls_id = int(box.cls[0])
-        conf = float(box.conf[0])
-        x1, y1, x2, y2 = box.xyxyn[0].tolist()
-        detections_out.append({
-            "class_name": names[cls_id],
-            "confidence": round(conf, 3),
-            "bbox": [round(x1, 4), round(y1, 4), round(x2, 4), round(y2, 4)],
-        })
-
-    return {
-        "detection_status": "ok",
-        "model_version": MODEL_VERSION,
-        "inference_time_ms": elapsed_ms,
-        "detections": detections_out,
-        "counts_by_class": {
-            name: sum(1 for d in detections_out if d["class_name"] == name)
-            for name in set(d["class_name"] for d in detections_out)
-        } if detections_out else {},
-    }
+    # ultralytics (AGPL-3.0) left requirements.txt earlier, so this could
+    # only ever answer "no model"; its code went too on 2026-10-27, for the
+    # licence. Kept so Power Automate's flow gets the same reply. The MEO
+    # detector is YOLOX (Apache-2.0), run on Ariel (rig/inline/meo_detect.py).
+    return {"detection_status": "no_model", "model_version": None, "detections": [], "counts_by_class": {}}
 
 
 # ── Browser-facing: labeling tool's image proxy ──────────────────────
