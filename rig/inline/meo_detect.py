@@ -60,7 +60,11 @@ _strips = {}
 # the box numbers for the surface-area ME% under study (not used to decide;
 # a piece touching a larva takes in its edge too).
 AREA_WARM = 8
-MEO = 0  # class 0 of MEO / Peau / Incertain / Prépupe (/ Poussière from the next retrain)
+MEO = 0  # class 0 of MEO / Peau / Incertain / Bicolore / Poussière
+# Bicolore (class 3): a dark or two-tone larva or prepupa. Sent beside MEO as
+# "bicolore", for SGSC to show on the photos and per lot; nothing decides on
+# it (2026-10-27, 4 Bicolore boxes in validation so far).
+BICOLORE = 3
 
 _session = None
 
@@ -258,7 +262,9 @@ def measure(path, background=None, at=None):
     product pixels); "area" and "area_strip": MEO and product pixels as
     surface (AREA_WARM), recorded only; and with a Background that has enough
     photos, "clean": the same without the dust (see Background). The photo
-    then joins the background.
+    then joins the background. "bicolore": the Bicolore boxes' count, the
+    area they cover (each pixel once) and the boxes themselves, shown only,
+    never in the MEO numbers.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -277,18 +283,23 @@ def measure(path, background=None, at=None):
     # boxes one clump two or three times (a box inside a bigger one has a low
     # IoU, so NMS keeps both), and summing them read 13% more MEO than the
     # boxes cover on 1205 photos of 2026-10-24..26, up to 50% on a clumpy one.
-    covered, covered_clean, covered_strip = (np.zeros((h, w), bool) for _ in range(3))
+    covered, covered_clean, covered_strip, covered_bi = (np.zeros((h, w), bool) for _ in range(4))
     clean_n = strip_n = 0
     strip = strip_mask(h, w)
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
-    meo_n, boxes = 0, []
+    meo_n, boxes, bi_boxes = 0, [], []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
         tx, ty = ox + (k % COLS) * cw // COLS, oy + (k // COLS) * ch // ROWS
         for c, x0, y0, x1, y1, score in found:
+            if c == BICOLORE:
+                covered_bi[max(0, int(round(ty + y0))):int(round(ty + y1)),
+                           max(0, int(round(tx + x0))):int(round(tx + x1))] = True
+                bi_boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
+                                 round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
             if c == MEO:
                 cover = (slice(max(0, int(round(ty + y0))), int(round(ty + y1))),
                          slice(max(0, int(round(tx + x0))), int(round(tx + x1))))
@@ -310,7 +321,9 @@ def measure(path, background=None, at=None):
     out = {"meo_px": float(covered.sum()), "meo_n": int(meo_n), "product_px": int(product.sum()),
            "boxes": boxes,
            "strip": {"meo_px": float(covered_strip.sum()), "meo_n": int(strip_n),
-                     "product_px": int((product & not_strip).sum())}}
+                     "product_px": int((product & not_strip).sum())},
+           "bicolore": {"n": len(bi_boxes), "px": int(covered_bi.sum()),
+                        "boxes": sorted(bi_boxes, key=lambda b: -b[4])[:MAX_BOXES]}}
     # Surface area: MEO pixels are the warm ones inside the boxes, product
     # the larvae and that MEO (dark frass mostly fails product_mask).
     f = crop.astype(np.int16)

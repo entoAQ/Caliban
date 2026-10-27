@@ -4081,6 +4081,18 @@ def inline_detector(raw, n_photos):
                 row[key] = {"meo_px": max(0, int(c["meo_px"])), "product_px": max(0, int(c["product_px"]))}
             except (KeyError, TypeError, ValueError):
                 pass
+        # Bicolore (dark or two-tone larvae, meo_detect.BICOLORE): count,
+        # covered area and boxes, for SGSC to show on the photo and per lot.
+        # Shown only, never used to decide.
+        try:
+            c = ph["bicolore"]
+            bi = {"n": max(0, int(c["n"])), "px": max(0, int(c["px"]))}
+            bi_boxes = _fractions(c.get("boxes"), 5, 200)
+            if bi_boxes is not None:
+                bi["boxes"] = bi_boxes
+            row["bicolore"] = bi
+        except (KeyError, TypeError, ValueError):
+            pass
     out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:
@@ -4144,6 +4156,14 @@ def yolo_band_result(group, det, settings, reading_id):
             extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
             meo, product, pieces = s_meo, s_product, s_pieces
             version += "+strip"
+    # Bicolore over the whole crop's product, when every photo has it: a raw
+    # share (no scale), shown in SGSC per photo and per lot, never decided on.
+    bi = [p.get("bicolore") for p in det["photos"]]
+    total_product = sum(p["product_px"] for p in det["photos"])
+    if all(bi) and total_product > 0:
+        bi_px = sum(b["px"] for b in bi)
+        extra["bicolore"] = {"n": sum(b["n"] for b in bi), "px": bi_px, "product_px": total_product,
+                             "ratio_pct": round(100 * bi_px / total_product, 4)}
     ratio = meo / product
     estimate = round(settings["yolo_scale"] * 100 * ratio, 2)
     result = {
