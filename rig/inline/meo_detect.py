@@ -53,6 +53,13 @@ MAX_BOXES = 150
 STRIP = [(0.173, 0.0), (0.173, 0.018), (0.291, 0.118), (0.415, 0.195), (0.560, 0.279),
          (0.705, 0.341), (0.839, 0.397), (1.0, 0.49), (1.0, 0.0)]
 _strips = {}
+# A box is bigger than the piece in it: on Tim's boxes of 2026-10-24..26 the
+# warm pixels (red over blue by more than this, dark ones included) fill
+# ~0.68 of the box, the bare chute and the pieces' shadows the rest.
+# measure() sends the MEO pixels inside the boxes as "area", recorded beside
+# the box numbers for the surface-area ME% under study (not used to decide;
+# a piece touching a larva takes in its edge too).
+AREA_WARM = 8
 MEO = 0  # class 0 of MEO / Peau / Incertain / Prépupe (/ Poussière from the next retrain)
 
 _session = None
@@ -248,9 +255,10 @@ def strip_mask(h, w):
 def measure(path, background=None, at=None):
     """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"};
     "strip": the same three counts without STRIP (boxes centred in it and its
-    product pixels); and with a Background that has enough photos, "clean":
-    the same without the dust (see Background). The photo then joins the
-    background.
+    product pixels); "area" and "area_strip": MEO and product pixels as
+    surface (AREA_WARM), recorded only; and with a Background that has enough
+    photos, "clean": the same without the dust (see Background). The photo
+    then joins the background.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -298,10 +306,19 @@ def measure(path, background=None, at=None):
                               round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
     boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
     product = product_mask(crop)
+    not_strip = ~strip[oy:, ox:]
     out = {"meo_px": float(covered.sum()), "meo_n": int(meo_n), "product_px": int(product.sum()),
            "boxes": boxes,
            "strip": {"meo_px": float(covered_strip.sum()), "meo_n": int(strip_n),
-                     "product_px": int((product & ~strip[int(h * CROP_TOP):, int(w * CROP_LEFT):]).sum())}}
+                     "product_px": int((product & not_strip).sum())}}
+    # Surface area: MEO pixels are the warm ones inside the boxes, product
+    # the larvae and that MEO (dark frass mostly fails product_mask).
+    f = crop.astype(np.int16)
+    meo_area = covered[oy:, ox:] & (f[..., 0] > f[..., 2] + AREA_WARM)
+    meo_area_strip = covered_strip[oy:, ox:] & meo_area
+    out["area"] = {"meo_px": int(meo_area.sum()), "product_px": int((product | meo_area).sum())}
+    out["area_strip"] = {"meo_px": int(meo_area_strip.sum()),
+                         "product_px": int(((product | meo_area) & not_strip).sum())}
     if dust is not None:
         full = dust.repeat(step, axis=0).repeat(step, axis=1)[int(h * CROP_TOP):h, int(w * CROP_LEFT):w]
         out["clean"] = {"meo_px": float(covered_clean.sum()), "meo_n": int(clean_n),

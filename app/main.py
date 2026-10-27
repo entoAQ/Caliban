@@ -4124,6 +4124,15 @@ def inline_detector(raw, n_photos):
                             "product_px": max(0, int(c["product_px"]))}
             except (KeyError, TypeError, ValueError):
                 pass
+        # MEO and product as surface (meo_detect.AREA_WARM), with and
+        # without the strip: recorded for the area ME% under study, never
+        # used to decide.
+        for key in ("area", "area_strip"):
+            try:
+                c = ph[key]
+                row[key] = {"meo_px": max(0, int(c["meo_px"])), "product_px": max(0, int(c["product_px"]))}
+            except (KeyError, TypeError, ValueError):
+                pass
     out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:

@@ -116,6 +116,10 @@ def main():
         a = np.asarray(Image.open(path).convert("RGB"))
         return a.shape[0], a.shape[1], drop_nested(meo_detect.detect_tiles([a])[0])
     pid, todo = unlabelled()
+    if not todo:
+        # Label Studio refuses a project model_version no prediction carries.
+        print("No unlabelled tiles to pre-fill.")
+        return
 
     # Hand labels run ~2 MEO per tile. A model drawing many times that is not
     # ready: correcting a flood of boxes is slower than drawing from scratch.

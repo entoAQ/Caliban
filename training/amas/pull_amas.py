@@ -175,12 +175,15 @@ def main():
 
     AMAS.mkdir(parents=True, exist_ok=True)
     index = json.loads(INDEX.read_text(encoding="utf-8")) if INDEX.exists() else {}
+    # The surface-area reference set (reference_amas.py) is never trained on.
+    ref_file = ROOT / "amas_ref" / "reference.json"
+    reference = set(json.loads(ref_file.read_text(encoding="utf-8"))) if ref_file.exists() else set()
     if args.training:
         # Training does not need the lab: a box is right or wrong whatever the
         # lot. No lot and no lab, so these never enter a lot check.
         photos = [(r["lot_number_text"], p, r["created_at"]) for r in rows
                   for p in (r.get("mesures") or {}).get("groupe") or [r["storage_path"]]]
-        photos = [ph for ph in photos if Path(ph[1]).name not in index]
+        photos = [ph for ph in photos if Path(ph[1]).name not in index and Path(ph[1]).name not in reference]
         measured, keep = pick(photos, args.training, url, auth)
         for share, name, rid, taken in keep:
             index[name] = {"photo": name, "reading_id": rid, "taken_at": taken,
@@ -206,6 +209,7 @@ def main():
         if not photos:
             continue
 
+        photos = [ph for ph in photos if Path(ph[1]).name not in reference]
         measured, keep = pick(photos, args.per_lot, url, auth)
         for share, name, rid, taken in keep:
             index[name] = {"photo": name, "reading_id": rid, "taken_at": taken,
