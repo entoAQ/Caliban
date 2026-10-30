@@ -41,7 +41,7 @@ page needs Caliban up to reach Ariel.
 | Vision endpoint unreachable | `vision` check | Azure status; nothing on our side | — |
 | Vision key revoked / quota exhausted | **Not checked** (reachability only): readings fail with 401/429 in *journaux* | New key in Azure Portal → Caliban → Environment variables | Desk |
 | An app setting deleted by a portal edit | `config` list in *vérifier* | Re-add it in the portal | Desk |
-| Teams webhook broken | **Not checked**: alerts silently stop | Re-create the webhook, update `TEAMS_ALERT_WEBHOOK_URL` | Desk |
+| Teams webhook broken | **Not checked**: alerts silently stop | Re-create the webhook, update `TEAMS_ALERT_WEBHOOK_URL` (Caliban's own alerts) and the Vault secret `teams_alert_webhook_url` (rig offline/return, sent by Supabase) | Desk |
 | Publish profile reset | Rollback/deploy fails | Download a new one into secret `AZURE_WEBAPP_PUBLISH_PROFILE`; meanwhile the rollback summary prints the Cloud Shell command | Desk |
 | `AZURE_CREDENTIALS` expired (2 years after creation) | *redémarrer* / *journaux* fail at login | Re-run the setup command below | Desk |
 | GitHub Actions down | Buttons don't start | Cloud Shell: `az webapp config container set … :<sha>` / `az webapp restart -n Caliban -g Caliban_group` | Desk |

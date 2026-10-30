@@ -4633,8 +4633,6 @@ DOCTOR_DEVICES = {
             "send_logs": "Envoyer le journal",
             "reboot": "Redémarrer le Pi",
         },
-        "offline_text": "Pas de lectures en attendant. Sur place : l'écran du destoner est-il allumé ?",
-        "back_text": "Les lectures reprennent toutes seules.",
     },
     "prosperos": {
         "name": "Banc à plateau (Caliban)",
@@ -4647,9 +4645,6 @@ DOCTOR_DEVICES = {
             "rollback_code": "Revenir à la version précédente",
             "reboot": "Redémarrer le Pi",
         },
-        "offline_text": ("Les captures demandées depuis SGSC n'aboutiront pas. "
-                         "Sur place : le Pi du banc est-il allumé ?"),
-        "back_text": "Les captures fonctionnent de nouveau.",
     },
 }
 # A repair not picked up within this long is dropped, not delivered late --
@@ -4670,119 +4665,9 @@ def _utc_now():
     return datetime.datetime.now(datetime.timezone.utc)
 
 
-# Silent this long and Caliban treats the device as offline. The doctor
-# reports every minute, and each rig's own network watchdog cycles its Wi-Fi
-# at 5 minutes and reboots at 15 -- so at 10 it has had its chance to fix the
-# common case alone, and anything later is worth a person knowing about.
-DOCTOR_OFFLINE_AFTER_S = 600
-DOCTOR_WATCH_EVERY_S = 60
-
-
-def _device_card(title, text, good):
-    return {"type": "message", "attachments": [{
-        "contentType": "application/vnd.microsoft.card.adaptive",
-        "content": {
-            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-            "type": "AdaptiveCard", "version": "1.4",
-            "body": [
-                {"type": "TextBlock", "size": "Medium", "weight": "Bolder", "wrap": True,
-                 "color": "Good" if good else "Attention", "text": title},
-                {"type": "TextBlock", "wrap": True, "text": text},
-            ],
-        },
-    }]}
-
-
-def _offline_alerts_on(device):
-    """Whether Teams hears about this device going quiet.
-
-    system_config.device_offline_alerts ({"prosperos": false, ...}) decides
-    when it names the device. Otherwise: the tray rig is in daily use, so yes;
-    Ariel follows its other alerts -- only when live, unless
-    inline_settings.offline_alert says otherwise. Either way the outage is
-    recorded (device_status.offline_since) and shown in SGSC."""
-    try:
-        raw = (supabase.table("system_config").select("value")
-               .eq("key", "device_offline_alerts").execute()).data
-        overrides = json.loads(raw[0]["value"]) if raw and isinstance(raw[0].get("value"), str) \
-            else (raw[0]["value"] if raw else None)
-        if isinstance(overrides, dict) and isinstance(overrides.get(device), bool):
-            return overrides[device]
-    except Exception as e:
-        print(f"[device_offline_alerts lookup failed] {type(e).__name__}: {e}")
-    if device == "ariel":
-        s = inline_settings()
-        # teams already follows live mode unless switched off on its own.
-        return s.get("offline_alert", s["teams"])
-    return True
-
-
-def _minutes(seconds):
-    return f"{int(seconds // 60)} min"
-
-
-def _watch_device_once(device):
-    now = _utc_now()
-    cutoff = (now - datetime.timedelta(seconds=DOCTOR_OFFLINE_AFTER_S)).isoformat()
-    # Conditional, so of the two workers' watchers exactly one gets the row
-    # back -- and with it the one alert for this outage.
-    rows = (
-        supabase.table("device_status").update({"offline_since": now.isoformat()})
-        .eq("device", device).is_("offline_since", "null").lt("reported_at", cutoff)
-        .execute()
-    ).data
-    if not rows:
-        return
-    silent = (now - datetime.datetime.fromisoformat(rows[0]["reported_at"])).total_seconds()
-    print(f"[device watch] {device} offline -- no report for {int(silent)}s")
-    if _offline_alerts_on(device):
-        d = DOCTOR_DEVICES[device]
-        post_teams(_device_card(
-            f"⚠ {d['name']} : plus de nouvelles",
-            f"Aucun rapport depuis {_minutes(silent)}. Le Pi a déjà relancé son Wi-Fi et redémarré seul, "
-            f"sans succès : il est éteint, figé, ou le Wi-Fi de l'usine est en panne. {d['offline_text']} "
-            "SGSC → Diagnostic des bancs pour le détail.",
-            good=False), "device offline alert")
-
-
-async def watch_devices():
-    """Notice a device that has gone quiet. Every worker runs one; see
-    _watch_device_once for why that sends one alert, not two."""
-    while True:
-        await asyncio.sleep(DOCTOR_WATCH_EVERY_S)
-        for device in DOCTOR_DEVICES:
-            try:
-                await run_in_threadpool(_watch_device_once, device)
-            except Exception as e:
-                print(f"[device watch failed] {device}: {type(e).__name__}: {e}")
-
-
-@app.on_event("startup")
-async def _start_device_watch():
-    app.state.device_watch = asyncio.create_task(watch_devices())
-
-
-def _device_back_online(device, now):
-    """Called on every report: if this one ends an outage, say so once."""
-    rows = (supabase.table("device_status").select("offline_since")
-            .eq("device", device).limit(1).execute()).data
-    since = rows[0].get("offline_since") if rows else None
-    if not since:
-        return
-    cleared = (
-        supabase.table("device_status").update({"offline_since": None})
-        .eq("device", device).not_.is_("offline_since", "null").execute()
-    ).data
-    if not cleared:
-        return
-    lasted = (now - datetime.datetime.fromisoformat(since)).total_seconds() + DOCTOR_OFFLINE_AFTER_S
-    print(f"[device watch] {device} back online after ~{int(lasted)}s")
-    if _offline_alerts_on(device):
-        d = DOCTOR_DEVICES[device]
-        post_teams(_device_card(
-            f"✓ {d['name']} : de retour",
-            f"Le banc répond de nouveau, après environ {_minutes(lasted)} sans nouvelles. {d['back_text']}",
-            good=True), "device back alert")
+# Marking a silent rig offline and announcing its return is done by Supabase
+# (sgsc-app: database/applied/2026-10-27-device-watch-in-supabase.sql): a cron
+# job, and a trigger on device_status that fires on the upsert below.
 
 
 # The /inline/... paths are what Ariel's doctor used before it served both
@@ -4811,10 +4696,6 @@ async def doctor_report(request: Request, device: str = Depends(verify_device_ke
     supabase.table("device_status").upsert(
         {"device": device, "report": report, "reported_at": now.isoformat()},
         on_conflict="device").execute()
-    try:
-        _device_back_online(device, now)
-    except Exception as e:
-        print(f"[device back-online check failed] {device}: {type(e).__name__}: {e}")
 
     for r in body.get("results") or []:
         if isinstance(r, dict) and isinstance(r.get("id"), int):

@@ -274,10 +274,11 @@ failure of Caliban and both rigs into fixes-itself / button / desk / site.
 watchdog (`../netwatch.sh`, installed by `install-doctor.sh`) cycles the
 Wi-Fi at 5 minutes offline and reboots at 15, and the destoner screen shows a
 red "PAS DE CONNEXION depuis…" banner saying what the watchdog has done and
-will do -- only while offline. In Caliban, a watcher marks Ariel offline after
-10 minutes without a report (`device_status.offline_since`,
-`device_offline.sql`) and clears it on the next one; Teams hears about both
-only when the rig is live, or when `inline_settings.offline_alert` is `true`.
+will do -- only while offline. In Supabase, a cron job marks Ariel offline after
+10 minutes without a report (`device_status.offline_since`, sgsc-app's
+`2026-10-27-device-watch-in-supabase.sql`) and a trigger clears it on the next
+one; Teams hears about both only when the rig is live, or when
+`inline_settings.offline_alert` is `true`.
 
 Setup, once: run `device_doctor.sql` and `device_offline.sql` in Supabase, deploy Caliban, then on the
 Pi `bash ~/caliban/rig/inline/install-doctor.sh`. `update.sh` restarts the
