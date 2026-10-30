@@ -65,6 +65,8 @@ MEO = 0  # class 0 of MEO / Peau / Incertain / Bicolore / Poussière
 # "bicolore", for SGSC to show on the photos and per lot; nothing decides on
 # it (2026-10-27, 4 Bicolore boxes in validation so far).
 BICOLORE = 3
+LARVA_MIN_SHARE = 0.05  # larva_length(): a nearly empty chute says little
+LARVA_MIN = 3           # isolated larvae needed on a photo
 
 _session = None
 
@@ -246,6 +248,119 @@ class Background:
         self.frames.append((now, np.ascontiguousarray(a[::step, ::step])))
 
 
+def _components(mask, diagonal=True):
+    """Connected components of a boolean mask, by runs of pixels: {label:
+    [(row, first_col, last_col), ...]}. 8-way; 4-way without diagonal."""
+    reach = 1 if diagonal else 0
+    parent, comps, prev = {}, {}, []
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    for r, row in enumerate(mask):
+        edges = np.flatnonzero(np.diff(np.concatenate(([0], row.astype(np.int8), [0]))))
+        here, j = [], 0
+        for a, b in zip(edges[::2].tolist(), (edges[1::2] - 1).tolist()):
+            label = None
+            while j < len(prev) and prev[j][1] < a - reach:
+                j += 1
+            k = j
+            while k < len(prev) and prev[k][0] <= b + reach:
+                other = find(prev[k][2])
+                if label is None:
+                    label = other
+                elif other != label:
+                    parent[other] = label
+                k += 1
+            if label is None:
+                label = len(parent)
+                parent[label] = label
+            here.append((a, b, label))
+            comps.setdefault(label, []).append((r, a, b))
+        prev = here
+    out = {}
+    for label, runs in comps.items():
+        out.setdefault(find(label), []).extend(runs)
+    return out
+
+
+def _hull(points):
+    """Convex hull of integer (x, y) points, by Andrew's monotone chain."""
+    points = sorted(set(points))
+    if len(points) < 3:
+        return points
+    def half(pts):
+        h = []
+        for p in pts:
+            while len(h) >= 2 and (h[-1][0] - h[-2][0]) * (p[1] - h[-2][1]) - (h[-1][1] - h[-2][1]) * (p[0] - h[-2][0]) <= 0:
+                h.pop()
+            h.append(p)
+        return h[:-1]
+    return half(points) + half(points[::-1])
+
+
+def _neighbours(mask):
+    """The nine 3 x 3 shifts of a boolean mask, padded with False."""
+    p = np.pad(mask, 1)
+    h, w = p.shape
+    return np.stack([p[1 + dy:h - 1 + dy, 1 + dx:w - 1 + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1)])
+
+
+def larva_length(product):
+    """{"n", "len_p75"} from a photo's product mask (1332 x 990 photo): the
+    isolated larvae -- a blob that is solid and elongated, so not two touching
+    -- and the 75th percentile of their lengths in px. Longer larvae, lower
+    bulk density: training/amas/density_study.py. len_p75 is None on a nearly
+    empty chute or with under LARVA_MIN found. Caliban keeps it per photo;
+    the lot's density estimate is worked out from it in Supabase."""
+    if product.mean() < LARVA_MIN_SHARE:
+        return {"n": 0, "len_p75": None}
+    # A 3 x 3 opening clears the fines and the thin bridges between larvae.
+    opened = _neighbours(_neighbours(product).all(axis=0)).any(axis=0)
+    # Fill the holes: a larva's dark rings often leave some, and it is still
+    # one larva. Background is 4-way, or it leaks out through diagonal steps
+    # in an outline.
+    h, w = opened.shape
+    for runs in _components(~opened, diagonal=False).values():
+        if not any(r in (0, h - 1) or a == 0 or b == w - 1 for r, a, b in runs):
+            for r, a, b in runs:
+                opened[r, a:b + 1] = True
+    # Pixels with all four direct neighbours set: the rest are the outline.
+    around = _neighbours(opened)
+    inner = opened & around[1] & around[3] & around[5] & around[7]
+    lengths = []
+    for runs in _components(opened).values():
+        pixels = sum(b - a + 1 for _, a, b in runs)
+        if not 40 <= pixels <= 3400:    # the outline area is checked below
+            continue
+        hull = _hull([(a, r) for r, a, _ in runs] + [(b, r) for r, _, b in runs])
+        if len(hull) < 3:
+            continue
+        # Area inside the outline through the pixel centres (Pick's theorem),
+        # to compare with the hull, which runs through them too.
+        outline = pixels - sum(int(inner[r, a:b + 1].sum()) for r, a, b in runs)
+        area = pixels - outline / 2 - 1
+        if not 40 <= area < 3000:
+            continue
+        xy = np.array(hull, float)
+        edges = np.roll(xy, -1, axis=0) - xy
+        hull_area = abs(np.sum(xy[:, 0] * np.roll(xy[:, 1], -1) - np.roll(xy[:, 0], -1) * xy[:, 1])) / 2
+        if hull_area <= 0:
+            continue
+        # The smallest rectangle around a hull has a side along one of its edges.
+        u = edges / np.hypot(edges[:, 0], edges[:, 1])[:, None]
+        along = np.ptp(xy @ u.T, axis=0)
+        across = np.ptp(xy @ np.stack([-u[:, 1], u[:, 0]], axis=1).T, axis=0)
+        k = int(np.argmin(along * across))
+        long, short = max(along[k], across[k]), min(along[k], across[k])
+        if short > 0 and area / hull_area >= 0.88 and 1.4 <= long / short <= 5:
+            lengths.append(float(long))
+    if len(lengths) < LARVA_MIN:
+        return {"n": len(lengths), "len_p75": None}
+    return {"n": len(lengths), "len_p75": round(float(np.percentile(lengths, 75)), 2)}
+
+
 def strip_mask(h, w):
     """STRIP as a boolean mask of an h x w photo."""
     if (h, w) not in _strips:
@@ -264,7 +379,8 @@ def measure(path, background=None, at=None):
     photos, "clean": the same without the dust (see Background). The photo
     then joins the background. "bicolore": the Bicolore boxes' count, the
     area they cover (each pixel once) and the boxes themselves, shown only,
-    never in the MEO numbers.
+    never in the MEO numbers. "larve": larva_length(), for the lot's density
+    estimate.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -324,6 +440,13 @@ def measure(path, background=None, at=None):
                      "product_px": int((product & not_strip).sum())},
            "bicolore": {"n": len(bi_boxes), "px": int(covered_bi.sum()),
                         "boxes": sorted(bi_boxes, key=lambda b: -b[4])[:MAX_BOXES]}}
+    # Never at the cost of the reading: the MEO numbers above decide, this
+    # only feeds an estimate.
+    try:
+        out["larve"] = larva_length(product)
+    except Exception as e:
+        print(f"larva_length failed: {type(e).__name__}: {e}", flush=True)
+        out["larve"] = {"n": 0, "len_p75": None}
     # Surface area: MEO pixels are the warm ones inside the boxes, product
     # the larvae and that MEO (dark frass mostly fails product_mask).
     f = crop.astype(np.int16)

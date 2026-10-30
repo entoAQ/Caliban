@@ -4093,6 +4093,14 @@ def inline_detector(raw, n_photos):
             row["bicolore"] = bi
         except (KeyError, TypeError, ValueError):
             pass
+        # The isolated larvae's length (meo_detect.larva_length), which SGSC
+        # turns into the lot's density estimate. Never used to decide here.
+        try:
+            c = ph["larve"]
+            length = c.get("len_p75")
+            row["larve"] = {"n": max(0, int(c["n"])), "len_p75": None if length is None else round(float(length), 2)}
+        except (AttributeError, KeyError, TypeError, ValueError):
+            pass
     out = {"version": str(det.get("version") or "meo")[:40], "photos": rows}
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:
