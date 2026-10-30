@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Bench rig poller -- turns a queued command into a photograph.
 
-Waits on Caliban for work, and when a command appears, shoots the dish and
-uploads the result. Runs as a systemd service so the rig is
-ready whenever someone clicks the button, including after a power cut.
+Waits for work, and when a command appears, shoots the dish and uploads the
+result. Runs as a systemd service so the rig is ready whenever someone clicks
+the button, including after a power cut.
+
+With TRAY_RIG_DB_URL set it deals with Supabase directly (tray_queue.py). Without
+it, it still goes through Caliban, so a rig can pull this code before it has been
+set up for that.
 
 The direction of travel is the point. Nothing reaches into the plant: not
 the operator's browser, not Caliban, not Supabase. The Pi reaches out, which
@@ -11,8 +15,8 @@ is the only direction that works through NAT and the only direction that
 needs no firewall changes anyone has to be asked for.
 
 Setup:
-    export CALIBAN_URL=https://your-caliban-host
-    export RIG_API_KEY=...            # must match Caliban's RIG_API_KEY
+    export TRAY_RIG_DB_URL=postgresql://...   # the tray_rig login
+    export RIG_API_KEY=...                    # must match the rig-upload function's
     python3 poller.py
 """
 
@@ -31,6 +35,9 @@ import tof
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 RIG_API_KEY = os.environ.get("RIG_API_KEY", "")
+DIRECT = bool(os.environ.get("TRAY_RIG_DB_URL"))
+if DIRECT:
+    import tray_queue
 
 POLL_SECONDS = 3.0
 REQUEST_TIMEOUT = 30
@@ -150,6 +157,8 @@ def claim(wait=LONG_POLL_SECONDS):
     `waited` is False when Caliban answered without holding the request --
     its listener is down, it predates the long-poll, or wait was 0 -- and
     the caller must then sleep before asking again, or it would spin."""
+    if DIRECT:
+        return tray_queue.claim(wait)
     resp = requests.get(
         f"{CALIBAN_URL}/capture-commands/next",
         params={"wait": wait},
@@ -213,6 +222,9 @@ def run_stage(kind):
 
 def complete(command_id, result):
     """Finish a command that produced measurements rather than an image."""
+    if DIRECT:
+        tray_queue.complete_result(command_id, result)
+        return
     resp = requests.post(
         f"{CALIBAN_URL}/capture-commands/{command_id}/complete",
         headers=headers(),
@@ -223,6 +235,10 @@ def complete(command_id, result):
 
 
 def upload(command_id, visible_path, ir_path, tof_reading=None):
+    if DIRECT:
+        # tof_reading is always None: shoot() no longer reads the sensor.
+        tray_queue.complete_photos(command_id, visible_path, ir_path)
+        return
     files = {"file": (os.path.basename(visible_path), open(visible_path, "rb"), "image/jpeg")}
     if ir_path:
         files["ir_file"] = (os.path.basename(ir_path), open(ir_path, "rb"), "image/jpeg")
@@ -248,6 +264,9 @@ def report_failure(command_id, message):
     """Tell the queue this one failed, so the operator sees an error instead
     of a spinner that only resolves when the stale-claim timeout fires."""
     try:
+        if DIRECT:
+            tray_queue.fail(command_id, message)
+            return
         requests.post(
             f"{CALIBAN_URL}/capture-commands/{command_id}/fail",
             headers=headers(),
@@ -259,10 +278,10 @@ def report_failure(command_id, message):
 
 
 def main():
-    if not CALIBAN_URL or not RIG_API_KEY:
-        sys.exit("CALIBAN_URL and RIG_API_KEY must both be set.")
+    if not RIG_API_KEY or not (DIRECT or CALIBAN_URL):
+        sys.exit("RIG_API_KEY and either TRAY_RIG_DB_URL or CALIBAN_URL must be set.")
 
-    log(f"waiting on {CALIBAN_URL} for commands")
+    log(f"waiting on {'Supabase' if DIRECT else CALIBAN_URL} for commands")
     idle_logged = time.monotonic()
     # After handling a command, ask again at once rather than long-polling.
     # Caliban only claims when it hears an INSERT (or every 2 min as a safety

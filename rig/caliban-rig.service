@@ -20,6 +20,8 @@ WorkingDirectory=/home/ttownshend/caliban/rig
 #     CALIBAN_URL=https://your-caliban-host
 #     RIG_API_KEY=...
 #     RIG_CAPTURE_IR=0
+#     TRAY_RIG_DB_URL=postgresql://tray_rig...   # set: the queue skips Caliban
+# TRAY_RIG_DB_URL needs: sudo apt install python3-psycopg2
 # then: sudo chmod 600 /etc/caliban-rig.env
 EnvironmentFile=/etc/caliban-rig.env
 
