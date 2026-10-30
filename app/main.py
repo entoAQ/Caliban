@@ -1,17 +1,11 @@
 """
-Contamination screening inference service.
-
-Photos now live in SharePoint, not Supabase Storage -- Supabase holds
-only lightweight metadata (which lot, which detections, which labels),
-never the image bytes themselves. See sharepoint_client.py for the
-Graph API integration this relies on.
+What is left of the Caliban service: the rigs' endpoints. The tray rig's capture
+queue, Ariel's readings, and both rigs' doctor reports. The pages read Supabase
+directly (sgsc-app), and prompt tests run through its vision-test Edge Function.
 
 Run locally:
   export SUPABASE_URL=https://xxxxx.supabase.co
   export SUPABASE_SERVICE_KEY=your-service-role-key
-  export MS_TENANT_ID=... MS_CLIENT_ID=... MS_CLIENT_SECRET=...
-  export SHAREPOINT_HOSTNAME=... SHAREPOINT_SITE_PATH=...
-  export POWER_AUTOMATE_API_KEY=... (any long random string you choose)
   uvicorn app.main:app --reload --port 8000
 """
 import asyncio
@@ -24,7 +18,6 @@ import re
 import statistics
 import time
 import traceback
-import uuid
 
 # Set once, the moment this process actually starts (module import time --
 # exactly when a container boots). Exposed via /health specifically to
@@ -36,23 +29,14 @@ STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 
-from app.supabase_client import supabase, get_current_operator
-from app import sharepoint_client
+from app.supabase_client import supabase
 from app import command_wakeup
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "contamination_v1")
-TRAINING_FOLDER = os.environ.get("SHAREPOINT_TRAINING_FOLDER", "TrainingPhotos")
-SCREENING_FOLDER = os.environ.get("SHAREPOINT_SCREENING_FOLDER", "ScreeningPhotos")
-POWER_AUTOMATE_API_KEY = os.environ.get("POWER_AUTOMATE_API_KEY")
-
-# Deliberately a separate secret from POWER_AUTOMATE_API_KEY rather than
-# reusing it. The rig is physically accessible hardware sitting on a plant
-# floor; Power Automate is a cloud tenant. Sharing one key would mean that
-# rotating it after someone walks off with a Raspberry Pi also breaks the
-# Power Automate integration, which is exactly the coupling you do not want
-# during an incident.
+# The rig is physically accessible hardware on a plant floor, so its key can
+# only do what a rig does.
 RIG_API_KEY = os.environ.get("RIG_API_KEY")
 # The inline rig's key (rig/inline). Separate from RIG_API_KEY on purpose: the
 # tray rig's key can claim and complete capture commands and nothing else,
@@ -133,16 +117,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"detail": f"Erreur serveur : {type(exc).__name__}: {exc}"},
         headers=headers,
     )
-
-def verify_power_automate_key(x_api_key: str = Header(None)):
-    """Separate auth path from the browser-facing endpoints below --
-    Power Automate isn't a logged-in SGSC user, so it can't present a
-    Supabase session token. A shared secret, checked via a header, is
-    the simplest correct mechanism for a single trusted automated caller."""
-    if not POWER_AUTOMATE_API_KEY or x_api_key != POWER_AUTOMATE_API_KEY:
-        raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
-    return True
-
 
 def verify_rig_key(x_api_key: str = Header(None)):
     """Auth for the bench rig, which is a device rather than an operator.
@@ -249,15 +223,6 @@ def _check_vision_endpoint():
     return "joignable"
 
 
-def _check_sharepoint():
-    # Not configured on the live service (2026-10-13): unused, not broken. A
-    # permanent warning for it would teach everyone to ignore the colour.
-    if not sharepoint_client.MS_TENANT_ID:
-        return "non configuré (non utilisé)"
-    sharepoint_client._get_access_token()
-    return "jeton obtenu"
-
-
 def _check_device_report(device):
     rows = supabase.table("device_status").select("reported_at, report").eq("device", device) \
         .limit(1).execute().data
@@ -303,7 +268,6 @@ def health_deep():
     checks = {
         "supabase": _deep_check(_check_supabase),
         "vision": _deep_check(_check_vision_endpoint),
-        "sharepoint": _deep_check(_check_sharepoint, critical=False),
         "ariel": _deep_check(lambda: _check_device_report("ariel"), critical=False),
         "prosperos": _deep_check(lambda: _check_device_report("prosperos"), critical=False),
         "capture_queue": _deep_check(_check_capture_queue, critical=False),
@@ -320,100 +284,13 @@ def health_deep():
         "checks": checks,
         # Set or not, never the value: a missing app setting after a portal
         # edit is the other outage that /health cannot see.
-        # The SharePoint/Power Automate pair only counts once that pipeline
-        # is configured, for the same reason as _check_sharepoint.
         "config": {k: bool(os.environ.get(k)) for k in (
             "SUPABASE_URL", "SUPABASE_SERVICE_KEY", "AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY",
             "AZURE_OPENAI_DEPLOYMENT", "RIG_API_KEY", "INLINE_API_KEY", "TEAMS_ALERT_WEBHOOK_URL",
-            *(("POWER_AUTOMATE_API_KEY", "MS_CLIENT_SECRET") if sharepoint_client.MS_TENANT_ID else ()))},
+            )},
     }
     _deep_health_cache.update(at=time.time(), body=body)
     return body
-
-
-# ── Browser-facing: capture a photo ──────────────────────────────────
-# Writes to SharePoint only -- no Supabase row at all for training-mode
-# photos, by design. Screening-mode photos ALSO get no Supabase row
-# here -- that row gets created later, by Power Automate, once detection
-# actually completes (see /detect below). This endpoint's only job is
-# getting the bytes into the right SharePoint folder under the right name.
-@app.post("/vision-upload")
-async def vision_upload(
-    file: UploadFile = File(...),
-    autoid: str = Form(...),
-    correlation_id: str = Form(...),
-    training_mode: bool = Form(False),
-    operator: dict = Depends(get_current_operator),
-):
-    contents = await file.read()
-    ext = os.path.splitext(file.filename)[1] or ".jpg"
-    # AutoID first (so anyone browsing the SharePoint folder directly can
-    # tell which lot a photo belongs to at a glance), correlation id
-    # second (so an operator taking several photos of the same lot in a
-    # row doesn't collide -- each upload still gets its own unique file).
-    filename = f"{autoid}__{correlation_id}{ext}"
-    folder = TRAINING_FOLDER if training_mode else SCREENING_FOLDER
-    sharepoint_path = sharepoint_client.upload_file(folder, filename, contents, file.content_type or "image/jpeg")
-    return {
-        "status": "uploaded",
-        "training_mode": training_mode,
-        "sharepoint_path": sharepoint_path,
-        "correlation_id": correlation_id,
-    }
-
-
-# ── Power-Automate-facing: run detection ─────────────────────────────
-# Deliberately minimal: image bytes in, JSON out, nothing else. Power
-# Automate's own SharePoint connector fetches the image and POSTs it
-# here directly; this endpoint never touches SharePoint or Supabase --
-# Power Automate is responsible for writing the result to Supabase
-# itself afterward, using this JSON response plus the correlation_id it
-# already extracted from the triggering file's name.
-@app.post("/detect")
-async def detect(
-    file: UploadFile = File(...),
-    _: bool = Depends(verify_power_automate_key),
-):
-    # ultralytics (AGPL-3.0) left requirements.txt earlier, so this could
-    # only ever answer "no model"; its code went too on 2026-10-27, for the
-    # licence. Kept so Power Automate's flow gets the same reply. The MEO
-    # detector is YOLOX (Apache-2.0), run on Ariel (rig/inline/meo_detect.py).
-    return {"detection_status": "no_model", "model_version": None, "detections": [], "counts_by_class": {}}
-
-
-# ── Browser-facing: labeling tool's image proxy ──────────────────────
-# The ONLY place raw image bytes ever pass through besides SharePoint
-# itself -- fetched here, streamed straight to the browser, never written
-# to disk or any database. Takes a SharePoint path directly (not an
-# inspection_id) specifically because training photos, the ones actually
-# being labeled, never have a vision_inspections row to look one up from.
-@app.get("/sharepoint-image-proxy")
-async def sharepoint_image_proxy(path: str, operator: dict = Depends(get_current_operator)):
-    try:
-        image_bytes = sharepoint_client.download_file(path)
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Image introuvable sur SharePoint : {e}")
-    return Response(content=image_bytes, media_type="image/jpeg")
-
-
-# ── Browser-facing: list training photos available to label ─────────
-@app.get("/training-photos")
-async def list_training_photos(operator: dict = Depends(get_current_operator)):
-    files = sharepoint_client.list_folder(TRAINING_FOLDER)
-    out = []
-    for f in files:
-        # filenames are {autoid}__{correlation_id}.ext -- extract the
-        # autoid back out for display, same convention used at upload time.
-        name = f["name"]
-        autoid = name.split("__")[0] if "__" in name else name
-        out.append({"path": f["path"], "name": name, "autoid": autoid})
-    return out
-
-
-@app.get("/inspections/{lot_number}")
-def get_by_lot(lot_number: str, operator: dict = Depends(get_current_operator)):
-    resp = supabase.table("vision_inspections").select("*").eq("lot_number", lot_number).execute()
-    return resp.data
 
 
 # ── Claude Vision test endpoint ──────────────────────────────────────
@@ -435,26 +312,6 @@ import base64
 import anthropic
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-
-CLAUDE_VISION_PROMPT = """Tu examines une photo prise dans une installation de production \
-de larves de mouche soldat noire (Hermetia illucens), pour le dépistage de contamination. \
-Le contenu attendu est un mélange de larves séchées et de frass (résidu d'élevage). \
-On cherche spécifiquement toute trace de matière étrangère : plastique, métal ou verre.
-
-Réponds selon cette structure exacte :
-
-COMPOSITION GÉNÉRALE : décris ce que tu observes (proportion approximative larves/frass, \
-apparence générale).
-
-MATIÈRE ÉTRANGÈRE DÉTECTÉE : Oui ou Non. Si oui, décris précisément quoi et où dans l'image \
-(ex. « coin supérieur droit », « au centre parmi les larves »).
-
-NIVEAU DE CONFIANCE : indique honnêtement ton niveau de certitude. Ce type d'image est un \
-domaine visuel que tu n'as probablement pas beaucoup rencontré en entraînement -- signale \
-clairement si quelque chose te semble ambigu plutôt que de deviner.
-
-Ne tente pas de compter précisément les particules individuelles si elles sont nombreuses et \
-serrées -- donne plutôt une impression qualitative (peu, modéré, abondant)."""
 
 # Deliberately different from CLAUDE_VISION_PROMPT above -- that one asks
 # for open-ended description; this one forces a single, specific band
@@ -1514,43 +1371,6 @@ def band_for_pct(pct, scale="standard"):
     return label
 
 
-@app.post("/claude-detect")
-async def claude_detect(
-    file: UploadFile = File(...),
-    lot_number: str = Form(""),
-    operator: dict = Depends(get_current_operator),
-):
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY n'est pas configurée sur ce service.")
-
-    contents = await file.read()
-    media_type = file.content_type or "image/jpeg"
-    b64_image = base64.b64encode(contents).decode("utf-8")
-
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    start = time.time()
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1000,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64_image}},
-                {"type": "text", "text": CLAUDE_VISION_PROMPT},
-            ],
-        }],
-    )
-    elapsed_ms = int((time.time() - start) * 1000)
-
-    text = "".join(block.text for block in response.content if block.type == "text")
-    return {
-        "lot_number": lot_number,
-        "analysis": text,
-        "inference_time_ms": elapsed_ms,
-        "model": "claude-sonnet-4-6",
-    }
-
-
 # ── Azure AI Foundry (GPT-4o) vision test endpoint ────────────────────
 # Same evaluation-tool status as /claude-detect, same prompt verbatim --
 # deliberately identical, so a photo run through both gives a genuinely
@@ -1970,94 +1790,6 @@ def call_density_vision(image_b64, media_type, tof_reading, height_only_est=None
         "prompt_tokens": getattr(u, "prompt_tokens", None),
         "completion_tokens": getattr(u, "completion_tokens", None),
     }
-
-
-_component_test_ids = "__unset__"  # sentinel distinct from None, so a genuine "not found" isn't re-queried every request
-
-
-def get_me_pct_component_ids():
-    """ME% is never stored as its own test_results row -- confirmed
-    directly against real data, where a fully-tested lot had
-    me_organic_wt and bulk_density but no me_pct entry at all. SGSC
-    computes the percentage itself (me_organic_wt / bulk_density * 100),
-    same formula already used elsewhere in the app (PeriodTab). This
-    looks up the two real, stored component tests instead of searching
-    for a percentage that structurally doesn't exist as a row."""
-    global _component_test_ids
-    if _component_test_ids == "__unset__":
-        resp = supabase.table("test_definitions").select("id, code").in_("code", ["me_organic_wt", "bulk_density"]).execute()
-        ids = {row["code"]: row["id"] for row in (resp.data or [])}
-        _component_test_ids = (ids.get("me_organic_wt"), ids.get("bulk_density")) if ids else None
-    return _component_test_ids
-
-
-@app.post("/azure-detect")
-async def azure_detect(
-    file: UploadFile = File(...),
-    lot_number: str = Form(""),
-    operator: dict = Depends(get_current_operator),
-):
-    client = get_azure_client()
-    contents = await file.read()
-    media_type = file.content_type or "image/jpeg"
-    b64_image = base64.b64encode(contents).decode("utf-8")
-
-    start = time.time()
-    response = client.chat.completions.create(
-        model=AZURE_OPENAI_DEPLOYMENT,
-        max_completion_tokens=1000,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": CLAUDE_VISION_PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{b64_image}"}},
-            ],
-        }],
-    )
-    elapsed_ms = int((time.time() - start) * 1000)
-
-    text = response.choices[0].message.content or ""
-    return {
-        "lot_number": lot_number,
-        "analysis": text,
-        "inference_time_ms": elapsed_ms,
-        "model": f"azure/{AZURE_OPENAI_DEPLOYMENT}",
-    }
-
-
-# ── Standalone band-estimate validation tool ──────────────────────────
-# Deliberately outside the Supabase-authenticated app entirely -- this is
-# a quick validation experiment, not a production feature, so it uses the
-# same shared-secret pattern as the Power Automate endpoint rather than
-# requiring a logged-in SGSC session for what's meant to be a fast,
-# throwaway test against real lab ME% values.
-#
-# Requires a new env var on Render: VALIDATION_API_KEY (any long random
-# string you choose -- separate from POWER_AUTOMATE_API_KEY so revoking
-# one doesn't affect the other).
-
-# ── Standalone band-estimate validation tool ──────────────────────────
-# Originally a quick, standalone experiment outside SGSC's auth entirely
-# -- now promoted to a real, role-gated feature. Uses the same Supabase
-# JWT verification as every other authenticated endpoint (get_current_operator),
-# plus a role check matching the app's own hierarchy (user_profiles.role),
-# rather than the standalone VALIDATION_API_KEY used during initial testing.
-
-ROLE_HIERARCHY = {"viewer": 0, "qc": 1, "qa": 2, "qa_director": 3, "osa": 4}
-
-
-def require_role(min_role: str):
-    """Returns a FastAPI dependency that verifies the caller's Supabase
-    session AND that their user_profiles.role meets the given minimum,
-    matching the same role names and ordering used throughout the rest
-    of the app (roleGte() client-side, role_gte() in RLS policies)."""
-    def dependency(operator: dict = Depends(get_current_operator)):
-        profile_resp = supabase.table("user_profiles").select("role").eq("id", operator["id"]).single().execute()
-        role = (profile_resp.data or {}).get("role", "viewer")
-        if ROLE_HIERARCHY.get(role, 0) < ROLE_HIERARCHY.get(min_role, 0):
-            raise HTTPException(status_code=403, detail=f"Accès refusé -- rôle {min_role} ou supérieur requis.")
-        return operator
-    return dependency
 
 
 # How an operator capture is analysed when system_config says nothing.
@@ -2569,15 +2301,6 @@ _reference_cache = None
 # photos. Must be created once in the Supabase dashboard (Storage --
 # same private visibility as vision-reference-images) before this is used.
 BAND_TEST_CAPTURE_BUCKET = "vision-band-test-captures"
-
-
-def clear_reference_cache():
-    """Called after a new reference photo is captured, so it's picked up
-    on the very next request rather than waiting for a container restart
-    -- the whole reason this moved off the old baked-into-the-image
-    approach in the first place."""
-    global _reference_cache
-    _reference_cache = None
 
 
 def get_reference_images(category="meo_density"):
@@ -4144,110 +3867,6 @@ async def doctor_attachment(command_id: int, request: Request,
     return {"ok": True, "path": path}
 
 
-@app.post("/admin/photo-stats/backfill")
-def photo_stats_backfill(limit: int = 25, operator: dict = Depends(require_role("qc"))):
-    """Measure the brightness of stored captures that have none yet.
-
-    One-off, and safe to run repeatedly: only rows with a storage_path and no
-    photo_mean are touched, newest first, `limit` at a time. Written so the
-    2026-09-15 readings can be checked against how bright their photos were --
-    the light was turned down that day, and a darker tray reads as more MEO.
-
-    Deliberately small and time-bounded. Each photo is a download of a megabyte
-    or two, and App Service cuts a request off after a few minutes: a batch of
-    200 returned 504 (which reaches the browser as a CORS error, since a
-    gateway error carries no CORS headers). So it stops at BACKFILL_SECONDS and
-    says `more`, leaving the caller to come back for the rest.
-    """
-    BACKFILL_SECONDS = 90
-    started = time.time()
-    from PIL import Image
-
-    try:
-        rows = (
-            supabase.table("vision_band_estimates")
-            .select("id, storage_path")
-            .not_.is_("storage_path", "null")
-            .is_("photo_mean", "null")
-            .order("created_at", desc=True)
-            .limit(max(1, min(100, limit)))
-            .execute()
-        ).data or []
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Lecture impossible : {type(e).__name__}: {e}")
-
-    done, failed, ran_out_of_time = 0, [], False
-    for row in rows:
-        if time.time() - started > BACKFILL_SECONDS:
-            ran_out_of_time = True
-            break
-        try:
-            content = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).download(row["storage_path"])
-            mean, std = photo_stats(Image.open(io.BytesIO(content)).convert("RGB"))
-            supabase.table("vision_band_estimates").update(
-                {"photo_mean": mean, "photo_std": std}).eq("id", row["id"]).execute()
-            done += 1
-        except Exception as e:
-            failed.append(f"{row['storage_path']}: {type(e).__name__}")
-    print(f"[photo-stats backfill] measured {done}, failed {len(failed)}"
-          + (" (stopped on time)" if ran_out_of_time else ""))
-    return {"status": "ok", "measured": done, "failed": failed[:10], "failed_count": len(failed),
-            "seconds": round(time.time() - started, 1),
-            "more": ran_out_of_time or len(rows) == max(1, min(100, limit))}
-
-
-@app.post("/reference-capture")
-async def reference_capture(
-    file: UploadFile = File(...),
-    category: str = Form("meo_density"),
-    real_pct: str = Form(""),
-    description: str = Form(""),
-    operator: dict = Depends(require_role("qc")),
-):
-    """Saves a new reference photo directly to Supabase Storage plus its
-    metadata row -- no Azure call involved, this purely records a known
-    example for future band-test calls to reference. Verifies both
-    writes actually succeeded rather than trusting the absence of an
-    exception alone, same lesson learned the hard way with
-    vision_band_estimates -- a request completing without an error isn't
-    proof a row or file genuinely landed."""
-    contents = await file.read()
-    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-    storage_path = f"{category}/{uuid.uuid4().hex}{ext}"
-
-    try:
-        upload_resp = supabase.storage.from_(REFERENCE_BUCKET).upload(
-            storage_path, contents, file_options={"content-type": file.content_type or "image/jpeg"}
-        )
-        if not upload_resp:
-            raise RuntimeError(f"Storage upload returned no response: {upload_resp!r}")
-
-        real_pct_value = None
-        if real_pct.strip():
-            try:
-                real_pct_value = float(real_pct.strip())
-            except ValueError:
-                pass
-
-        insert_resp = supabase.table("vision_reference_images").insert({
-            "category": category,
-            "storage_path": storage_path,
-            "real_pct": real_pct_value,
-            "description": description.strip() or None,
-            "created_by": operator["id"],
-        }).execute()
-
-        if not insert_resp.data:
-            raise RuntimeError(f"Insert returned no data -- response: {insert_resp!r}")
-
-        clear_reference_cache()
-        return {"status": "ok", "storage_path": storage_path, "id": insert_resp.data[0].get("id")}
-
-    except Exception as e:
-        print(f"[reference_capture failed] {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"Échec de l'enregistrement : {type(e).__name__}: {e}")
-
-
 # --- Bench rig capture queue -------------------------------------------------
 #
 # Three endpoints, all device-authenticated, that let the Pi ask for work and
@@ -4260,88 +3879,6 @@ async def reference_capture(
 # once here as the untouched original, once by azure_band_test when the
 # browser submits it. That is a few hundred kilobytes and the original being
 # preserved separately is arguably worth having.
-
-
-@app.post("/band-estimates/backfill")
-def band_estimates_backfill(
-    lot_number: str = Form(...),
-    operator: dict = Depends(require_role("qc")),
-):
-    """Attach the lab ME% to estimates recorded before it existed.
-
-    The bench workflow runs photo-first: separating and weighing the MEO
-    destroys the levelled dish, so the picture has to be taken before the
-    number can be known. Every rig estimate is therefore recorded with a null
-    real_pct and stays that way until the operator saves their results.
-
-    Call this after saving. It recomputes ME% the same way azure_band_test
-    does -- from the two stored components, since ME% is never a row of its
-    own -- and fills in any estimate for this lot still missing it.
-
-    Deliberately server-side rather than letting the browser write the number
-    it happens to have on screen: the value that gets recorded should be the
-    one actually saved to test_results, not a parallel copy that could differ
-    from it. Same reasoning as the lookup in azure_band_test.
-    """
-    lot_text = lot_number.strip()
-    if not lot_text:
-        raise HTTPException(status_code=400, detail="Numéro de lot requis.")
-
-    try:
-        lot_resp = supabase.table("lots").select("id").ilike("lot_number", lot_text).limit(1).execute()
-        if not lot_resp.data:
-            return {"status": "ok", "updated": 0, "reason": "lot_not_found"}
-        lot_id = lot_resp.data[0]["id"]
-
-        component_ids = get_me_pct_component_ids()
-        if not component_ids or not component_ids[0] or not component_ids[1]:
-            return {"status": "ok", "updated": 0, "reason": "component_ids_unavailable"}
-
-        wt_id, density_id = component_ids
-        comp_resp = (
-            supabase.table("test_results")
-            .select("result_value, test_id")
-            .eq("lot_id", lot_id)
-            .in_("test_id", [wt_id, density_id])
-            .eq("is_superseded", False)
-            .execute()
-        )
-        values = {row["test_id"]: row["result_value"] for row in (comp_resp.data or [])}
-        wt, density = values.get(wt_id), values.get(density_id)
-        if wt is None or density is None or not density > 0:
-            return {"status": "ok", "updated": 0, "reason": "no_result_yet"}
-
-        real_pct_value = round((wt / density) * 100, 2)
-
-        # Only rows still missing the value. An estimate that already has one
-        # is never rewritten -- if the lab result is later corrected, that is
-        # a decision for a human, not a silent side effect of pressing save.
-        update_resp = (
-            supabase.table("vision_band_estimates")
-            # real_density goes with real_pct because they come from the same
-            # lookup and both describe the same physical sample. Filling one
-            # and not the other would leave every estimate captured before the
-            # results were entered permanently unable to be compared on
-            # density, which is the whole point of recording it.
-            .update({
-                "real_pct": real_pct_value,
-                "real_pct_source": "lot_lookup",
-                "real_density": float(density),
-            })
-            .eq("lot_id", lot_id)
-            .is_("real_pct", "null")
-            .execute()
-        )
-        return {
-            "status": "ok",
-            "updated": len(update_resp.data or []),
-            "real_pct": real_pct_value,
-            "real_density": float(density),
-        }
-
-    except Exception as e:
-        print(f"[band_estimates_backfill failed] {lot_text}: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"Échec du rattrapage : {type(e).__name__}")
 
 
 # Longest the rig's request is held open. Well under App Service's 230 s idle

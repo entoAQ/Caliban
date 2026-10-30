@@ -21,9 +21,6 @@ cryptography<42.0
 # (AnthropicFoundry) for the re-score model comparison ---
 anthropic>=1.5.0
 
-# --- SharePoint via Microsoft Graph API ---
-msal>=1.31.0
-
 # --- Azure AI Foundry (GPT-4o) vision test endpoint ---
 openai>=1.54.0
 
