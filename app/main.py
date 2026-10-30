@@ -4041,6 +4041,17 @@ async def inline_acks(request: Request, _: bool = Depends(verify_inline_key)):
     return {"ok": True, "count": len(rows)}
 
 
+# ── Device diagnostic and repair (rig/inline/doctor.py) ─────────────
+# Each rig's doctor posts its checks here every minute, and the reply carries
+# any repair queued from SGSC's diagnostic page -- the report is the poll, so
+# the Pis still only ever reach out. Tables: rig/inline/device_doctor.sql,
+# rig/inline/device_offline.sql, rig/device_doctor_v2.sql. SGSC queues repairs
+# through queue_device_command, which holds the list of what each rig may be
+# asked for.
+#
+# Which rig is reporting comes from its key, never from the request
+# (verify_device_key): the inline key is Ariel's, the tray key Prosperos's.
+#
 # A repair not picked up within this long is dropped, not delivered late --
 # see device_doctor.sql.
 DOCTOR_COMMAND_TTL_S = 600
