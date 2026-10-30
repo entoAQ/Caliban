@@ -26,6 +26,18 @@ announcement. Say so explicitly at the end of the turn so it isn't missed —
 still manual on purpose (Tim reviews before anything goes live), just no raw
 SQL to write.
 
+## Read the schema from the snapshot, and check it is current
+
+This repo has no schema of its own. The one place to read the Supabase schema
+from is `database/schema-snapshot.sql` in sgsc-app, not the `rig/*.sql` files (they
+show a change, not the result) and not a guess from what the code reads.
+
+Before relying on it, `git pull` sgsc-app and check line 8, which says when its
+dump was taken. If that is more than 2 days old, say so and fix that first (see
+sgsc-app's `database/README.md`). Even when current it is up to a day behind, so
+for anything changed since the dump, or when a wrong column would be costly, check
+production read-only through `claude_ro` (`SGSC_RO_DB_URL`).
+
 ## Vision prompt language
 
 **Every vision prompt's instructions are written in English.** Only the
