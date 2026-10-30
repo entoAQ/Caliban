@@ -53,7 +53,7 @@ CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
-HISTORY_KEEP = 150         # the screen's two-hour trend at one reading a minute
+HISTORY_KEEP = 300         # the screen's two-hour trend at a reading every 30 s
 # A capture is a few seconds; with every flash retry used (6 tries, 10 s
 # apart, flashcam.DEFAULTS) about 65 s. Past this, libcamera has wedged inside
 # this process and nothing here can free it -- see watchdog.
@@ -691,8 +691,11 @@ def main():
     while True:
         try:
             if now_utc() >= next_at:
+                # From the start of this reading, so the interval is the time
+                # between photos and not the time between them plus a capture.
+                started = now_utc()
                 wait = take_reading(state)
-                next_at = now_utc() + timedelta(seconds=wait)
+                next_at = started + timedelta(seconds=wait)
                 state["next_at"] = iso(next_at)
                 save_state(state)
             try:

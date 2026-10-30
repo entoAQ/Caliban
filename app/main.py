@@ -3572,6 +3572,8 @@ INLINE_READING_ID = re.compile(r"^IL-\d{8}-\d{6}$")
 #                 an instruction from it is a guess an operator might follow.
 # interval_min    minutes between readings. Sent back to the Pi with every
 #                 reading, so the cadence changes without touching the Pi.
+# interval_s      the same in seconds, in place of interval_min when set: at
+#                 least 20, so the camera and the flash have finished a cycle.
 # variant, high_variant, low_variant, repeats, escalate_repeats
 #                 as in operator_settings(), for when the chute needs prompts of
 #                 its own -- it will: every current prompt describes a dish.
@@ -3582,6 +3584,7 @@ INLINE_READING_ID = re.compile(r"^IL-\d{8}-\d{6}$")
 INLINE_DEFAULTS = {
     "mode": "shadow",
     "interval_min": 5,
+    "interval_s": 0,
     "alert_consecutive_increase": 3,
     # How an instruction is decided (inline_decision). With a reading a minute,
     # one photo is too noisy to act on: the instruction comes from the median
@@ -3708,7 +3711,7 @@ def inline_settings():
                     "decision_readings", "decision_min_readings", "decision_max_age_min",
                     "decision_window_min", "group_size", "group_spacing_s", "group_max",
                     "settle_min", "turn_max_cm", "turn_run_max_cm", "decrease_pause_min",
-                    "decrease_max_in_row", "turn_max_qt", "turn_run_max_qt"):
+                    "decrease_max_in_row", "turn_max_qt", "turn_run_max_qt", "interval_s"):
             try:
                 settings[key] = int(overrides[key])
             except (KeyError, TypeError, ValueError):
@@ -3775,6 +3778,7 @@ def inline_settings():
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["interval_min"] = max(1, min(60, settings["interval_min"]))
+    settings["interval_s"] = max(20, min(3600, settings["interval_s"])) if settings["interval_s"] > 0 else 0
     settings["alert_consecutive_increase"] = max(0, min(10, settings["alert_consecutive_increase"]))
     return settings
 
@@ -4261,7 +4265,7 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "target": None,
         "photo_mean": decider.get("photo_mean"),
         "photo_std": decider.get("photo_std"),
-        "next_in_s": settings["interval_min"] * 60,
+        "next_in_s": settings["interval_s"] or settings["interval_min"] * 60,
         "recorded_id": recorded_id or decider.get("id"),
     }
 
@@ -4498,9 +4502,12 @@ async def inline_reading(
             mesures["calibre"] = {"pct": decider.get("calibrated_pct"),
                                   "decision_pct": decider.get("decision_pct"),
                                   **settings["calibration"]}
-        if is_decider and decider.get("turn_basis"):
+        if is_decider and (decider.get("turn_basis") or decider.get("decision_n") is not None):
             # How far the screen said to turn, and on what: the next turn is
             # sized from it, and turns can be checked against what followed.
+            # On a hold too: decision_n is what tells SGSC "too few photos yet"
+            # from a real "no change", which it cannot work out once a wait
+            # after a turn (settle_min) leaves photos out.
             mesures["consigne"] = {"decision_pct": decider.get("decision_pct"),
                                    "decision_n": decider.get("decision_n"),
                                    "turn": decider.get("turn"), "unit": decider.get("turn_unit"),

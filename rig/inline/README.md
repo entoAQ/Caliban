@@ -81,7 +81,8 @@ more than one full turn at a time, two full turns in a row at most. With
 `adaptive_turns.sql`) the turns stay in quarters, never more than a half turn at
 a time, with the 5-minute wait, the DIMINUER limits and the sizing above; the
 "aviser l'AQ" screen is answered by "AQ avisée", not "Réglage fait", which
-restarts the run of turns. When the instruction names
+restarts the run of turns. `thirty_seconds.sql` (2026-10-30) takes a photo every
+30 s instead of every minute. When the instruction names
 a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
 destoner's own gauge and confirms; that value then stays in the "Réglage
 destoner" bar at the top until the next one, so anyone passing can check the
