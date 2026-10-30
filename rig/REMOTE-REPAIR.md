@@ -36,7 +36,6 @@ page needs Caliban up to reach Ariel.
 | A deploy broke it | Deploy workflow's live check; *vérifier*; SGSC banner | *revenir à la version précédente*, then revert the commit before the next push | Button |
 | Up but wedged / slow, nothing deployed | *vérifier* (slow or failing checks) | *redémarrer* | Button |
 | Need to know why | — | *journaux* | Button |
-| Realtime wakeup deaf (tray captures wait 90-120 s, 2026-10-13) | `capture_queue` in *vérifier* / SGSC | Detects it and rebuilds the listener; captures wait ≤ 20 s meanwhile | Itself |
 | Supabase down | `supabase` check | Nothing we can do; status.supabase.com | — |
 | Vision endpoint unreachable | `vision` check | Azure status; nothing on our side | — |
 | Vision key revoked / quota exhausted | **Not checked** (reachability only): readings fail with 401/429 in *journaux* | New key in Azure Portal → Caliban → Environment variables | Desk |
@@ -115,7 +114,6 @@ buttons are SGSC's.
 | Wi-Fi drops | netwatch: Wi-Fi cycle at 5 min, reboot at 15 |
 | Pi freezes hard | Hardware watchdog, 15 s |
 | New code | Update timer, within 5 min, unless paused by a rollback |
-| Captures slow to start (deaf wakeup) | Caliban's listener rebuild; `capture_queue` shows it |
 | Silent 10 min | Caliban marks it offline and tells Teams (on by default for this rig: it is in daily use; `system_config.device_offline_alerts = {"prosperos": false}` turns it off) |
 
 **One button** (SGSC)

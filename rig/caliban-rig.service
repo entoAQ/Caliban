@@ -17,11 +17,10 @@ WorkingDirectory=/home/ttownshend/caliban/rig
 
 # Kept out of this file so the unit can live in git without the key in it.
 # Create /etc/caliban-rig.env containing:
-#     CALIBAN_URL=https://your-caliban-host
-#     RIG_API_KEY=...
+#     TRAY_RIG_DB_URL=postgresql://tray_rig...   # needs python3-psycopg2
+#     RIG_API_KEY=...                            # rig-upload function's key
 #     RIG_CAPTURE_IR=0
-#     TRAY_RIG_DB_URL=postgresql://tray_rig...   # set: the queue skips Caliban
-# TRAY_RIG_DB_URL needs: sudo apt install python3-psycopg2
+#     CALIBAN_URL=https://your-caliban-host      # the doctor still reports here
 # then: sudo chmod 600 /etc/caliban-rig.env
 EnvironmentFile=/etc/caliban-rig.env
 

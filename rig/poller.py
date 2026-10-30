@@ -5,12 +5,10 @@ Waits for work, and when a command appears, shoots the dish and uploads the
 result. Runs as a systemd service so the rig is ready whenever someone clicks
 the button, including after a power cut.
 
-With TRAY_RIG_DB_URL set it deals with Supabase directly (tray_queue.py). Without
-it, it still goes through Caliban, so a rig can pull this code before it has been
-set up for that.
+The queue and the photo uploads are in tray_queue.py.
 
 The direction of travel is the point. Nothing reaches into the plant: not
-the operator's browser, not Caliban, not Supabase. The Pi reaches out, which
+the operator's browser, not Supabase. The Pi reaches out, which
 is the only direction that works through NAT and the only direction that
 needs no firewall changes anyone has to be asked for.
 
@@ -20,7 +18,6 @@ Setup:
     python3 poller.py
 """
 
-import json
 import os
 import sys
 import threading
@@ -31,27 +28,16 @@ from datetime import datetime
 import requests
 
 import capture
-import tof
-
-CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
-RIG_API_KEY = os.environ.get("RIG_API_KEY", "")
-DIRECT = bool(os.environ.get("TRAY_RIG_DB_URL"))
-if DIRECT:
-    import tray_queue
+import tray_queue
 
 POLL_SECONDS = 3.0
-REQUEST_TIMEOUT = 30
 
-# Each ask for work is a long-poll: Caliban holds it open for up to this long
-# and answers the moment a command is queued. Asking every POLL_SECONDS
-# instead cost a Supabase call each time, ~28,800 a day, which filled the
-# free tier's log quota (2026-09-27). POLL_SECONDS is now only the fallback
-# for when Caliban answers without holding (see claim()).
+# Each ask for work waits up to this long for a notification.
 LONG_POLL_SECONDS = 50
 
 # The full-resolution originals in ~/captures are the only copy: Caliban
 # keeps just a 2048 px review copy in Supabase. Nothing here deletes them;
-# they are moved to SharePoint by hand for now (monthly reminder issue).
+# they are moved off the rig by hand for now (monthly reminder issue).
 
 # How long to wait after switching the lamp before shooting the IR frame.
 # The IR LEDs are not under software control: a photoresistor on the LED
@@ -147,29 +133,6 @@ def log(message):
     print(f"{datetime.now().isoformat(timespec='seconds')}  {message}", flush=True)
 
 
-def headers():
-    return {"X-API-Key": RIG_API_KEY}
-
-
-def claim(wait=LONG_POLL_SECONDS):
-    """Ask for a command. Returns (command or None, waited).
-
-    `waited` is False when Caliban answered without holding the request --
-    its listener is down, it predates the long-poll, or wait was 0 -- and
-    the caller must then sleep before asking again, or it would spin."""
-    if DIRECT:
-        return tray_queue.claim(wait)
-    resp = requests.get(
-        f"{CALIBAN_URL}/capture-commands/next",
-        params={"wait": wait},
-        headers=headers(),
-        timeout=wait + REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    body = resp.json()
-    return body.get("command"), bool(body.get("waited"))
-
-
 def shoot(lot_number):
     """Capture the visible frame, the IR frame if fitted, and a ToF reading
     of the same tray if the sensor is fitted and calibrated.
@@ -220,80 +183,30 @@ def run_stage(kind):
     }[kind]()
 
 
-def complete(command_id, result):
-    """Finish a command that produced measurements rather than an image."""
-    if DIRECT:
-        tray_queue.complete_result(command_id, result)
-        return
-    resp = requests.post(
-        f"{CALIBAN_URL}/capture-commands/{command_id}/complete",
-        headers=headers(),
-        data={"result": json.dumps(result)},
-        timeout=REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-
-
-def upload(command_id, visible_path, ir_path, tof_reading=None):
-    if DIRECT:
-        # tof_reading is always None: shoot() no longer reads the sensor.
-        tray_queue.complete_photos(command_id, visible_path, ir_path)
-        return
-    files = {"file": (os.path.basename(visible_path), open(visible_path, "rb"), "image/jpeg")}
-    if ir_path:
-        files["ir_file"] = (os.path.basename(ir_path), open(ir_path, "rb"), "image/jpeg")
-    # Sent as the same "result" form field the calib_* stages already use for
-    # measurements -- one shape for "here is JSON alongside/instead of a
-    # file", not a second one invented just for this.
-    data = {"result": json.dumps({"tof": tof_reading})} if tof_reading else {}
-    try:
-        resp = requests.post(
-            f"{CALIBAN_URL}/capture-commands/{command_id}/complete",
-            headers=headers(),
-            files=files,
-            data=data,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
-    finally:
-        for _, handle, _ in files.values():
-            handle.close()
-
-
 def report_failure(command_id, message):
     """Tell the queue this one failed, so the operator sees an error instead
     of a spinner that only resolves when the stale-claim timeout fires."""
     try:
-        if DIRECT:
-            tray_queue.fail(command_id, message)
-            return
-        requests.post(
-            f"{CALIBAN_URL}/capture-commands/{command_id}/fail",
-            headers=headers(),
-            data={"error": message[:1000]},
-            timeout=REQUEST_TIMEOUT,
-        )
+        tray_queue.fail(command_id, message)
     except Exception as e:
         log(f"could not report failure for {command_id}: {e}")
 
 
 def main():
-    if not RIG_API_KEY or not (DIRECT or CALIBAN_URL):
-        sys.exit("RIG_API_KEY and either TRAY_RIG_DB_URL or CALIBAN_URL must be set.")
+    if not tray_queue.DB_URL or not tray_queue.RIG_API_KEY:
+        sys.exit("TRAY_RIG_DB_URL and RIG_API_KEY must both be set.")
 
-    log(f"waiting on {'Supabase' if DIRECT else CALIBAN_URL} for commands")
+    log("waiting on Supabase for commands")
     idle_logged = time.monotonic()
-    # After handling a command, ask again at once rather than long-polling.
-    # Caliban only claims when it hears an INSERT (or every 2 min as a safety
-    # net), so a held request after a command would leave anything else
-    # already queued waiting for the *next* insert -- which then claims the
-    # oldest row, not its own. On 2026-09-30 that kept every operator's
+    # After handling a command, ask again at once rather than waiting: one
+    # notification can stand for several commands, and a wait would leave the rest
+    # queued until the next one arrived. On 2026-09-30 that kept every operator's
     # request one behind a post-outage backlog until SGSC timed out.
     drain = False
 
     while True:
         try:
-            command, waited = claim(0 if drain else LONG_POLL_SECONDS)
+            command = tray_queue.claim(0 if drain else LONG_POLL_SECONDS)[0]
             drain = bool(command)
 
             if not command:
@@ -302,8 +215,6 @@ def main():
                 if time.monotonic() - idle_logged >= 600:
                     log("idle")
                     idle_logged = time.monotonic()
-                if not waited:
-                    time.sleep(POLL_SECONDS)
                 continue
 
             idle_logged = time.monotonic()
@@ -316,7 +227,7 @@ def main():
                     if kind.startswith("calib_"):
                         with watchdog(STAGE_WATCHDOG_SECONDS, command["id"], kind):
                             result = run_stage(kind)
-                        complete(command["id"], result)
+                        tray_queue.complete_result(command["id"], result)
                     else:
                         # A preview is a capture whose result nobody analyses.
                         # It goes through the same path deliberately: a preview
@@ -326,7 +237,7 @@ def main():
                         with watchdog(CAPTURE_WATCHDOG_SECONDS, command["id"], kind):
                             visible, ir, tof_reading = shoot(label) if kind == "capture" else (
                                 capture.capture(label, "visible"), None, None)
-                        upload(command["id"], visible, ir, tof_reading)
+                        tray_queue.complete_photos(command["id"], visible, ir)
                 log(f"completed {command['id']}")
             except Exception as e:
                 log(f"capture failed for {command['id']}: {type(e).__name__}: {e}")
@@ -335,7 +246,7 @@ def main():
 
         except requests.RequestException as e:
             # Network trouble is expected and temporary -- plant Wi-Fi drops,
-            # Caliban restarts, DNS hiccups. Back off a little and carry on;
+            # DNS hiccups. Back off a little and carry on;
             # anything unclaimed is still in the queue when we return.
             log(f"network error: {e}")
             time.sleep(POLL_SECONDS * 3)

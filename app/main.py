@@ -26,13 +26,11 @@ import traceback
 # this timestamp against when you committed/pushed a change.
 STARTUP_TIME = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.supabase_client import supabase
-from app import command_wakeup
 
 MODEL_VERSION = os.environ.get("MODEL_VERSION", "contamination_v1")
 # The rig is physically accessible hardware on a plant floor, so its key can
@@ -47,11 +45,6 @@ INLINE_API_KEY = os.environ.get("INLINE_API_KEY")
 
 app = FastAPI(title="Contamination Screening Inference API")
 
-
-@app.on_event("startup")
-async def _start_command_wakeup():
-    # Held on app.state so the task is not garbage-collected mid-run.
-    app.state.command_wakeup = asyncio.create_task(command_wakeup.run())
 
 # Allowed browser origins, comma-separated. A single fixed origin was fragile
 # by design: Vercel issues a fresh URL for every preview deployment, and a
@@ -117,20 +110,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
         content={"detail": f"Erreur serveur : {type(exc).__name__}: {exc}"},
         headers=headers,
     )
-
-def verify_rig_key(x_api_key: str = Header(None)):
-    """Auth for the bench rig, which is a device rather than an operator.
-
-    Same shared-secret shape as verify_power_automate_key and for the same
-    reason -- the Pi has no Supabase session to present and never will. Note
-    what this deliberately does not grant: the rig can claim and complete
-    capture commands, and nothing else. It cannot run an analysis, read a
-    lot, or reach any of the operator-facing endpoints. A camera should be
-    able to act as a camera."""
-    if not RIG_API_KEY or x_api_key != RIG_API_KEY:
-        raise HTTPException(status_code=401, detail="Clé API invalide ou manquante.")
-    return True
-
 
 def verify_inline_key(x_api_key: str = Header(None)):
     """Auth for the inline rig. See INLINE_API_KEY for why it is not RIG_API_KEY."""
@@ -234,15 +213,13 @@ def _check_device_report(device):
     return f"rapport il y a {int(age)} s, état {(rows[0]['report'] or {}).get('overall', '?')}"
 
 
-# A tray capture claimed this long after it was queued has outlived the
-# wakeup: the 3 s fallback poll and the 20 s safety claim both land well under.
+# A tray capture claimed this long after it was queued has outlived the rig's
+# LISTEN and its 20 s safety claim (rig/tray_queue.py).
 CAPTURE_LAG_WARN_S = 30
 
 
 def _check_capture_queue():
-    """How long the tray rig's last few captures waited to be picked up. The
-    one symptom of a deaf wakeup listener (command_wakeup.missed) that shows
-    from outside: the listener looks healthy and the commands wait anyway."""
+    """How long the tray rig's last few captures waited to be picked up."""
     since = (_utc_now() - datetime.timedelta(days=1)).isoformat()
     rows = (
         supabase.table("capture_commands").select("requested_at, claimed_at")
@@ -271,11 +248,6 @@ def health_deep():
         "ariel": _deep_check(lambda: _check_device_report("ariel"), critical=False),
         "prosperos": _deep_check(lambda: _check_device_report("prosperos"), critical=False),
         "capture_queue": _deep_check(_check_capture_queue, critical=False),
-    }
-    wakeup = getattr(app.state, "command_wakeup", None)
-    checks["command_wakeup"] = {
-        "ok": bool(wakeup) and not wakeup.done(), "critical": False, "ms": 0,
-        "detail": "en marche" if wakeup and not wakeup.done() else "arrêté",
     }
     body = {
         "status": "ok" if all(c["ok"] for c in checks.values() if c["critical"]) else "degraded",
@@ -1629,169 +1601,6 @@ def _vision_complete(entry, content):
     return _azure_gpt5_complete(entry, content)
 
 
-# ── Density-from-photo, anchored on the ToF reading ──────────────────────
-#
-# Completely separate from the MEO prompt family above: different question,
-# different bands (the four sampling bands -- <170/170-200/200-220/>220 --
-# not MEO percentage), different call, its own result columns. DENSITE was
-# removed from every MEO prompt (2026-09-19) specifically so density
-# estimation could be asked properly on its own rather than as an
-# afterthought competing for the same response.
-#
-# The previous DENSITE attempt (3.1-3.2) asked the model to guess density
-# from the photo alone, anchored on two fixed generic examples (140 g/L /
-# 250 g/L). It correlated with measured density at r = 0.19 -- weak. This
-# version anchors on something much stronger: a real depth-sensor reading of
-# THIS specific tray, taken at the same moment as the photo. The sensor
-# gives the envelope volume; the photo is what can say how much of that
-# envelope is actually larvae versus air trapped between them, which is a
-# real physical question a photograph can speak to (larva size and
-# plumpness) that a depth sensor alone cannot.
-#
-# tof-v1 (2026-09-19, superseded same day): gave the model raw geometry only
-# and asked it to infer "what a reading like this usually corresponds to"
-# from a stated typical range (130-260 g/L). Every answer across the first
-# real batch came back as a small nudge off that range's centre -- the
-# justifications literally said "legerement superieure a la valeur moyenne
-# attendue" almost verbatim, every time, regardless of what the photo
-# actually showed. The range was doing the estimating, not the photograph.
-#
-# tof-v2: gives the model the actual height-only estimate for THIS reading
-# (computed the same way density_est_g_l is, from the live model in
-# system_config) as a concrete number to adjust, and drops the generic
-# typical-range line entirely -- there is no longer a generic anchor for the
-# model to fall back on instead of looking at the photo. Estimates started
-# actually moving off the anchor in sensible directions (e.g. down for
-# larger/puffier larvae) -- though the two samples seen so far had the
-# justification's STATED direction disagree with the number it actually
-# reported (says "lower", number goes up). Left alone for now: the plan is
-# to let this run and fit a correction against real values later rather
-# than keep hand-tuning wording on two data points.
-#
-# tof-v3: same reasoning, only the requested precision changes -- rounded to
-# the nearest 5 g/L, so numbers read as 145/150 rather than false precision
-# like 142/148 that the underlying estimate cannot actually support.
-DENSITY_VISION_PROMPT_VERSION = "tof-v3"
-
-
-def density_vision_prompt(height_mm, sensed_area_mm2, volume_ml, height_only_est=None):
-    area_cm2 = (sensed_area_mm2 / 100.0) if sensed_area_mm2 else None
-    area_line = f"{area_cm2:.0f} cm2" if area_cm2 is not None else "an unknown area"
-    anchor_line = (
-        f"A simple model using depth alone -- fit against a small number of past readings paired with a real measured "
-        f"density, so it already reflects typical packing and air content on average, just not for THIS specific tray -- "
-        f"puts this reading at about {height_only_est:.0f} g/L. Treat that as your STARTING point before you look at the photo, "
-        f"not as an answer to just repeat: it is an average, and this specific sample may pack tighter or looser than average."
-        if height_only_est is not None else
-        "No depth-only starting figure is available for this reading -- judge from the sensor numbers and the photograph directly."
-    )
-    return f"""You are looking at a photograph of black soldier fly larvae (Hermetia illucens) on a white tray, taken by a fixed calibration rig. A separate time-of-flight depth sensor measured this exact tray at the same moment this photo was taken.
-
-Sensor reading: mean depth {height_mm:.1f} mm above the empty-tray baseline, across a sensed footprint of {area_line}, for a total envelope volume of {volume_ml:.0f} mL.
-
-{anchor_line}
-
-Judge how densely packed this sample's larvae actually are -- something only the photograph can show you, not the sensor. Larger, rounder, plumper larvae nest badly and trap more air between them than a typical sample, which pulls true density LOWER. Smaller, flatter, more shrivelled larvae pack closer together than typical, which pulls it HIGHER. Loose fine material (dust, small fragments) filling the gaps between larvae also pushes it higher.
-
-Move the number by however much the photograph actually justifies, in whichever direction it justifies -- a small nudge if the packing looks unremarkable, a large correction if the larvae are clearly bigger/puffier or clearly smaller/flatter than a typical sample. Do not just restate the starting figure, and do not apply a token adjustment out of habit.
-
-Answer EXACTLY in this format, with nothing before or after:
-
-DENSITE_G_L: [your best single-number estimate, in grams per litre, rounded to the nearest 5 -- e.g. 145 or 150, never 142 or 148]
-BANDE: [a single value among : <170, 170-200, 200-220, >220]
-CONFIANCE: [Faible, Moyenne, ou Élevée]
-JUSTIFICATION: [one sentence, in French, what you saw in the photograph that moved your estimate away from the depth-only starting figure, and by roughly how much]"""
-
-
-def parse_density_vision_response(text):
-    """Extract DENSITE_G_L / BANDE / CONFIANCE / JUSTIFICATION.
-
-    Kept separate from parse_band_response even though both are line-based
-    parsers of a similar shape: BANDE here names the four sampling bands,
-    not a MEO percentage band, and mixing the two would make a density
-    response silently parseable as a (wrong) MEO one or vice versa.
-    """
-    density_g_l = None
-    band = None
-    confidence = None
-    justification = None
-    for line in (text or "").splitlines():
-        line = line.strip()
-        upper = line.upper()
-        if upper.startswith("DENSITE_G_L:"):
-            match = re.search(r"[\d.]+", line.split(":", 1)[1])
-            if match:
-                try:
-                    density_g_l = float(match.group())
-                except ValueError:
-                    density_g_l = None
-        elif upper.startswith("BANDE:"):
-            band = line.split(":", 1)[1].strip()
-        elif upper.startswith("CONFIANCE:"):
-            confidence = line.split(":", 1)[1].strip()
-        elif upper.startswith("JUSTIFICATION:"):
-            justification = line.split(":", 1)[1].strip()
-    return {"density_g_l": density_g_l, "band": band, "confidence": confidence, "justification": justification}
-
-
-def call_density_vision(image_b64, media_type, tof_reading, height_only_est=None):
-    """One vision call estimating density from a photo anchored on its
-    paired ToF reading. Returns None if the ToF reading is incomplete
-    (nothing to anchor on) rather than guessing from the photo alone --
-    that is the previous, already-weak approach this replaces.
-
-    height_only_est is the same height-only model's number already computed
-    for this row (density_est_g_l) -- passed in rather than recomputed, so
-    the vision prompt and the stored column can never silently disagree
-    about what the depth-only estimate was."""
-    height_mm = tof_reading.get("height_mm")
-    volume_ml = tof_reading.get("volume_ml")
-    if height_mm is None or volume_ml is None:
-        return None
-
-    prompt = density_vision_prompt(height_mm, tof_reading.get("sensed_area_mm2"), volume_ml, height_only_est)
-    content = [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{image_b64}"}},
-    ]
-
-    # Called the same way call_variant() calls DEFAULT_VISION_MODEL, not via
-    # _vision_complete()/_azure_gpt5_complete() -- those exist for the
-    # re-score tab's ALTERNATE models, on a separately configured client and
-    # newer API version that is only ever exercised against whichever model
-    # a re-score happens to try, never against AZURE_OPENAI_DEPLOYMENT
-    # itself. Using that path here would run the one call that has to work
-    # in production through the one path that has never been proven to.
-    client = get_azure_client()
-    try:
-        response = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            max_completion_tokens=200,
-            temperature=0,
-            seed=CALIBAN_SEED,
-            messages=[{"role": "user", "content": content}],
-        )
-    except BadRequestError:
-        response = client.chat.completions.create(
-            model=AZURE_OPENAI_DEPLOYMENT,
-            max_completion_tokens=200,
-            messages=[{"role": "user", "content": content}],
-        )
-    text = response.choices[0].message.content or ""
-    model_name = getattr(response, "model", None)
-    u = getattr(response, "usage", None)
-
-    parsed = parse_density_vision_response(text)
-    return {
-        **parsed,
-        "raw_response": text,
-        "model": model_name,
-        "prompt_version": DENSITY_VISION_PROMPT_VERSION,
-        "prompt_tokens": getattr(u, "prompt_tokens", None),
-        "completion_tokens": getattr(u, "completion_tokens", None),
-    }
-
-
 # How an operator capture is analysed when system_config says nothing.
 #
 # repeats           rotations on every capture.
@@ -1909,69 +1718,6 @@ def operator_settings():
     settings["high_variant"] = settings["high_variant"].strip()
     settings["low_variant"] = settings["low_variant"].strip()
     return settings
-
-
-def tof_density_model():
-    """The current height-only density estimate model, as (intercept, slope,
-    label), or None if it isn't configured or isn't sane.
-
-    Coefficients live in system_config, not here, because this "model" is a
-    straight line through a handful of points and will be refit constantly
-    while the corpus is small -- a SQL update takes effect on the next
-    capture; a constant in this file needs a commit and a redeploy for the
-    same change. Read fresh per capture, like operator_settings() above, so a
-    refit reaches the very next reading.
-
-    Returns None rather than a stale or guessed default on any failure --
-    scoring a reading with the wrong coefficients silently would be worse
-    than not scoring it at all, since a wrong estimate looks exactly like a
-    right one until someone checks.
-    """
-    try:
-        resp = (
-            supabase.table("system_config")
-            .select("key, value")
-            .in_("key", ["tof_density_model_intercept", "tof_density_model_slope",
-                         "tof_density_model_label"])
-            .execute()
-        )
-        rows = {r["key"]: r["value"] for r in (resp.data or [])}
-        intercept = float(rows["tof_density_model_intercept"])
-        slope = float(rows["tof_density_model_slope"])
-        label = rows.get("tof_density_model_label") or "unlabelled"
-        return intercept, slope, label
-    except Exception as e:
-        print(f"[tof_density_model lookup failed] {type(e).__name__}: {e}")
-        return None
-
-
-def density_vision_enabled():
-    """Whether the density-from-photo vision call should fire at all.
-
-    Paused 2026-09-20: a real batch (n=20, matched against Ignition values)
-    showed neither the height-only model nor the vision estimate carrying
-    real signal (correlation ~0 for both) -- both sat in a narrow band
-    regardless of the real value. Rather than keep spending a vision call on
-    every capture while that's true, this is a config flag (default ON,
-    same "absent means normal behaviour" pattern as every other switch
-    here) so it can be turned back on the moment there's something worth
-    testing it against -- e.g. once CVAT tagging produces a trained model to
-    compare it with -- without a redeploy.
-    """
-    try:
-        resp = (
-            supabase.table("system_config")
-            .select("value")
-            .eq("key", "density_vision_enabled")
-            .execute()
-        )
-        rows = resp.data or []
-        if not rows:
-            return True
-        return str(rows[0]["value"]).strip().lower() not in ("false", "0", "off")
-    except Exception as e:
-        print(f"[density_vision_enabled lookup failed] {type(e).__name__}: {e}")
-        return True
 
 
 def increase_tier(estimate_pct, settings):
@@ -3867,42 +3613,6 @@ async def doctor_attachment(command_id: int, request: Request,
     return {"ok": True, "path": path}
 
 
-# --- Bench rig capture queue -------------------------------------------------
-#
-# Three endpoints, all device-authenticated, that let the Pi ask for work and
-# report back. The browser never talks to the Pi and the Pi never talks to
-# Supabase; each side reaches the one place both can reach.
-#
-# Rig images go in the band-test bucket under a rig/ prefix rather than a
-# bucket of their own, purely so there is nothing extra to create by hand
-# before this works. It does mean an analysed rig photo is stored twice --
-# once here as the untouched original, once by azure_band_test when the
-# browser submits it. That is a few hundred kilobytes and the original being
-# preserved separately is arguably worth having.
-
-
-# Longest the rig's request is held open. Well under App Service's 230 s idle
-# cutoff, which drops the connection without a response.
-LONG_POLL_MAX_SECONDS = 55
-
-# Claim at least this often even with nothing announced: it covers an INSERT
-# the listener missed, and it is the only thing that runs the queue's
-# stale-claim reclaim (claim_capture_command's stale_after, 2 minutes).
-#
-# Was 120 s. On 2026-10-13 the listener went deaf while looking healthy, every
-# capture waited for this claim, and the operator screen (OP_TIMEOUT_MS, 90 s)
-# gave up before each photo arrived. 20 s keeps the worst case well inside
-# that: ~4,300 claims a day per worker in use, against 28,800 for the old
-# 3 s poll. A held request now also ends when the claim falls due, rather
-# than waiting out its full 55 s first.
-SAFETY_CLAIM_SECONDS = 20
-# A command the safety claim finds that was queued longer ago than this was
-# never announced -- the listener is deaf (command_wakeup.missed).
-UNANNOUNCED_LAG_SECONDS = 5
-
-_last_claim = 0.0
-
-
 def _claim_lag_s(data):
     """Seconds between a command being queued and this claim, or None."""
     try:
@@ -3911,301 +3621,3 @@ def _claim_lag_s(data):
     except (KeyError, TypeError, ValueError):
         return None
 
-
-def _claim_next_command():
-    try:
-        resp = supabase.rpc("claim_capture_command", {}).execute()
-    except Exception as e:
-        print(f"[capture_commands_next failed] {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"Échec de la file : {type(e).__name__}")
-
-    data = resp.data
-    if isinstance(data, list):
-        data = data[0] if data else None
-    if not data or not data.get("id"):
-        return None, None
-
-    return {
-        "id": data["id"],
-        "lot_id": data.get("lot_id"),
-        "lot_number": data.get("lot_number"),
-        # Older rows predate the column and are all plain captures, so an
-        # absent kind means capture rather than an error.
-        "kind": data.get("kind") or "capture",
-    }, _claim_lag_s(data)
-
-
-@app.get("/capture-commands/next")
-async def capture_commands_next(wait: float = 0, _: bool = Depends(verify_rig_key)):
-    """Claim the oldest pending capture command, or report there is none.
-
-    Returns {"command": null} rather than 404 when the queue is empty: an
-    empty queue is the normal case, not an error. Logging it as one would
-    bury any real failure in noise.
-
-    With ?wait=N the request is a long-poll: it is held for up to N seconds
-    and only touches Supabase once command_wakeup hears an INSERT, or the
-    safety claim is due. That replaced a Supabase RPC every 3 s, which filled
-    the free tier's log quota by itself (2026-09-27). "waited" tells the rig
-    whether it was held; when it was not (listener down, or an older rig),
-    the rig sleeps between polls exactly as before."""
-    global _last_claim
-    wait = min(max(wait, 0), LONG_POLL_MAX_SECONDS)
-    held = bool(wait) and command_wakeup.healthy()
-
-    woken = False
-    if held:
-        remaining = SAFETY_CLAIM_SECONDS - (time.monotonic() - _last_claim)
-        woken = command_wakeup.pending()
-        if remaining > 0 and not woken:
-            # Held no longer than until the safety claim is due -- then claim
-            # here rather than send the rig away empty-handed.
-            woken = await command_wakeup.wait(min(wait, remaining))
-            if not woken and time.monotonic() - _last_claim < SAFETY_CLAIM_SECONDS:
-                return {"command": None, "waited": True}
-        command_wakeup.consume()
-
-    _last_claim = time.monotonic()
-    command, lag = await run_in_threadpool(_claim_next_command)
-    if held and not woken and command and lag is not None and lag > UNANNOUNCED_LAG_SECONDS:
-        command_wakeup.missed(lag)
-    return {"command": command, "waited": held}
-
-
-def _run_density_vision(row_id, contents, media_type, tof_reading, height_only_est=None):
-    """Runs after the HTTP response has already gone back to the rig.
-
-    A vision call can take several seconds -- fine for an operator watching
-    a browser, not fine stacked on top of everything else a capture already
-    does inside the rig's own request timeout (30s) and capture watchdog
-    (45s). This is scheduled as a background task specifically so the rig
-    gets its "done" back immediately and this runs after, updating the row
-    tof_density_readings already has rather than blocking its creation."""
-    try:
-        b64 = base64.b64encode(contents).decode("utf-8")
-        result = call_density_vision(b64, media_type, tof_reading, height_only_est)
-    except Exception as e:
-        print(f"[density vision call failed] {row_id}: {type(e).__name__}: {e}")
-        return
-    if not result:
-        return
-    try:
-        supabase.table("tof_density_readings").update({
-            "vision_density_est_g_l": result.get("density_g_l"),
-            "vision_density_band": result.get("band"),
-            "vision_confidence": result.get("confidence"),
-            "vision_justification": result.get("justification"),
-            "vision_raw_response": result.get("raw_response"),
-            "vision_model": result.get("model"),
-            "vision_prompt_version": result.get("prompt_version"),
-        }).eq("id", row_id).execute()
-    except Exception as e:
-        print(f"[density vision row update failed] {row_id}: {type(e).__name__}: {e}")
-
-
-@app.post("/capture-commands/{command_id}/complete")
-async def capture_commands_complete(
-    command_id: str,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(None),
-    ir_file: UploadFile = File(None),
-    result: str = Form(None),
-    _: bool = Depends(verify_rig_key),
-):
-    """Store whatever the command produced and mark it done.
-
-    Two shapes of result arrive here. A capture or a preview sends images. A
-    calibration stage sends measurements and no image at all -- it changed the
-    rig's settings rather than photographing anything. Both are complete
-    results, so both finish through the same endpoint rather than through a
-    second one that would duplicate the storage-then-row ordering below.
-
-    The IR frame is optional -- the rig runs perfectly well with the IR
-    boards unattached, and a visible-only capture is a complete result rather
-    than a degraded one.
-
-    Storage first, row second, and the row only if storage succeeded. The
-    reverse order would leave commands marked done that point at images which
-    do not exist, and the operator would be told their photo was ready."""
-
-    def _store(contents, filename, content_type, band):
-        ext = os.path.splitext(filename or "")[1] or ".jpg"
-        path = f"rig/{command_id}_{band}{ext}"
-        resp = supabase.storage.from_(BAND_TEST_CAPTURE_BUCKET).upload(
-            path,
-            contents,
-            file_options={"content-type": content_type or "image/jpeg"},
-        )
-        if not resp:
-            raise RuntimeError(f"Storage upload returned no response: {resp!r}")
-        return path
-
-    try:
-        if file is None:
-            if result is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Une commande terminée doit fournir une image ou un résultat.",
-                )
-            try:
-                parsed = json.loads(result)
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=400, detail=f"Résultat JSON invalide : {e}"
-                )
-            update_resp = supabase.table("capture_commands").update({
-                "status": "done",
-                "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                "result": parsed,
-            }).eq("id", command_id).execute()
-            if not update_resp.data:
-                raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
-            return {"status": "ok", "result": parsed}
-
-        # Read once, kept around: the visible photo's bytes are needed again
-        # below for the density-vision call, and an UploadFile's stream can
-        # only be consumed once.
-        #
-        # Only the review copy is kept from here on: stored, cached for the
-        # analysis that follows, and handed to the vision calls, so a later
-        # re-score reads exactly the image the live one did.
-        # Off the event loop: decoding a 12MP frame would stall every other
-        # request on this worker, the rig's long-poll listener included.
-        visible_contents = await run_in_threadpool(review_copy, await file.read())
-        ir_contents = await run_in_threadpool(review_copy, await ir_file.read()) if ir_file is not None else None
-
-        image_path = _store(visible_contents, file.filename, file.content_type, "visible")
-        ir_path = _store(ir_contents, ir_file.filename, ir_file.content_type, "ir") if ir_contents is not None else None
-
-        # A capture can now carry a result alongside its image -- the ToF
-        # reading of the same tray, taken at the same moment as the photo.
-        # Previously this branch never looked at `result` at all, so a
-        # reading sent here would have been silently dropped.
-        update_fields = {
-            "status": "done",
-            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "image_path": image_path,
-            "ir_image_path": ir_path,
-        }
-        tof_reading = None
-        if result is not None:
-            try:
-                parsed = json.loads(result)
-            except json.JSONDecodeError as e:
-                raise HTTPException(
-                    status_code=400, detail=f"Résultat JSON invalide : {e}"
-                )
-            update_fields["result"] = parsed
-            tof_reading = parsed.get("tof")
-
-        update_resp = supabase.table("capture_commands").update(update_fields).eq("id", command_id).execute()
-
-        if not update_resp.data:
-            raise RuntimeError(f"Update matched no rows -- response: {update_resp!r}")
-
-        # Where the full-resolution originals are on the rig (~/captures), since
-        # Storage only keeps the review copy. Separate and best-effort: a
-        # missing column (rig/original_filenames.sql not yet run) must not fail
-        # a capture the operator is waiting on.
-        try:
-            supabase.table("capture_commands").update({
-                "original_filename": file.filename,
-                "ir_original_filename": ir_file.filename if ir_file is not None else None,
-            }).eq("id", command_id).execute()
-        except Exception as e:
-            print(f"[original filename not recorded] {command_id}: {type(e).__name__}: {e}")
-
-        # Best-effort, same reasoning as the IR frame above: the operator is
-        # waiting on the photo, and a ToF row is calibration data for later,
-        # not something worth failing their capture over.
-        if tof_reading:
-            row = {
-                "lot_number_text": update_resp.data[0].get("lot_number"),
-                "height_mm": tof_reading.get("height_mm"),
-                "volume_ml": tof_reading.get("volume_ml"),
-                "uncertainty_pct": tof_reading.get("uncertainty_pct"),
-                "reference_recorded_at": tof_reading.get("reference_recorded_at"),
-                "sensed_area_mm2": tof_reading.get("sensed_area_mm2"),
-                # Surface texture, not just mean depth -- see
-                # 2026-09-19-tof-density-texture.sql. Recorded so it can be
-                # checked as a density predictor later; not used by the
-                # height-only model below yet.
-                "height_std_mm": tof_reading.get("height_std_mm"),
-                "height_range_mm": tof_reading.get("height_range_mm"),
-                "coverage_frac": tof_reading.get("coverage_frac"),
-            }
-
-            # Scored at write time, not read time -- see tof_density_model()
-            # for why: a later refit must not silently change what an
-            # existing row is recorded as having predicted.
-            model = tof_density_model()
-            height_mm = tof_reading.get("height_mm")
-            if model and height_mm is not None:
-                intercept, slope, label = model
-                row["density_est_g_l"] = round(intercept + slope * height_mm, 1)
-                row["density_est_model"] = label
-
-            tof_row_id = None
-            tof_error_text = None
-            try:
-                insert_resp = supabase.table("tof_density_readings").insert(row).execute()
-                if insert_resp.data:
-                    tof_row_id = insert_resp.data[0].get("id")
-                else:
-                    # Some client versions return an empty .data with no
-                    # exception on failure rather than raising -- this is
-                    # exactly the case that went unrecorded before: no row,
-                    # no exception, nothing printed, nothing to query.
-                    tof_error_text = (f"insert returned no data; "
-                                       f"error attr: {getattr(insert_resp, 'error', None)!r}")
-            except Exception as e:
-                tof_error_text = f"{type(e).__name__}: {e}"
-
-            if tof_error_text:
-                print(f"[tof_density_readings insert failed] {command_id}: {tof_error_text}")
-                # Written to the row itself, not just printed: nobody here
-                # has quick access to Azure's log stream, and this is the
-                # database both sides can already query.
-                try:
-                    supabase.table("capture_commands").update(
-                        {"tof_insert_error": tof_error_text[:2000]}
-                    ).eq("id", command_id).execute()
-                except Exception:
-                    pass
-
-            # Completely separate from the MEO analysis: its own prompt, its
-            # own bands, its own call, scheduled after the response below so
-            # a multi-second vision call never sits on top of the rig's own
-            # request timeout. Only fires when there is a row to update, a
-            # photo to show it, and the switch (system_config) is on.
-            if tof_row_id and visible_contents and density_vision_enabled():
-                background_tasks.add_task(
-                    _run_density_vision, tof_row_id, visible_contents,
-                    file.content_type or "image/jpeg", tof_reading,
-                    row.get("density_est_g_l"),
-                )
-
-        return {"status": "ok", "image_path": image_path, "ir_image_path": ir_path}
-
-    except Exception as e:
-        print(f"[capture_commands_complete failed] {command_id}: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"Échec de l'envoi : {type(e).__name__}: {e}")
-
-
-@app.post("/capture-commands/{command_id}/fail")
-def capture_commands_fail(
-    command_id: str,
-    error: str = Form(""),
-    _: bool = Depends(verify_rig_key),
-):
-    """Record that a capture failed, so the operator is told rather than left
-    watching a spinner until the stale-claim timeout eventually fires."""
-    try:
-        supabase.table("capture_commands").update({
-            "status": "failed",
-            "completed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "error": error[:1000] or "Erreur inconnue",
-        }).eq("id", command_id).execute()
-    except Exception as e:
-        print(f"[capture_commands_fail failed] {command_id}: {type(e).__name__}: {e}")
-    return {"status": "ok"}

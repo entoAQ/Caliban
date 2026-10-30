@@ -7,9 +7,7 @@ commands and nothing else (sgsc-app database/2026-10-30-tray-rig-role.sql).
 Photos go to the rig-upload Edge Function, because Postgres can't write to Storage
 and the service key never goes on this Pi.
 
-Kept apart from poller.py so it can run and be tested without a camera. Used when
-TRAY_RIG_DB_URL is set; psycopg2 is imported here, not in poller.py, so a rig that
-isn't set up yet keeps working through Caliban.
+Kept apart from poller.py so it can run and be tested without a camera.
 """
 
 import io
@@ -79,8 +77,7 @@ def _woken(conn):
 
 def claim(wait):
     """Take the oldest command, or report there is none. Returns (command or
-    None, waited), as the Caliban route did: waited is True whenever the caller
-    needn't sleep before asking again.
+    None, True).
 
     Holds for up to `wait` seconds, ending early on a notification or when the
     safety claim falls due. wait=0 claims at once, which drains a backlog: one
