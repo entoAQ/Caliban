@@ -3572,8 +3572,10 @@ INLINE_READING_ID = re.compile(r"^IL-\d{8}-\d{6}$")
 #                 an instruction from it is a guess an operator might follow.
 # interval_min    minutes between readings. Sent back to the Pi with every
 #                 reading, so the cadence changes without touching the Pi.
-# interval_s      the same in seconds, in place of interval_min when set: at
+# interval_s      seconds between readings during a correction only: from a
+#                 confirmed turn until its first decision (next_reading_s). At
 #                 least 20, so the camera and the flash have finished a cycle.
+#                 0 = interval_min throughout.
 # variant, high_variant, low_variant, repeats, escalate_repeats
 #                 as in operator_settings(), for when the chute needs prompts of
 #                 its own -- it will: every current prompt describes a dish.
@@ -3876,6 +3878,15 @@ def inline_turn(instruction, decision_pct, settings, ctx):
     if room < TURN_UNITS[unit]["min"]:
         return instruction, None, "limit", "turn_limit"
     return instruction, safe_turn(min(n, room), unit, most), basis, None
+
+
+def next_reading_s(settings, correcting):
+    """Seconds to the next reading: interval_s while a turn's first decision is
+    still being gathered, so the operator is not left waiting, and interval_min
+    the rest of the time, so the flash does not fire twice as often all day."""
+    if correcting and settings["interval_s"]:
+        return settings["interval_s"]
+    return settings["interval_min"] * 60
 
 
 def inline_ack_context(since_ack_s, last_ack_instruction, fields):
@@ -4265,7 +4276,7 @@ def _inline_response(reading_id, decider, settings, recorded_id=None):
         "target": None,
         "photo_mean": decider.get("photo_mean"),
         "photo_std": decider.get("photo_std"),
-        "next_in_s": settings["interval_s"] or settings["interval_min"] * 60,
+        "next_in_s": next_reading_s(settings, decider.get("correcting")),
         "recorded_id": recorded_id or decider.get("id"),
     }
 
@@ -4414,6 +4425,7 @@ async def inline_reading(
         decision_pct = inline_calibrated(decision_pct, dec_settings)
         decider["calibrated_pct"] = inline_calibrated(decider.get("estimate_pct"), dec_settings)
         decider["decision_pct"], decider["decision_n"] = decision_pct, decision_n
+        decider["correcting"] = turned and decision_n < settings["decision_min_readings"]
         instruction, alert, reason = inline_instruction(
             decision_pct, decision_n, settings, last_ack_instruction.strip() or None)
         instruction, turn, turn_basis, limit_reason = inline_turn(instruction, decision_pct, settings, ctx)
