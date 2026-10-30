@@ -67,7 +67,9 @@ page_seen = time.monotonic()
 # The destoner has a physical gauge, not a sensor, so this is the record of
 # what it was set to -- shown permanently so anyone passing can check the
 # gauge still agrees.
-ACK_CHOICES = ("adjusted", "clean_rejects", "set")
+# 'aq_notified' answers "Ne plus tourner la poignée : aviser l'AQ", where there
+# is no turn to confirm; it is not a turn, and the next run of turns starts afresh.
+ACK_CHOICES = ("adjusted", "clean_rejects", "set", "aq_notified")
 
 ack_lock = threading.Lock()
 

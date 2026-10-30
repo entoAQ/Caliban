@@ -4204,7 +4204,10 @@ def inline_instruction(decision_pct, n, settings, last_ack_instruction=None):
     instruction, alert = operator_instruction(decision_pct, settings)
     if alert:
         return instruction, True, "threshold"
-    if (instruction or "").startswith("increase") and (last_ack_instruction or "").startswith("increase"):
+    # With adaptive turns a second AUGMENTER is the plan, not a failure: AQ
+    # hears from inline_turn when the run of turns reaches its limit instead.
+    if ((instruction or "").startswith("increase") and (last_ack_instruction or "").startswith("increase")
+            and not settings["adaptive_turns"]):
         return instruction, True, "streak"
     return instruction, False, None
 
@@ -4558,7 +4561,7 @@ async def inline_state(request: Request, _: bool = Depends(verify_inline_key)):
     return {"ok": True}
 
 
-INLINE_ACK_CHOICES = ("adjusted", "clean_rejects", "set")
+INLINE_ACK_CHOICES = ("adjusted", "clean_rejects", "set", "aq_notified")
 
 
 @app.post("/inline/acks")

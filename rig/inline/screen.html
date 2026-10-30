@@ -208,6 +208,9 @@ const INSTRUCTIONS = {
   hold:            { title: 'AUCUN CHANGEMENT', sev: '', bg: '#064e3b', border: '#10b981', fg: '#ecfdf5' },
   decrease:        { title: 'DIMINUER', sev: '',        bg: '#eff6ff', border: '#3b82f6', fg: '#1e3a8a', arrow: '▼', actBg: '#2563eb', actFg: '#ffffff', turn: '2 cm dans le sens horaire' },
 };
+// A hold that is only "too few photos yet": nothing has been judged, so it must
+// not look like the green "in range" hold. Same instruction: leave the handle.
+const WAITING = { title: 'CALCUL DE LA MOYENNE', bg: '#1e3a5f', border: '#60a5fa', fg: '#eff6ff' };
 const STALE = { title: 'PAS DE LECTURE RÉCENTE', bg: '#334155', border: '#64748b', fg: '#f8fafc' };
 // Trial mode (Caliban's inline_settings.mode = 'shadow'): the reading is real
 // but not yet validated against tray samples and lab results, so nothing on
@@ -228,6 +231,7 @@ const ACK_LABELS = {
   adjusted: 'Réglage fait',
   clean_rejects: 'Rejets propres — aucun réglage',
   set: 'Réglé',
+  aq_notified: 'AQ avisée',
 };
 const valueText = (v, unit) => `${num(v)}${unit ? ' ' + unit : ''}`;
 
@@ -357,7 +361,10 @@ function render() {
   const stale = minsAgo(r.at) > STALE_MIN || !!idle;
   const trial = !stale && s.mode === 'shadow';
   const read = INSTRUCTIONS[shown.instruction];
-  const ins = idle ? { ...STALE, title: IDLE[idle].title } : stale ? STALE : trial ? TRIAL : (read || STALE);
+  const warming = r.decision_min && r.decision_n != null && r.decision_n < r.decision_min;
+  const waiting = shown.instruction === 'hold' && (warming || r.settle_left_s > 0);
+  const ins = idle ? { ...STALE, title: IDLE[idle].title } : stale ? STALE : trial ? TRIAL
+    : waiting ? WAITING : (read || STALE);
   const actionable = !stale && !trial && (isIncrease(shown.instruction) || shown.instruction === 'decrease');
   const act = actionable && !s.ack;
   setLook(act ? 'act' : (stale || idle) ? 'idle' : 'calm', ins);
@@ -365,7 +372,7 @@ function render() {
   const card = $('card');
   card.style.background = ins.bg; card.style.borderColor = ins.border; card.style.color = ins.fg;
   $('arrow').textContent = act ? (ins.arrow || '') : '';
-  $('title').textContent = (!act && actionable ? '✓ ' : !act && shown.instruction === 'hold' && !stale && !trial ? '✓ ' : '') + ins.title;
+  $('title').textContent = (!act && actionable ? '✓ ' : !act && shown.instruction === 'hold' && !waiting && !stale && !trial ? '✓ ' : '') + ins.title;
   // Caliban's labels carry their own % ("8-10%"); strip it and add one, so
   // a label without it still reads right.
   // Calibrated (Caliban inline_settings.calibration): the reading in
@@ -386,7 +393,6 @@ function render() {
     ? `Médiane ${r.decision_n} lectures : ${num(r.decision_pct)} %${r.calibrated_pct != null ? ' ME' : ''}` : '';
 
   let sub = '', steps = [];
-  const warming = r.decision_min && r.decision_n != null && r.decision_n < r.decision_min;
   if (idle) {
     sub = IDLE[idle].sub;
   } else if (stale) {
@@ -406,7 +412,7 @@ function render() {
       : r.turn_basis === 'decrease_pause'
       ? 'ME% bas, déjà diminué : attendre avant de diminuer encore. Vérifier visuellement les rejets.'
       : warming
-      ? `Vérification en cours : ${r.decision_n}/${r.decision_min} lectures depuis le démarrage ou le dernier réglage`
+      ? `Ne pas tourner la poignée : ${r.decision_n}/${r.decision_min} photos depuis le démarrage ou le dernier réglage`
       : 'Garder le réglage actuel du destoner';
   } else if (shown.instruction === 'decrease') {
     steps = ['Vérifier visuellement les rejets du destoner',
@@ -492,8 +498,13 @@ function renderActions(actionable, r, ack) {
   $('done').hidden = true;
 
   const buttons = [];
-  if (r.instruction === 'decrease') buttons.push({ choice: 'clean_rejects', label: ACK_LABELS.clean_rejects });
-  if (r.target) {
+  // At the run's limit there is no turn to confirm: "Réglage fait" here would
+  // record a turn nobody was asked for, and count towards the run.
+  if (r.turn_basis === 'limit') buttons.push({ choice: 'aq_notified', label: ACK_LABELS.aq_notified, primary: true });
+  else if (r.instruction === 'decrease') buttons.push({ choice: 'clean_rejects', label: ACK_LABELS.clean_rejects });
+  if (r.turn_basis === 'limit') {
+    // Only the button above.
+  } else if (r.target) {
     buttons.push({ choice: 'set', primary: true,
                    label: `Réglé à ${valueText(r.target.value, r.target.unit)} — confirmer` });
   } else {

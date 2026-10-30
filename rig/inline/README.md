@@ -76,7 +76,12 @@ row until ME% has been back at 4 % -- turning clockwise does not show in ME%,
 and the handle has an end. With `quarter_turns.sql` (from 2026-10-24) the turns
 are quarter turns of the crank instead of cm: a quarter turn from 6 %, a half
 turn from 10 %, a quarter turn clockwise under 4 %; whole quarters only, never
-more than one full turn at a time, two full turns in a row at most. When the instruction names
+more than one full turn at a time, two full turns in a row at most. With
+`quarter_adaptive.sql` (2026-10-30, instead of `quarter_turns.sql` and
+`adaptive_turns.sql`) the turns stay in quarters, never more than a half turn at
+a time, with the 5-minute wait, the DIMINUER limits and the sizing above; the
+"aviser l'AQ" screen is answered by "AQ avisée", not "Réglage fait", which
+restarts the run of turns. When the instruction names
 a value ("Régler le destoner à 4,2 psi"), the operator sets it by the
 destoner's own gauge and confirms; that value then stays in the "Réglage
 destoner" bar at the top until the next one, so anyone passing can check the
