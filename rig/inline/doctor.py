@@ -19,9 +19,9 @@ Two ways in, one set of checks and fixes:
                            Caméra/Flash/Réseau chips opens it, and the
                            destoner screen falls back to it on its own when
                            screen.py stops answering.
-    From a desk            every minute this posts its checks to Caliban
-                           (/inline/doctor/report) and runs whatever repair
-                           SGSC's diagnostic page queued for it in reply.
+    From a desk            every minute this posts its checks (REPORT_API)
+                           and runs whatever repair SGSC's diagnostic page
+                           queued for it in reply.
                            Outbound only, like loop.py: nothing calls in.
 
 It is its own service (caliban-doctor), separate from screen.py and loop.py,
@@ -33,11 +33,12 @@ Only the fixes named in FIXES can run, from either side, and none of them
 edits a setting or a key. Root is reached through the scoped sudo rules in
 caliban-doctor.sudoers, never by running this as root.
 
-    python3 doctor.py              # serve the page and report to Caliban
+    python3 doctor.py              # serve the page and report
     python3 doctor.py check        # print every check once (SSH / Pi Connect)
     python3 doctor.py fix ACTION   # run one fix by name, e.g. restart_loop
 """
 
+import io
 import json
 import os
 import shutil
@@ -81,7 +82,12 @@ LOG_UNITS_TRAY = ["caliban-rig", "caliban-doctor", "caliban-rig-update", "caliba
 LOG_LINES = 300
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
-# Which rig this is. Each reports with its own key, and Caliban tells them
+# Where reports go. DOCTOR_URL is sgsc-app's rig-doctor Edge Function, which has
+# the same /report, /ping and /attachment as Caliban's /doctor routes. Without
+# that line in the env file the rig reports to Caliban as it always did.
+DOCTOR_URL = os.environ.get("DOCTOR_URL", "").rstrip("/")
+REPORT_API = DOCTOR_URL or (f"{CALIBAN_URL}/doctor" if CALIBAN_URL else "")
+# Which rig this is. Each reports with its own key, and the server tells them
 # apart by the key, never by anything the rig says about itself.
 DEVICE = os.environ.get("DOCTOR_DEVICE", "ariel")
 TRAY = DEVICE == "prosperos"
@@ -306,7 +312,39 @@ def check_wifi(full):
     return check("wifi", "Wi-Fi", "ok", f"Connecté à « {up[0][2]} ».")
 
 
+# Not 0: the monotonic clock starts at boot, so a Pi up for under two minutes
+# would take that for a recent answer of "nothing".
+last_answer = (float("-inf"), None)
+
+
+def function_status():
+    """(HTTP status or None, body) of the report function, from the last report
+    when that is recent. Every call to it counts against the project's monthly
+    allowance, and this runs for each report and each time the page refreshes
+    (every 10 s on the touchscreen), so the report already being sent every
+    minute answers the question."""
+    global last_answer
+    at, status = last_answer
+    if time.monotonic() - at < 2 * REPORT_EVERY_S:
+        return status
+    status = http_get(f"{REPORT_API}/ping", timeout=20, headers={"X-API-Key": API_KEY})[0]
+    last_answer = (time.monotonic(), status)
+    return status
+
+
 def check_caliban(full):
+    # Ariel's readings still go to Caliban after its reports have moved, so it
+    # keeps watching Caliban until CALIBAN_URL comes out of its env file. The
+    # tray rig has no other use for Caliban.
+    if DOCTOR_URL and (TRAY or not CALIBAN_URL):
+        status = function_status()
+        if status is None:
+            return check("caliban", "Nuage (Supabase)", "fail", "Le nuage ne répond pas.",
+                         manual="Si le Wi-Fi est bon, la panne est dans le nuage, pas ici : prévenir l'AQ.")
+        if status >= 500:
+            return check("caliban", "Nuage (Supabase)", "fail", f"Le nuage répond en erreur ({status}).",
+                         manual="La panne est dans le nuage, pas ici : prévenir l'AQ.")
+        return check("caliban", "Nuage (Supabase)", "ok", "Répond.")
     if not CALIBAN_URL:
         return check("caliban", "Prospero (nuage)", "fail", "Adresse de Prospero absente sur ce Pi.",
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
@@ -325,12 +363,15 @@ def check_key(full):
     if not API_KEY:
         return check("key", "Clé d'accès", "fail", "Clé absente sur ce Pi.",
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
-    status, body = http_get(f"{CALIBAN_URL}/doctor/ping", timeout=20, headers={"X-API-Key": API_KEY})
+    if DOCTOR_URL:
+        status = function_status()
+    else:
+        status = http_get(f"{CALIBAN_URL}/doctor/ping", timeout=20, headers={"X-API-Key": API_KEY})[0]
     if status is None:
-        return check("key", "Clé d'accès", "off", "Non vérifiable sans Prospero.")
+        return check("key", "Clé d'accès", "off", "Non vérifiable sans le nuage.")
     if status == 401:
-        return check("key", "Clé d'accès", "fail", "Prospero refuse la clé de ce Pi.",
-                     manual="La clé a changé dans Azure : prévenir l'AQ.")
+        return check("key", "Clé d'accès", "fail", "Le nuage refuse la clé de ce Pi.",
+                     manual="La clé a changé : prévenir l'AQ.")
     if status != 200:
         return check("key", "Clé d'accès", "off", f"Non vérifiable ({status}).")
     return check("key", "Clé d'accès", "ok", "Acceptée.")
@@ -1003,7 +1044,7 @@ if TRAY:
 # the code update restarts this process from under the rest of the run.
 NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code",
                      "test_photo", "check_camera", "send_logs", "rollback_code"}
-# These end this process: say "started" to Caliban before running them.
+# These end this process: say "started" to the server before running them.
 ENDS_PROCESS = {"reboot", "update_code", "rollback_code"}
 
 
@@ -1053,20 +1094,40 @@ def apply_fix(name):
         fix_lock.release()
 
 
-# --- Remote: report to Caliban, run what SGSC queued ---------------------------
+# --- Remote: report, run what SGSC queued ---------------------------------------
 
 pending_results = []
 results_lock = threading.Lock()
 
+ATTACHMENT_MAX_EDGE = 2048
+ATTACHMENT_QUALITY = 90
+
+
+def attachment_bytes(path):
+    """The photo reduced as Storage keeps them. An Edge Function can't do this:
+    it has about 2 s of CPU. Pillow is imported only here, so a broken one costs
+    a larger photo rather than the doctor, and 12 MP still fits the upload limit."""
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img.thumbnail((ATTACHMENT_MAX_EDGE, ATTACHMENT_MAX_EDGE), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=ATTACHMENT_QUALITY)
+        return buf.getvalue()
+    except Exception as e:
+        log(f"photo sent as taken: {type(e).__name__}: {e}")
+        return data
+
 
 def upload_attachment(cid, path):
-    """Send a repair's photo to Caliban, which files it against the request."""
+    """Send a repair's photo, which the server files against the request."""
     try:
-        with open(path, "rb") as f:
-            data = f.read()
+        data = attachment_bytes(path)
     except OSError as e:
         return f"photo introuvable : {e}"
-    req = urllib.request.Request(f"{CALIBAN_URL}/doctor/attachment?command_id={int(cid)}",
+    req = urllib.request.Request(f"{REPORT_API}/attachment?command_id={int(cid)}",
                                  data=data, method="POST",
                                  headers={"Content-Type": "image/jpeg", "X-API-Key": API_KEY})
     try:
@@ -1077,13 +1138,15 @@ def upload_attachment(cid, path):
 
 
 def report_once():
+    global last_answer
     report = settled(run_checks(full=False))
     note_good_version(report)
     with results_lock:
         results, pending_results[:] = list(pending_results), []
-    status, body = http_post_json(f"{CALIBAN_URL}/doctor/report",
+    status, body = http_post_json(f"{REPORT_API}/report",
                                   {"report": report, "results": results},
                                   headers={"X-API-Key": API_KEY})
+    last_answer = (time.monotonic(), status)
     if status != 200 or not isinstance(body, dict):
         with results_lock:
             pending_results[:0] = results     # try them again next time
@@ -1092,8 +1155,8 @@ def report_once():
 
 
 def reporter():
-    if not CALIBAN_URL or not API_KEY:
-        log("no CALIBAN_URL / API_KEY: not reporting to Caliban")
+    if not REPORT_API or not API_KEY:
+        log("no DOCTOR_URL or CALIBAN_URL, or no API_KEY: not reporting")
         return
     try:
         with open(INFLIGHT_FILE) as f:
@@ -1225,7 +1288,7 @@ def main():
         sys.exit(__doc__)
 
     threading.Thread(target=reporter, daemon=True).start()
-    log(f"doctor ({DEVICE}) on http://127.0.0.1:{PORT}/ -> reporting to {CALIBAN_URL or '(nowhere)'}")
+    log(f"doctor ({DEVICE}) on http://127.0.0.1:{PORT}/ -> reporting to {REPORT_API or '(nowhere)'}")
     Server(("127.0.0.1", PORT), Handler).serve_forever()
 
 
