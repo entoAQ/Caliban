@@ -17,6 +17,9 @@ Setup (see README.md):
         INLINE_API_KEY=...                 # must match Caliban's INLINE_API_KEY
         INLINE_FAKE_PHOTO=/path/to.jpg     # optional: send this file instead of
                                            # using the camera, to test the chain
+        ARIEL_RIG_DB_URL=postgresql://...  # optional: decide.py works each reading
+                                           # out here too and compares (shadow);
+                                           # needs python3-psycopg2
 
 The photo itself is flashcam.py: a long exposure with the flash fired while
 every row of the rolling shutter is exposing, checked for "lit" and "lit
@@ -34,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+import decide
 import flashcam
 import screen
 
@@ -316,6 +320,7 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
         run_cm, run = ack_runs(acks, state.get("history"), below, "cm")
         run_qt, _ = ack_runs(acks, state.get("history"), below, "quarter")
         data["increase_run_cm"], data["increase_run_qt"], data["decrease_run"] = str(run_cm), str(run_qt), str(run)
+    shadow = decide.shadow_before(data, paths, log) if decide.DB_URL else None
     handles = [open(p, "rb") for p in paths]
     try:
         files = [("file" if i == 0 else "more", (os.path.basename(p), h, "image/jpeg"))
@@ -331,12 +336,16 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
         for h in handles:
             h.close()
     if resp.ok:
-        return resp.json(), None
-    try:
-        detail = resp.json().get("detail")
-    except ValueError:
-        detail = resp.text[:200]
-    return None, f"{resp.status_code}: {detail}"
+        reply, error = resp.json(), None
+    else:
+        try:
+            detail = resp.json().get("detail")
+        except ValueError:
+            detail = resp.text[:200]
+        reply, error = None, f"{resp.status_code}: {detail}"
+    if shadow:
+        decide.shadow_after(shadow, reading_id, reply, error, state if state is not None else {}, log)
+    return reply, error
 
 
 def forward_acks():
