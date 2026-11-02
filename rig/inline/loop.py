@@ -20,6 +20,10 @@ Setup (see README.md):
         ARIEL_RIG_DB_URL=postgresql://...  # optional: decide.py works each reading
                                            # out here too and compares (shadow);
                                            # needs python3-psycopg2
+        ARIEL_DECIDES=1                    # with ARIEL_RIG_DB_URL: the switch. The
+                                           # Pi decides and records each reading
+                                           # itself, and Caliban is no longer asked
+                                           # anything (CALIBAN_URL can then go)
 
 The photo itself is flashcam.py: a long exposure with the flash fired while
 every row of the rolling shutter is exposing, checked for "lit" and "lit
@@ -320,6 +324,16 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
         run_cm, run = ack_runs(acks, state.get("history"), below, "cm")
         run_qt, _ = ack_runs(acks, state.get("history"), below, "quarter")
         data["increase_run_cm"], data["increase_run_qt"], data["decrease_run"] = str(run_cm), str(run_qt), str(run)
+    if decide.DECIDES:
+        try:
+            return decide.record(data, paths, INLINE_API_KEY, log), None
+        except decide.Refused as e:
+            return None, f"{e.status}: {e.detail}"
+        except Exception as e:
+            if decide.unreachable(e):
+                # Shown as no connection, exactly as Caliban out of reach was.
+                raise requests.ConnectionError(f"database: {type(e).__name__}: {e}") from e
+            raise
     shadow = decide.shadow_before(data, paths, log) if decide.DB_URL else None
     handles = [open(p, "rb") for p in paths]
     try:
@@ -369,7 +383,9 @@ def forward_acks():
             batch.append(json.loads(l))
         except ValueError:
             log(f"skipping unreadable confirmation line: {l[:80]}")
-    if batch:
+    if batch and decide.DECIDES:
+        decide.record_acks(batch)
+    elif batch:
         resp = requests.post(f"{CALIBAN_URL}/inline/acks", headers=headers(),
                              json=batch, timeout=30)
         resp.raise_for_status()
@@ -402,14 +418,17 @@ def mirror_state(state):
     if sig == _mirror["sig"] and time.monotonic() - _mirror["at"] < MIRROR_EVERY_S:
         return
     try:
-        resp = requests.post(f"{CALIBAN_URL}/inline/state", headers=headers(),
-                             json={**payload, "device": "ariel"}, timeout=15)
-        resp.raise_for_status()
+        if decide.DECIDES:
+            decide.set_status(payload)
+        else:
+            resp = requests.post(f"{CALIBAN_URL}/inline/state", headers=headers(),
+                                 json={**payload, "device": "ariel"}, timeout=15)
+            resp.raise_for_status()
         _mirror.update(sig=sig, at=time.monotonic())
         if _mirror["failing"]:
-            log("mirror state reaching Caliban again")
+            log("mirror state sent again")
         _mirror["failing"] = False
-    except requests.RequestException as e:
+    except Exception as e:
         if not _mirror["failing"]:
             log(f"mirror state not sent: {type(e).__name__}: {e}")
         _mirror["failing"] = True
@@ -600,8 +619,10 @@ def take_reading(state):
     try:
         reply, error = request_reading(reading_id, paths, covers, det, state)
     except requests.RequestException as e:
-        log(f"Caliban unreachable for {reading_id}: {type(e).__name__}: {e}")
-        set_health(state, network="down", message="Pas de connexion à Caliban — lecture non analysée")
+        log(f"{'database' if decide.DECIDES else 'Caliban'} unreachable for {reading_id}: {type(e).__name__}: {e}")
+        set_health(state, network="down",
+                   message="Pas de connexion au nuage — lecture non analysée" if decide.DECIDES
+                   else "Pas de connexion à Caliban — lecture non analysée")
         # Sooner than a full interval: the network usually comes back quickly,
         # and every skipped reading is a gap on the screen.
         return min(interval, 60)
@@ -686,11 +707,17 @@ def take_reading(state):
 
 
 def main():
-    if not CALIBAN_URL or not INLINE_API_KEY:
-        sys.exit("CALIBAN_URL and INLINE_API_KEY must both be set.")
-    log(f"inline loop -> {CALIBAN_URL}" + (f"  (fake photo {FAKE_PHOTO})" if FAKE_PHOTO else ""))
+    if decide.DECIDES and not decide.DB_URL:
+        sys.exit("ARIEL_DECIDES=1 needs ARIEL_RIG_DB_URL as well.")
+    if not INLINE_API_KEY or not (CALIBAN_URL or decide.DECIDES):
+        sys.exit("INLINE_API_KEY must be set, and CALIBAN_URL unless ARIEL_DECIDES=1.")
+    target = "decides here (ARIEL_DECIDES=1)" if decide.DECIDES else CALIBAN_URL
+    log(f"inline loop -> {target}" + (f"  (fake photo {FAKE_PHOTO})" if FAKE_PHOTO else ""))
 
     state = load_state()
+    if decide.DECIDES:
+        # Nothing to compare with any more; the last tally would only go stale.
+        state.pop("decide_shadow", None)
     # A "low" left in the state file from before FLASH_LOW_WARN was turned off
     # would otherwise stay on the screen until a usable level came in.
     if not FLASH_LOW_WARN and state.get("health", {}).get("flash") == "low":
@@ -709,7 +736,7 @@ def main():
                 save_state(state)
             try:
                 forward_acks()
-            except requests.RequestException as e:
+            except Exception as e:
                 # Kept in the file; the next tick tries again.
                 log(f"confirmations not forwarded yet: {type(e).__name__}: {e}")
             mirror_state(state)

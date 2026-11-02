@@ -13,6 +13,13 @@ decides and records everything. The login can only read (sgsc-app
 database/2026-11-01-ariel-rig-role.sql), so shadow can't touch production data.
 The tally lands in the state mirrored to inline_rig_status, as "decide_shadow".
 
+The switch: with ARIEL_DECIDES=1 as well, loop.py stops asking Caliban. record()
+decides here, sends the photos to SGSC's rig-upload function and records the
+reading through ariel_record_reading(); confirmations and the mirrored screen go
+through ariel_record_acks() and ariel_set_status() (sgsc-app
+database/2026-11-02-ariel-rig-writes.sql). Those functions are all the login may
+write, so a stolen Pi can add Ariel readings and nothing else.
+
 Not carried over: the vision prompts (decider "ai", ai_fallback), which Ariel has
 not used since 2026-10-18, and the two-prompt rule with its Teams streak, which
 only they could reach. A decider other than "yolo" is refused, so settings that
@@ -33,6 +40,10 @@ import time
 from decimal import Decimal
 
 DB_URL = os.environ.get("ARIEL_RIG_DB_URL", "")
+DECIDES = os.environ.get("ARIEL_DECIDES", "").strip() == "1"
+UPLOAD_URL = os.environ.get("RIG_UPLOAD_URL",
+                            "https://pzjsxzgojucqaippctjy.supabase.co/functions/v1/rig-upload")
+UPLOAD_TIMEOUT = 30
 
 _conn = None
 
@@ -1257,6 +1268,81 @@ def decide(data, paths):
         "mesures": mesures,
     }
     return _inline_response(reading_id, decider, settings), row
+
+
+# --- The switch: the Pi records what it decided (ARIEL_DECIDES=1) ---------------
+
+
+def unreachable(e):
+    """True when the database could not be reached or answered too slowly, as
+    opposed to a fault in this code: loop.py shows the first as no connection."""
+    try:
+        import psycopg2
+    except ImportError:
+        return False
+    return isinstance(e, (psycopg2.OperationalError, psycopg2.InterfaceError))
+
+
+def upload_photos(reading_id, paths, api_key, log):
+    """Each photo's review copy to rig-upload, where Caliban stored them:
+    inline/<id>.jpg, then inline/<id>-2.jpg and so on. Returns the stored path
+    of each, None where it failed; a failed photo costs its copy, never the
+    reading, as in Caliban."""
+    import requests
+    stored = []
+    for k, p in enumerate(paths, start=1):
+        params = {"reading_id": reading_id, **({"k": str(k)} if k > 1 else {})}
+        try:
+            with open(p, "rb") as f:
+                body = review_copy(f.read())
+            resp = requests.post(UPLOAD_URL, params=params, data=body, timeout=UPLOAD_TIMEOUT,
+                                 headers={"X-API-Key": api_key, "Content-Type": "image/jpeg"})
+            resp.raise_for_status()
+            stored.append(resp.json()["path"])
+        except Exception as e:
+            log(f"[inline photo upload failed] {reading_id}-{k}: {type(e).__name__}: {e}")
+            stored.append(None)
+    return stored
+
+
+def record(data, paths, api_key, log):
+    """What Caliban's /inline/readings did, here: decide, store the photos, record
+    the reading. Returns the reply. Raises Refused like decide(), and a database
+    error when it can't be reached (see unreachable)."""
+    # First, because the settings lookup swallows a lost connection and falls
+    # back to defaults, which decide() refuses as unreadable settings: right for
+    # the shadow, but here the screen must say "no connection", as it did when
+    # Caliban was out of reach.
+    _query("select 1 as up")
+    reply, row = decide(data, paths)
+    if row is None:
+        # Already recorded: a retry of a reading whose answer was lost.
+        return reply
+    stored = upload_photos(data["reading_id"], paths, api_key, log)
+    row["storage_path"] = stored[0]
+    # As Caliban: only the photos that were stored, and only for a burst.
+    group = [p for p in stored if p]
+    if len(group) > 1:
+        row["mesures"]["groupe"] = group
+    else:
+        row["mesures"].pop("groupe", None)
+    try:
+        reply["recorded_id"] = str(_query("select public.ariel_record_reading(%s::jsonb) as id",
+                                          (json.dumps(row, default=str),))[0]["id"])
+    except Exception as e:
+        # Caliban showed the instruction even when recording failed; so does this.
+        log(f"[inline recording failed] {data['reading_id']}: {type(e).__name__}: {e}")
+    return reply
+
+
+def record_acks(batch):
+    """Operator confirmations; a repeat of one already recorded is ignored."""
+    return _query("select public.ariel_record_acks(%s::jsonb) as n", (json.dumps(batch),))[0]["n"]
+
+
+def set_status(payload):
+    """The screen's state, for SGSC's mirror (destoner-mirror.html)."""
+    _query("select public.ariel_set_status(%s::jsonb) as done", (json.dumps(payload, default=str),))
 
 
 # --- Shadow: beside Caliban, compared on every reading -------------------------
