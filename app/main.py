@@ -2470,8 +2470,15 @@ INLINE_READING_ID = re.compile(r"^IL-\d{8}-\d{6}$")
 #                 reading, so the cadence changes without touching the Pi.
 # interval_s      seconds between readings during a correction only: from a
 #                 confirmed turn until its first decision (next_reading_s). At
-#                 least 20, so the camera and the flash have finished a cycle.
-#                 0 = interval_min throughout.
+#                 least 10, so the camera, the detector and the flash have
+#                 finished a cycle (about 5 s on Ariel). 0 = interval_min
+#                 throughout.
+# interval_always interval_s all the time, not only during a correction. For
+#                 the 15 s trial (2026-11-07, rig/inline/fifteen_seconds.sql):
+#                 photos 30 s apart were as good as independent (detrended
+#                 correlation 0.13, 60 s 0.10) and halved a window's noise
+#                 variance against 60 s at the same ME% level; the trial finds
+#                 how much closer spacing still adds.
 # variant, high_variant, low_variant, repeats, escalate_repeats
 #                 as in operator_settings(), for when the chute needs prompts of
 #                 its own -- it will: every current prompt describes a dish.
@@ -2483,6 +2490,7 @@ INLINE_DEFAULTS = {
     "mode": "shadow",
     "interval_min": 5,
     "interval_s": 0,
+    "interval_always": False,
     "alert_consecutive_increase": 3,
     # How an instruction is decided (inline_decision). With a reading a minute,
     # one photo is too noisy to act on: the instruction comes from the median
@@ -2625,6 +2633,7 @@ def inline_settings():
             except (KeyError, TypeError, ValueError):
                 pass
         for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask", "decision_drop_one",
+                    "interval_always",
                     "exclude_strip"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
@@ -2676,7 +2685,7 @@ def inline_settings():
     settings["repeats"] = max(1, min(8, settings["repeats"]))
     settings["escalate_repeats"] = max(settings["repeats"], min(8, settings["escalate_repeats"]))
     settings["interval_min"] = max(1, min(60, settings["interval_min"]))
-    settings["interval_s"] = max(20, min(3600, settings["interval_s"])) if settings["interval_s"] > 0 else 0
+    settings["interval_s"] = max(10, min(3600, settings["interval_s"])) if settings["interval_s"] > 0 else 0
     settings["alert_consecutive_increase"] = max(0, min(10, settings["alert_consecutive_increase"]))
     return settings
 
@@ -2779,8 +2788,9 @@ def inline_turn(instruction, decision_pct, settings, ctx):
 def next_reading_s(settings, correcting):
     """Seconds to the next reading: interval_s while a turn's first decision is
     still being gathered, so the operator is not left waiting, and interval_min
-    the rest of the time, so the flash does not fire twice as often all day."""
-    if correcting and settings["interval_s"]:
+    the rest of the time, so the flash does not fire twice as often all day --
+    unless interval_always, which keeps interval_s throughout."""
+    if (correcting or settings["interval_always"]) and settings["interval_s"]:
         return settings["interval_s"]
     return settings["interval_min"] * 60
 

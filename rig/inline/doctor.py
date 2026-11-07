@@ -510,7 +510,25 @@ def check_flash(full):
                      manual="1. Appuyer sur un bouton du flash pour le réveiller. "
                             "2. S'il ne s'allume pas : changer les piles. 3. Puis « Tester le flash ».")
     last = age_s(state.get("last_flash_at"))
-    return check("flash", "Flash", "ok", f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK.")
+    text = f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK."
+    return check("flash", "Flash", "ok", text + flash_counts(state))
+
+
+def flash_counts(state):
+    """Today's firings and the lifetime total from loop.count_flash, as a
+    sentence to add to the flash check, or "" before the loop has counted any."""
+    days, total = state.get("flash_days") or [], state.get("flash_total") or {}
+    if not total.get("flashes"):
+        return ""
+    out = f" {total['flashes']:,} éclairs depuis le {str(total.get('since', ''))[:10]}".replace(",", " ")
+    today = days[-1] if days else {}
+    if today.get("d") == datetime.now().date().isoformat():
+        out += f", dont {today.get('flashes', 0)} aujourd'hui"
+        bad = today.get("failed", 0) + today.get("retries", 0)
+        if bad:
+            out += f" ({today.get('retries', 0)} reprises, {today.get('failed', 0)} ratés)"
+    return out + "."
+
 
 
 # Seconds per burst above which the detector is called slow: a burst of 8
@@ -892,6 +910,7 @@ def fix_send_logs():
         state = load_state()
         state.pop("history", None)
         state.pop("flash_levels", None)
+        state["flash_days"] = (state.get("flash_days") or [])[-3:]
         about = (f"== État de l'écran (inline_state.json)\n"
                  f"{json.dumps(state, ensure_ascii=False, indent=1)[:4000]}")
     text = f"== Version\n{head}\n\n{about}\n\n== Journal, {LOG_LINES} dernières lignes\n{out}"

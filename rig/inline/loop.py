@@ -142,20 +142,82 @@ class watchdog:
 AMBIENT_SHARE_WARN = 0.35
 
 
-def take_photo(reading_id):
+def take_photo(reading_id, state=None):
     """A flash-lit photo of the chute -> (path, what flashcam measured).
     Raises flashcam.FlashNotFired / FlashTiming when the flash did not light
-    it properly."""
+    it properly. With state, every firing is counted (count_flash)."""
     os.makedirs(CAPTURE_DIR, exist_ok=True)
     path = os.path.join(CAPTURE_DIR, f"{reading_id}.jpg")
     if FAKE_PHOTO:
         shutil.copyfile(FAKE_PHOTO, path)
         return path, {}
-    with watchdog():
-        measured = flashcam.capture(path, log=log)
+    settings = flashcam.load_settings()
+    try:
+        with watchdog():
+            measured = flashcam.capture(path, settings, log=log)
+    except (flashcam.FlashNotFired, flashcam.FlashTiming) as e:
+        if state is not None:
+            count_flash(state, settings["attempts"], None, lit=isinstance(e, flashcam.FlashTiming))
+        raise
+    if state is not None:
+        count_flash(state, measured.get("attempts", 1), measured)
     if measured.get("attempts", 1) > 1:
         log(f"{reading_id}: needed {measured['attempts']} flash attempts")
     return path, measured
+
+
+# Flash health over its life. The TT520III has no published lifetime, and from
+# 2026-11-07 it may fire every 15 s instead of every minute (at 1/128 the tube
+# itself barely wears; the charging circuit and capacitor are the unknowns). So
+# every firing is counted, and each day keeps what ageing would move: firings,
+# photos, retries (a photo that took more than one firing), failures (none of
+# the attempts lit it), uneven (it lit, but never a whole frame: the timing, or
+# a keep-alive over the empty chute), and the average flash gain (photo brightness minus room
+# light) with the average flash_level and product share beside it -- the gain
+# also moves with what is in the chute, so read it against those. A slow fall
+# in gain, or retries climbing, is the warning, weeks before it stops.
+# Kept in the state file, so mirrored with it to inline_rig_status.
+FLASH_DAYS_KEPT = 60
+
+
+def count_flash(state, firings, measured, keepalive=False, lit=False):
+    """Add one capture's firings to today's tally and the lifetime total.
+    measured: what flashcam.capture returned, None when no photo came of it;
+    lit then says whether the flash fired at all (FlashTiming) or not."""
+    today = datetime.now().date().isoformat()
+    days = state.setdefault("flash_days", [])
+    if not days or days[-1].get("d") != today:
+        days.append({"d": today, "flashes": 0, "photos": 0, "retries": 0, "failed": 0, "uneven": 0,
+                     "keepalive": 0})
+        del days[:-FLASH_DAYS_KEPT]
+    day = days[-1]
+    total = state.setdefault("flash_total", {"since": iso(now_utc()), "flashes": 0})
+    firings = max(1, int(firings or 1))
+    day["flashes"] += firings
+    total["flashes"] += firings
+    if keepalive:
+        day["keepalive"] += 1
+    if measured is None:
+        day["uneven" if lit else "failed"] += 1
+        return
+    day["photos"] += 1
+    if firings > 1:
+        day["retries"] += 1
+
+    def average(key, value):
+        if not isinstance(value, (int, float)):
+            return
+        n = day.get(key + "_n", 0) + 1
+        day[key + "_n"] = n
+        day[key] = round(day.get(key, 0.0) + (value - day.get(key, 0.0)) / n, 3)
+
+    if not keepalive:
+        # Over product only: a keep-alive over the empty chute is far darker.
+        mean, ambient = measured.get("mean"), measured.get("ambient")
+        if isinstance(mean, (int, float)) and isinstance(ambient, (int, float)):
+            average("gain", mean - ambient)
+        average("product", measured.get("product"))
+    average("level", measured.get("flash_level"))
 
 
 # Flash strength (flashcam.flash_level: against the empty-chute reference,
@@ -468,9 +530,14 @@ def line_running(state, cam_settings):
         last = state.get("last_flash_at")
         if not last or (now_utc() - datetime.fromisoformat(last)).total_seconds() >= cam_settings["keepalive_s"]:
             try:
-                with watchdog():
-                    m = flashcam.capture(os.path.join(CAPTURE_DIR, "KEEPALIVE.jpg"),
-                                         dict(cam_settings, attempts=2), log=log)
+                try:
+                    with watchdog():
+                        m = flashcam.capture(os.path.join(CAPTURE_DIR, "KEEPALIVE.jpg"),
+                                             dict(cam_settings, attempts=2), log=log)
+                except (flashcam.FlashNotFired, flashcam.FlashTiming) as e:
+                    count_flash(state, 2, None, keepalive=True, lit=isinstance(e, flashcam.FlashTiming))
+                    raise
+                count_flash(state, m.get("attempts", 1), m, keepalive=True)
                 state["last_flash_at"] = iso(now_utc())
                 log(f"keep-alive flash (flash level {m.get('flash_level')})")
                 judge_flash(state, m.get("flash_level"))
@@ -511,7 +578,7 @@ def take_reading(state):
         return IDLE_RECHECK_S
 
     try:
-        path, measured = take_photo(reading_id)
+        path, measured = take_photo(reading_id, state)
     except flashcam.FlashNotFired as e:
         log(f"no flash for {reading_id}: {e}")
         set_health(state, camera="ok", flash="fail",
@@ -585,7 +652,7 @@ def take_reading(state):
         k += 1
         time.sleep(int(state.get("group_spacing_s") or 12))
         try:
-            p, m_k = take_photo(f"{reading_id}-{k}")
+            p, m_k = take_photo(f"{reading_id}-{k}", state)
         except Exception as e:
             log(f"{reading_id}-{k}: burst photo failed: {type(e).__name__}: {e}")
             continue
