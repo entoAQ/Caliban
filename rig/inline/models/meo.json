@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "meo-nodust-20261026",
+    "version":  "meo-nodust-20261107",
     "arch":  "yolox-tiny",
     "license":  "Apache-2.0 (YOLOX)",
-    "trained_on_tiles":  1471,
-    "yolo_scale_fitted":  2.583,
-    "yolo_scale_dust_fitted":  2.198,
-    "yolo_scale_strip_fitted":  2.534
+    "trained_on_tiles":  2009,
+    "yolo_scale_fitted":  2.483,
+    "yolo_scale_dust_fitted":  2.007,
+    "yolo_scale_strip_fitted":  2.385
 }
