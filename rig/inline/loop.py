@@ -61,7 +61,7 @@ CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
-HISTORY_KEEP = 300         # the screen's two-hour trend at a reading every 30 s
+HISTORY_KEEP = 600         # the screen's two-hour trend at a reading every 15 s, with margin
 # A capture is a few seconds; with every flash retry used (6 tries, 10 s
 # apart, flashcam.DEFAULTS) about 65 s. Past this, libcamera has wedged inside
 # this process and nothing here can free it -- see watchdog.

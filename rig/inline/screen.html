@@ -543,8 +543,9 @@ async function sendAck(readingId, choice) {
 // Recent readings against the two lines the instruction is decided on (from
 // Caliban, inline_settings: below decrease_below the destoner comes down, from
 // increase_at it goes up). Values, not bands, so a drift towards a line shows
-// before it crosses it. Dots are single photos; the line is the median the
-// instruction is actually decided on (Caliban inline_decision).
+// before it crosses it. Dots are the median of each minute's photos; the line
+// is the value the instruction is actually decided on (Caliban inline_decision,
+// or the pooled window).
 //
 // On a clock, not one slot per reading: a stretch with no readings (line
 // stopped, empty chute, no network) shows as a shaded gap with the line broken
@@ -600,10 +601,23 @@ function renderTrend(history, thresholds) {
   }
 
   if (pts.length) {
-    // Single photos first, small, coloured by the instruction of their time.
+    // One dot per clock minute first: the median of that minute's photos (4 at
+    // a photo every 15 s), coloured by the minute's latest instruction. Single
+    // photos at 15 s were ~480 dots in two hours, mostly noise; a median, not a
+    // mean, so one stray photo cannot move the minute. At a minute or more
+    // apart this is the photo itself, as before.
+    const minutes = new Map();
     for (const p of pts) {
-      const c = (INSTRUCTIONS[p.instruction] || {}).border || '#94a3b8';
-      out += `<circle cx="${x(p.t)}" cy="${y(p.estimate_pct)}" r="4" fill="${c}" opacity=".8"/>`;
+      const k = Math.floor(p.t / 60000);
+      if (!minutes.has(k)) minutes.set(k, []);
+      minutes.get(k).push(p);
+    }
+    for (const ps of minutes.values()) {
+      const v = ps.map(p => p.estimate_pct).sort((a, b) => a - b), m = v.length >> 1;
+      const med = v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+      const t = ps.reduce((s, p) => s + p.t, 0) / ps.length;
+      const c = (INSTRUCTIONS[ps[ps.length - 1].instruction] || {}).border || '#94a3b8';
+      out += `<circle cx="${x(t)}" cy="${y(med)}" r="4" fill="${c}" opacity=".8"/>`;
     }
     // Then the decision value (median or window average) over them, one polyline per run of readings
     // with no gap between them. Readings from before the median existed fall
