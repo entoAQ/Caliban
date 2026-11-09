@@ -2,8 +2,8 @@
 
 Overhead camera rig for the filled-dish MEO method. A Raspberry Pi 5 with a
 Camera Module 3 on a fixed boom, photographing a levelled dish of
-larvae. Photos go to Caliban for a band estimate, triggered from the
-**Estimation banc** button on the SGSC results entry panel.
+larvae, triggered from the SGSC capture button. The photos land in Supabase
+Storage; a band estimate from them is a Dépistage test, run from the page.
 
 Everything on the camera is locked — exposure, gain, white balance, focus,
 crop. That is the whole point. The old webcam ran on auto through the browser,
@@ -160,8 +160,9 @@ sudo systemctl enable --now caliban-rig-netwatch.timer
 journalctl -u caliban-rig-netwatch -f     # silent while online
 ```
 
-Every minute it checks whether Caliban (or failing that, the internet)
-answers. Offline for 5 minutes, it cycles the Wi-Fi radio once; offline for
+Every minute it checks whether the internet answers
+(`https://www.google.com/generate_204`, or `CALIBAN_URL/health` first while
+that line is still in the env file). Offline for 5 minutes, it cycles the Wi-Fi radio once; offline for
 15, it reboots, at most once an hour. Added after 2026-09-30, when the Pi
 stayed off the network for over an hour after the plant Wi-Fi came back and
 only a reboot on site fixed it.
@@ -289,9 +290,10 @@ sudo systemctl start caliban-rig
 `/etc/caliban-rig.env`, owned by `ttownshend`, mode 600:
 
 ```
-CALIBAN_URL=https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net
+TRAY_RIG_DB_URL=postgresql://tray_rig.<project>:<password>@<pooler-host>:5432/postgres
 RIG_API_KEY=...
 RIG_CAPTURE_IR=0
+DOCTOR_URL=https://pzjsxzgojucqaippctjy.supabase.co/functions/v1/rig-doctor
 ```
 
 Kept out of the unit file so the unit can live in git without the key in it.
@@ -307,12 +309,12 @@ on storage.objects for select to authenticated
 using (bucket_id = 'vision-band-test-captures');
 ```
 
-### Caliban
-
-Set `RIG_API_KEY` in App Service configuration to match the Pi. Deliberately a
-different secret from `POWER_AUTOMATE_API_KEY`: the rig is physically
-accessible hardware on a factory floor, and rotating its key after a theft
-should not also break the Power Automate integration.
+Set `RIG_API_KEY` as an Edge Function secret to match the Pi: `rig-upload`
+takes the photos with it and `rig-doctor` the doctor's reports. It is the tray
+rig's alone, not Ariel's `INLINE_API_KEY`: the rig is physically accessible
+hardware on a factory floor, and rotating its key after a theft should break
+nothing else. The `tray_rig` role (sgsc-app `database/2026-10-30-tray-rig-role.sql`)
+needs its password set once; it is the only place that password lives.
 
 ---
 
@@ -325,33 +327,32 @@ Network Access rules block it again even if it could. Every inward path fails.
 So the direction is inverted. Nothing addresses the Pi — the Pi reaches out.
 
 ```
-SGSC button  ──insert──>  capture_commands  <──poll──  Pi
-                                │                       │
-                                │                    captures
-                                │                       │
-                          status: done  <──upload────────┘
+SGSC button  ──insert──>  capture_commands  <──LISTEN/claim──  Pi (tray_queue.py)
+                                │                                │
+                                │                             captures
+                                │                                │
+                          status: done  <──── rig-upload, UPDATE ┘
                                 │
 SGSC polls ─────────────────────┘
-     │
-     └──> POST /azure-band-test  (operator's own session)
 ```
 
 The rig can claim and complete capture commands and nothing else. It cannot run
 an analysis, read a lot, or reach any operator-facing endpoint. Analysis stays
 attributed to a logged-in person rather than to a device.
 
-The Pi never talks to Supabase directly either — it goes through Caliban, which
-holds the service key. Putting a Supabase credential on a device sitting in a
-factory is the thing this design exists to avoid.
+The Pi logs in to Postgres as `tray_rig`, a role that can read and finish
+capture commands and nothing more, and sends photos through `rig-upload`. It
+holds no service key: putting one on a device sitting in a factory is the
+thing this design exists to avoid. (Until 2026-10-30 it went through Caliban,
+which held the key; Caliban's App Service was stopped 2026-11-09.)
 
 ## Why the lab ME% arrives late
 
 Separating and weighing the MEO destroys the levelled dish, so the photograph
 has to be taken before the number can exist. Every estimate is therefore
-recorded without a real value, and `POST /band-estimates/backfill` attaches it
-when the operator saves their results — called automatically from
-`saveResults()` in SGSC. Only rows still missing a value are touched, so a
-later lab correction is never silently overwritten.
+recorded without a real value, to be paired with the lab's later. Caliban's
+`POST /band-estimates/backfill` did that from SGSC's `saveResults()`; it went
+with Caliban's page routes, and SGSC no longer calls anything in its place.
 
 ---
 

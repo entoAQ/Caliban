@@ -11,7 +11,7 @@ After=network-online.target
 Type=simple
 User=ttownshend
 WorkingDirectory=/home/ttownshend/caliban/rig/inline
-# CALIBAN_URL and RIG_API_KEY -- the tray rig's own key, which is how Caliban
+# DOCTOR_URL and RIG_API_KEY -- the tray rig's own key, which is how rig-doctor
 # knows this report is the tray rig's.
 EnvironmentFile=/etc/caliban-rig.env
 Environment=DOCTOR_DEVICE=prosperos

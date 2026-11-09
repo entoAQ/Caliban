@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """What Ariel's screen should say about a reading, worked out on the Pi.
 
-Caliban has done this until now, and Caliban is being dissolved. The detector
-already runs here (meo_detect.py), so all that was left up there was these rules
-and a few writes. The rules below are copied from Caliban's app/main.py word for
-word: operators act on these instructions, and a rewrite could change one without
-anyone noticing. Only the queries differ.
+Caliban did this until 2026-11-02; its App Service was stopped 2026-11-09. The
+detector already runs here (meo_detect.py), so all that was left up there was
+these rules and a few writes. The rules below were copied from Caliban's
+app/main.py word for word: operators act on these instructions, and a rewrite
+could change one without anyone noticing. Only the queries differ.
+
+THIS FILE IS NOW THE SOURCE. It was generated from main.py, and changes were
+made in both until the App Service stopped; from here on a rule changes here
+only, and main.py's inline routes are dead code waiting to be deleted. Never
+regenerate this file from main.py: that would undo every change since.
 
 Shadow first: with ARIEL_RIG_DB_URL in /etc/caliban-inline.env, loop.py works out
 each reading here as well as asking Caliban, and compares the two. Caliban still

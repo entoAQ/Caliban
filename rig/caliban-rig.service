@@ -20,7 +20,7 @@ WorkingDirectory=/home/ttownshend/caliban/rig
 #     TRAY_RIG_DB_URL=postgresql://tray_rig...   # needs python3-psycopg2
 #     RIG_API_KEY=...                            # rig-upload function's key
 #     RIG_CAPTURE_IR=0
-#     CALIBAN_URL=https://your-caliban-host      # the doctor still reports here
+#     DOCTOR_URL=https://<project>.supabase.co/functions/v1/rig-doctor
 # then: sudo chmod 600 /etc/caliban-rig.env
 EnvironmentFile=/etc/caliban-rig.env
 

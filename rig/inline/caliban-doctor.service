@@ -11,7 +11,7 @@ After=network-online.target
 Type=simple
 User=ttownshend
 WorkingDirectory=/home/ttownshend/caliban/rig/inline
-# Same file as the loop: CALIBAN_URL and INLINE_API_KEY.
+# Same file as the loop: DOCTOR_URL and INLINE_API_KEY.
 EnvironmentFile=/etc/caliban-inline.env
 ExecStart=/usr/bin/python3 /home/ttownshend/caliban/rig/inline/doctor.py
 

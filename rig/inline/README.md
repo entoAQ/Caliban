@@ -31,13 +31,15 @@ every current prompt describes a dish, not a chute -- so readings run in
 samples and lab results.
 
 ```
- loop.py ── photo ──> Caliban /inline/readings ── reading + instruction ──┐
-    │                                                                    │
-    └── writes ~/inline_state.json <──────────────────────────────────────┘
+ loop.py ── photo ──> decide.py (on the Pi) ── reading + instruction ──┐
+    │            │                                                     │
+    │            └──> Supabase: photo via rig-upload, row via          │
+    │                 ariel_record_reading()                           │
+    └── writes ~/inline_state.json <───────────────────────────────────┘
                         │
                screen.py ── localhost:8090 ──> touchscreen
                         │
-          operator taps ──> ~/inline_acks.jsonl ── loop.py ──> Caliban /inline/acks
+          operator taps ──> ~/inline_acks.jsonl ── loop.py ──> ariel_record_acks()
 ```
 
 ## Trial mode
@@ -94,9 +96,9 @@ automatically.
 | | |
 |---|---|
 | `~/inline_state.json` | What the screen shows. Written by `loop.py`; read by `screen.py`. |
-| `~/inline_acks.jsonl` | One line per operator confirmation. Written by `screen.py`; forwarded to Caliban by `loop.py`. |
-| `~/inline_acks.sent` | How many of those lines Caliban has confirmed receiving. |
-| `~/captures/inline/` | Full-resolution photos. Caliban keeps only a review copy. |
+| `~/inline_acks.jsonl` | One line per operator confirmation. Written by `screen.py`; recorded by `loop.py` through `ariel_record_acks()`. |
+| `~/inline_acks.sent` | How many of those lines the database has confirmed receiving. |
+| `~/captures/inline/` | Full-resolution photos. Supabase keeps only a review copy. |
 
 `inline_state.json`, as the screen reads it:
 
@@ -131,10 +133,9 @@ one.
 
 ## The capture loop
 
-`loop.py`, as `caliban-inline`: every `interval_min` (Caliban's setting, 5 by
-default) it takes a photo, sends it to `/inline/readings`, and writes the reply
-into `~/inline_state.json`. Every 5 s it forwards new confirmations to
-`/inline/acks`. Camera, flash and network trouble show on the screen's chips.
+`loop.py`, as `caliban-inline`: every `interval_min` (`inline_settings`, 5 by
+default) it takes a photo, has `decide.py` judge and record it, and writes the
+answer into `~/inline_state.json`. Every 5 s it records new confirmations. Camera, flash and network trouble show on the screen's chips.
 
 `take_photo()` is the provisional part: `rpicam-still`, no flash. The real
 capture -- a long exposure with the flash fired while every row is exposing --
@@ -189,37 +190,50 @@ before that date are NoIR readings.
 blown out in some channel. Keep it to a few percent: add diffusion over the
 flash or bounce it off the lined wall if it is higher.
 
-## Caliban side
+## Where readings are decided
 
-- `POST /inline/readings` -- photo + reading id, judged by `analyse_band_photo`
-  (the same code as a tray capture) with the operator's thresholds and prompts
-  unless `inline_settings` overrides them. Recorded in `vision_band_estimates`
-  with `source = 'inline'`; a retry with the same id returns the recorded
-  reading instead of analysing twice.
-- `POST /inline/acks` -- confirmations, into `inline_acks` (`inline_acks.sql`).
-- Both need the `X-API-Key` header to match the **`INLINE_API_KEY`** app
-  setting -- a key of its own, not the tray rig's, because this one can spend
-  Azure calls.
+Since 2026-11-02, on the Pi. `decide.py` holds the rules Caliban's
+`/inline/readings` used to apply -- the detector's estimate against
+`inline_settings`, the window, the wait after a turn, the AUGMENTER/DIMINUER
+limits -- and `record()` stores what Caliban stored: each photo's review copy
+through SGSC's `rig-upload` function (`inline/<id>[-k].jpg`), then the row in
+`vision_band_estimates` with `source = 'inline'` through
+`ariel_record_reading()`. A retry with the same id gets the recorded answer.
+Confirmations go through `ariel_record_acks()` into `inline_acks`, the screen
+mirror through `ariel_set_status()` into `inline_rig_status`.
 
-**Cost:** a reading every 5 minutes is ~290 a day, each `repeats` calls per
-prompt (2 by default, more when escalated). Lower it with `interval_min` or
-`repeats` in `inline_settings` -- no redeploy needed.
+The Pi logs in as `ariel_rig` (sgsc-app `database/2026-11-01-ariel-rig-role.sql`
+and `2026-11-02-ariel-rig-writes.sql`): it reads the inline readings and
+settings and writes only through those three functions. It holds no service
+key. A stolen login can add readings and confirmations and overwrite Ariel's
+own status row, never change or delete a recorded reading, and `rig-upload`
+refuses a photo for a reading already recorded.
+
+`decide.py` was generated from Caliban's `app/main.py` until the App Service
+was retired (stopped 2026-11-09); it is now the source, and a rule change is
+made there only. Replay it over recorded readings before shipping one.
+
+The switch is `ARIEL_DECIDES=1` in the env file. Without it the loop still
+posts to `CALIBAN_URL` as before -- kept only as the way back while the App
+Service is stopped, not deleted.
 
 ## Setup
 
-**Once, in Supabase:** run `inline_acks.sql`.
-
-**Once, in Azure** (Caliban App Service → Settings → Environment variables):
-add `INLINE_API_KEY`, a long random string (`python3 -c "import secrets;
-print(secrets.token_urlsafe(32))"`). Saving restarts Caliban.
+**Once, in Supabase:** run `inline_acks.sql` and the `ariel_rig` files above,
+set the role's password, and add the Edge Function secret `INLINE_API_KEY`, a
+long random string (`python3 -c "import secrets;
+print(secrets.token_urlsafe(32))"`). `rig-upload` and `rig-doctor` both read it.
 
 **On the Pi**, once `~/caliban` is cloned (same deploy-key method as the tray
 rig, see `../README.md`):
 
 ```bash
-# The loop's settings -- same key as in Azure.
+# The loop's and the doctor's settings -- the same key as the Supabase secret.
+sudo apt install -y python3-psycopg2
 sudo tee /etc/caliban-inline.env >/dev/null <<'EOF'
-CALIBAN_URL=https://caliban-ascchkhycdeuf9ew.canadacentral-01.azurewebsites.net
+ARIEL_RIG_DB_URL=postgresql://ariel_rig.<project>:<password>@<pooler-host>:5432/postgres
+ARIEL_DECIDES=1
+DOCTOR_URL=https://pzjsxzgojucqaippctjy.supabase.co/functions/v1/rig-doctor
 INLINE_API_KEY=paste-the-key-here
 EOF
 sudo chmod 600 /etc/caliban-inline.env
@@ -248,7 +262,7 @@ changes.
 ## Diagnostic and repair
 
 `doctor.py`, as `caliban-doctor` on `127.0.0.1:8091`: twelve checks (power,
-disk, clock, Wi-Fi, Caliban, the key, software version, screen, kiosk, loop,
+disk, clock, Wi-Fi, the cloud (Supabase), the key, software version, screen, kiosk, loop,
 camera, flash), each with a one-button fix where a button can fix it and a
 plain-French instruction where hands are needed. Its own service, standard
 library only, so it is up when what it repairs is not. The docstring has the
@@ -257,8 +271,7 @@ reasoning.
 | Who | Where | How |
 |---|---|---|
 | Operator at the destoner | the touchscreen | long press (2 s) on the Caméra/Flash/Réseau chips. The screen also hands over to it by itself after a minute of `screen.py` not answering, and `kiosk.sh` opens it if the screen never came up. It returns to the screen on its own once idle. |
-| AQ, from a desk | SGSC → *Diagnostic des bancs* (`sgsc-app/rig-diagnostic.html`) | the doctor posts its checks to Caliban every minute (`/inline/doctor/report`); a button there queues a repair (`device_commands`) that the reply hands back. A repair not picked up within 10 minutes is dropped, never run late. |
-| Anyone, Caliban down | GitHub → Actions | **Caliban — vérifier** (`/health` + `/health/deep`) and **Caliban — revenir à la version précédente** (redeploys the previous build's image; main is untouched, so revert the bad commit before the next push). |
+| AQ, from a desk | SGSC → *Diagnostic des bancs* (`sgsc-app/rig-diagnostic.html`) | the doctor posts its checks to SGSC's `rig-doctor` function every minute (`DOCTOR_URL`); a button there queues a repair (`device_commands`) that the reply hands back. A repair not picked up within 10 minutes is dropped, never run late. |
 | Last resort | Pi Connect shell | `bash ~/caliban/rig/inline/install-doctor.sh` reinstalls every unit and sudo rule, re-enables the updater and kiosk, restarts everything and prints the checks. `python3 ~/caliban/rig/inline/doctor.py check` only prints them. |
 
 Fixes it can run, from either side, and nothing else: restart the loop, the
@@ -268,7 +281,7 @@ captures older than 3 days), reset the checkout to GitHub, roll back to the
 last version that ran 30 minutes clean (pausing updates), send the journal,
 take a control photo, reboot. Plus, on the touchscreen only, cycle the Wi-Fi.
 None changes a setting or a key. `../REMOTE-REPAIR.md` sorts every known
-failure of Caliban and both rigs into fixes-itself / button / desk / site.
+failure of both rigs into fixes-itself / button / desk / site.
 
 **When the network drops.** Both ends notice. On Ariel, the tray rig's
 watchdog (`../netwatch.sh`, installed by `install-doctor.sh`) cycles the

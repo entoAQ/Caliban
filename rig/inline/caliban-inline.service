@@ -12,8 +12,10 @@ WorkingDirectory=/home/ttownshend/caliban/rig/inline
 
 # Kept out of this file so the unit can live in git without the key in it.
 # Create /etc/caliban-inline.env containing:
-#     CALIBAN_URL=https://your-caliban-host
-#     INLINE_API_KEY=...
+#     ARIEL_RIG_DB_URL=postgresql://ariel_rig...  # needs python3-psycopg2
+#     ARIEL_DECIDES=1
+#     DOCTOR_URL=https://<project>.supabase.co/functions/v1/rig-doctor
+#     INLINE_API_KEY=...                            # rig-upload/rig-doctor key
 # then: sudo chmod 600 /etc/caliban-inline.env
 EnvironmentFile=/etc/caliban-inline.env
 

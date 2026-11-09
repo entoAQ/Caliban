@@ -1,7 +1,7 @@
 # What can be fixed without someone on site
 
-Every way Caliban, Ariel (the inline rig at the destoner) and Prosperos (the
-tray rig) are known or expected to fail, sorted by who fixes it:
+Every way Ariel (the inline rig at the destoner) and Prosperos (the tray rig)
+are known or expected to fail, sorted by who fixes it:
 
 - **Itself**: nothing to do; it recovers on its own.
 - **Button**: one press, from a desk or the destoner screen.
@@ -10,40 +10,31 @@ tray rig) are known or expected to fail, sorted by who fixes it:
 
 Written 2026-10-13. When a tool changes, change its row here.
 
-**Names on screen** (since 2026-10-16): the App Service is shown as
-**Prospero** and the tray rig as **Caliban**, in SGSC's diagnostic page, the
-GitHub buttons and the Pi screens. This file, the code, the database
-(`device = 'prosperos'`) and Azure (App Service `Caliban`) keep the old names.
+**Caliban, the App Service, is out of the picture since 2026-11-09** (stopped
+that day, to be deleted). Ariel decides on its Pi, the tray rig takes its
+orders from the database, and both doctors report to SGSC's `rig-doctor`
+function, so the only cloud either rig needs is Supabase. Its section, its
+GitHub buttons (*Prospero — vérifier / redémarrer / journaux / revenir*) and
+`AZURE_CREDENTIALS` were removed from this file; the workflows go with the app.
 
 ## Where the buttons are
 
 | Button | Where | Reaches |
 |---|---|---|
-| **Prospero — vérifier** | GitHub → Actions | Caliban health, each dependency, last deploys |
-| **Prospero — revenir à la version précédente** | GitHub → Actions | Redeploys the build before the live one |
-| **Prospero — redémarrer** | GitHub → Actions | Restarts the App Service (needs `AZURE_CREDENTIALS`, below) |
-| **Prospero — journaux** | GitHub → Actions | Container logs, errors first (needs `AZURE_CREDENTIALS`) |
-| **Diagnostic des bancs** | SGSC menu (QC+) | Caliban's status; each rig's checks and every repair it offers |
+| **Diagnostic des bancs** | SGSC menu (QC+) | Each rig's checks and every repair it offers |
 | **Diagnostic** | Destoner touchscreen, 2 s press on the chips | Ariel's checks and repairs, plus Wi-Fi restart |
 
-GitHub buttons work even when Caliban, SGSC and Ariel are all down. SGSC's
-page needs Caliban up to reach Ariel.
+SGSC's page needs Supabase up to reach either rig; the destoner screen works
+without any network.
 
-## Caliban (Azure App Service)
+## Supabase (both rigs' cloud)
 
 | Failure | Noticed by | Fix | Who |
 |---|---|---|---|
-| A deploy broke it | Deploy workflow's live check; *vérifier*; SGSC banner | *revenir à la version précédente*, then revert the commit before the next push | Button |
-| Up but wedged / slow, nothing deployed | *vérifier* (slow or failing checks) | *redémarrer* | Button |
-| Need to know why | — | *journaux* | Button |
-| Supabase down | `supabase` check | Nothing we can do; status.supabase.com | — |
-| Vision endpoint unreachable | `vision` check | Azure status; nothing on our side | — |
-| Vision key revoked / quota exhausted | **Not checked** (reachability only): readings fail with 401/429 in *journaux* | New key in Azure Portal → Caliban → Environment variables | Desk |
-| An app setting deleted by a portal edit | `config` list in *vérifier* | Re-add it in the portal | Desk |
-| Teams webhook broken | **Not checked**: alerts silently stop | Re-create the webhook, update `TEAMS_ALERT_WEBHOOK_URL` (Caliban's own alerts) and the Vault secret `teams_alert_webhook_url` (rig offline/return, sent by Supabase) | Desk |
-| Publish profile reset | Rollback/deploy fails | Download a new one into secret `AZURE_WEBAPP_PUBLISH_PROFILE`; meanwhile the rollback summary prints the Cloud Shell command | Desk |
-| `AZURE_CREDENTIALS` expired (2 years after creation) | *redémarrer* / *journaux* fail at login | Re-run the setup command below | Desk |
-| GitHub Actions down | Buttons don't start | Cloud Shell: `az webapp config container set … :<sha>` / `az webapp restart -n Caliban -g Caliban_group` | Desk |
+| Supabase down | Both doctors: "Nuage (Supabase)" red; Ariel shows "Pas de connexion au nuage", readings not analysed | Nothing we can do; status.supabase.com. Ariel retries every minute and catches up by itself | — |
+| A rig's login refused (role password changed) | Ariel: no readings recorded, journal shows the refusal; tray: captures time out | Put the new password in that Pi's env file (`ARIEL_RIG_DB_URL` / `TRAY_RIG_DB_URL`), restart the loop | Desk |
+| Edge Function secret changed | Doctor: "Clé d'accès" red; Ariel's photos not stored | Same value in the Pi's env file (`INLINE_API_KEY` / `RIG_API_KEY`) | Desk |
+| Teams webhook broken | **Not checked**: offline alerts silently stop | Re-create the webhook, update the Vault secret `teams_alert_webhook_url` | Desk |
 
 ## Ariel (inline rig, destoner)
 
@@ -58,7 +49,7 @@ page needs Caliban up to reach Ariel.
 | Wi-Fi drops | Watchdog (`netwatch.sh`): Wi-Fi cycled at 5 min, reboot at 15, at most hourly. The screen shows PAS DE CONNEXION meanwhile |
 | Pi freezes hard (kernel hung) | Hardware watchdog: reboots within 15 s (from `install-doctor.sh`, 2026-10-13) |
 | New code on GitHub | Pulled within 5 min (`caliban-rig-update.timer`), unless paused by a rollback |
-| Ariel silent 10 min | Caliban marks it offline; Teams told if live or `offline_alert` |
+| Ariel silent 10 min | Supabase (`pg_cron`) marks it offline; Teams told if live or `offline_alert` |
 
 **One button** (SGSC, or the touchscreen)
 
@@ -114,7 +105,7 @@ buttons are SGSC's.
 | Wi-Fi drops | netwatch: Wi-Fi cycle at 5 min, reboot at 15 |
 | Pi freezes hard | Hardware watchdog, 15 s |
 | New code | Update timer, within 5 min, unless paused by a rollback |
-| Silent 10 min | Caliban marks it offline and tells Teams (on by default for this rig: it is in daily use; `system_config.device_offline_alerts = {"prosperos": false}` turns it off) |
+| Silent 10 min | Supabase (`pg_cron`) marks it offline and tells Teams (on by default for this rig: it is in daily use; `system_config.device_offline_alerts = {"prosperos": false}` turns it off) |
 
 **One button** (SGSC)
 
@@ -139,26 +130,10 @@ trays); camera ribbon or a dead camera; the height sensor's cable ("Capteur de
 hauteur" yellow -- density only); the LED light; an unplugged Pi; a corrupt
 SD card.
 
-## Setting up `AZURE_CREDENTIALS`
-
-Used by *Prospero — redémarrer* and *Prospero — journaux*. Done 2026-10-16;
-it expires 2028-10, so redo it before then. In Azure Cloud Shell:
-
-```
-az ad sp create-for-rbac --name caliban-github-actions --role "Website Contributor" --years 2 \
-  --scopes $(az webapp show --name Caliban --resource-group Caliban_group --query id -o tsv) --json-auth
-```
-
-Paste the whole JSON it prints into GitHub → Settings → Secrets and variables
-→ Actions → New repository secret, named `AZURE_CREDENTIALS`. Scoped to the
-Caliban web app only; expires in two years.
-
 ## Known gaps
 
 - **Tray rig checks are new**: the "silent for 15 min" poller check and the
   height-sensor probe are reasoned from the code, not yet seen failing.
-- **Vision key and quota are not checked**: a revoked key looks healthy until
-  readings fail. A real test call costs money each time, so it is left out.
 - **The Teams webhook is not checked**: a broken one fails silently.
 - **Flash batteries**: no trustworthy check (dust on the chute fooled the
   first one). Candidate: flash recycle time — fire two flashes a set gap

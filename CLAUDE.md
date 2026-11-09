@@ -38,6 +38,25 @@ sgsc-app's `database/README.md`). Even when current it is up to a day behind, so
 for anything changed since the dump, or when a wrong column would be costly, check
 production read-only through `claude_ro` (`SGSC_RO_DB_URL`).
 
+## The App Service is retired: Ariel's rules live in `rig/inline/decide.py`
+
+Since 2026-11-02 Ariel decides on its own Pi (`ARIEL_DECIDES=1`), and on
+2026-11-09 both rigs' `CALIBAN_URL` lines came out and the App Service was
+stopped, to be deleted. Nothing in production runs `app/` any more.
+
+So **a change to Ariel's decisions is made in `rig/inline/decide.py` only.**
+It began as a copy generated from `app/main.py`, and until now changes were
+made in both, in step; that stops here. Don't edit `app/main.py`'s inline
+routes to change behaviour on the line -- nothing reads them -- and don't
+regenerate `decide.py` from `main.py`, which would undo every change made
+since. Check a rule change by replaying it over recorded readings
+(`vision_band_estimates`, `source = 'inline'`) before it ships: the Pi pulls
+`main` within 5 minutes of a push.
+
+`loop.py` and `doctor.py` still have their `CALIBAN_URL` branches, as the way
+back while the App Service is only stopped. They come out with `app/`, the
+Dockerfile and the publish workflow once it is deleted.
+
 ## Vision prompt language
 
 **Every vision prompt's instructions are written in English.** Only the
