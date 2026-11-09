@@ -38,6 +38,28 @@ sgsc-app's `database/README.md`). Even when current it is up to a day behind, so
 for anything changed since the dump, or when a wrong column would be costly, check
 production read-only through `claude_ro` (`SGSC_RO_DB_URL`).
 
+## Policies written here follow sgsc-app's RLS rules
+
+The `rig/*.sql` files create roles, grants and RLS policies on the same Supabase
+database as sgsc-app, so the rules in sgsc-app's CLAUDE.md ("Postgres
+access-control rules") apply to every one of them. Since 2026-11-09
+(`database/2026-11-09-rls-initplan-and-policy-cleanup.sql` there) that means in
+particular:
+
+- A rig policy names its role (`TO ariel_rig`, `TO tray_rig`); never `TO PUBLIC`.
+  The rig logins are not members of `authenticated` and carry no JWT, so
+  `auth.uid()` / `auth.role()` are NULL for them: a predicate on those can never
+  admit a rig, and a `TO authenticated` policy never reaches one.
+- Any `auth.uid()`, `role_gte()` or `get_user_role()` in a policy is wrapped:
+  `(select auth.uid())`, `(select public.role_gte('qc'))`. Bare, it runs once per
+  row.
+- No `FOR ALL` on a table that also has a read policy (split it into insert /
+  update / delete), and never two permissive policies for the same table, role
+  and command: widen or OR-merge the existing one instead.
+
+After running any file that adds or changes a policy, run sgsc-app's
+`database/checks/2026-11-09-rls-policy-shape.sql`; it must return no rows.
+
 ## The App Service is retired: Ariel's rules live in `rig/inline/decide.py`
 
 Since 2026-11-02 Ariel decides on its own Pi (`ARIEL_DECIDES=1`), and on
