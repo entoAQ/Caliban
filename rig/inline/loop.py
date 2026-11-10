@@ -60,6 +60,19 @@ CAPTURE_DIR = os.path.join(HOME, "captures", "inline")
 
 DEFAULT_INTERVAL_S = 300
 TICK_S = 5                 # how often confirmations are checked for
+# Photos on a fixed grid (2026-11-10, Tim: every 15 s exactly, for the 15 s
+# trial). Each reading is due interval_s after the last one's slot, and the
+# loop wakes on that moment rather than on its next 5 s tick (which made 15 s
+# come out at 16-17 s). A reading takes ~7 s (6.8 median, 7.5 at p90 on
+# 2026-11-08..09); about 1 in 20 took over 15 s. When one runs over, the next
+# may still start up to SLOT_GRACE_S late; later than that its slot is skipped
+# and the photo after is taken on time, so every gap is a whole number of
+# intervals, give or take the grace. Skips are counted per day in
+# state["slot_skips"].
+SLOT_GRACE_S = 3
+# Forwarding confirmations and the mirror take a network call each; not
+# started with less than this left before a slot.
+HOUSEKEEPING_S = 2
 REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
 HISTORY_KEEP = 600         # the screen's two-hour trend at a reading every 15 s, with margin
 # A capture is a few seconds; with every flash retry used (6 tries, 10 s
@@ -178,6 +191,16 @@ def take_photo(reading_id, state=None):
 # in gain, or retries climbing, is the warning, weeks before it stops.
 # Kept in the state file, so mirrored with it to inline_rig_status.
 FLASH_DAYS_KEPT = 60
+
+
+def count_skipped(state, n):
+    """Add n skipped photo slots (SLOT_GRACE_S) to today's count, 14 days kept."""
+    today = datetime.now().date().isoformat()
+    days = state.setdefault("slot_skips", [])
+    if not days or days[-1].get("d") != today:
+        days.append({"d": today, "n": 0})
+        del days[:-14]
+    days[-1]["n"] += n
 
 
 def count_flash(state, firings, measured, keepalive=False, lit=False):
@@ -790,28 +813,52 @@ def main():
     if not FLASH_LOW_WARN and state.get("health", {}).get("flash") == "low":
         set_health(state, flash="ok")
     next_at = now_utc()
+    # Whether next_at is a slot on the photo grid (see SLOT_GRACE_S) or just a
+    # time to look again (a start, a stop, an error).
+    on_grid = False
 
     while True:
         try:
-            if now_utc() >= next_at:
-                # From the start of this reading, so the interval is the time
-                # between photos and not the time between them plus a capture.
-                started = now_utc()
-                wait = take_reading(state)
-                next_at = started + timedelta(seconds=wait)
-                state["next_at"] = iso(next_at)
-                save_state(state)
-            try:
-                forward_acks()
-            except Exception as e:
-                # Kept in the file; the next tick tries again.
-                log(f"confirmations not forwarded yet: {type(e).__name__}: {e}")
-            mirror_state(state)
+            now = now_utc()
+            if now >= next_at:
+                late = (now - next_at).total_seconds()
+                if on_grid and late > SLOT_GRACE_S:
+                    # A slow reading ran over: skip to the next slot instead of
+                    # shooting late, so the photos stay on the grid.
+                    interval = max(1, int(state.get("interval_s") or DEFAULT_INTERVAL_S))
+                    skipped = 0
+                    while (now - next_at).total_seconds() > SLOT_GRACE_S and skipped < 1000:
+                        next_at += timedelta(seconds=interval)
+                        skipped += 1
+                    count_skipped(state, skipped)
+                    log(f"reading ran {late:.1f} s past its slot: {skipped} slot(s) skipped")
+                    state["next_at"] = iso(next_at)
+                else:
+                    # From the slot, not from when the previous reading ended,
+                    # so the interval is the time between photos and not the
+                    # time between them plus a capture.
+                    slot = next_at if on_grid else now
+                    wait = take_reading(state)
+                    on_grid = wait != IDLE_RECHECK_S
+                    next_at = (slot if on_grid else now_utc()) + timedelta(seconds=wait)
+                    state["next_at"] = iso(next_at)
+                    save_state(state)
+            # Confirmations and the mirror only when they cannot hold up the
+            # next photo; right after a reading there is always time.
+            if (next_at - now_utc()).total_seconds() > HOUSEKEEPING_S:
+                try:
+                    forward_acks()
+                except Exception as e:
+                    # Kept in the file; the next tick tries again.
+                    log(f"confirmations not forwarded yet: {type(e).__name__}: {e}")
+                mirror_state(state)
         except Exception as e:
             log(f"unexpected error: {type(e).__name__}: {e}")
             traceback.print_exc()
             next_at = now_utc() + timedelta(seconds=60)
-        time.sleep(TICK_S)
+            on_grid = False
+        # Wake on the slot itself, not on the next tick after it.
+        time.sleep(max(0.02, min(TICK_S, (next_at - now_utc()).total_seconds())))
 
 
 if __name__ == "__main__":
