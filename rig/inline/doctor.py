@@ -526,7 +526,12 @@ def flash_counts(state):
         out += f", dont {today.get('flashes', 0)} aujourd'hui"
         bad = today.get("failed", 0) + today.get("retries", 0)
         if bad:
-            out += f" ({today.get('retries', 0)} reprises, {today.get('failed', 0)} ratés)"
+            out += f" ({today.get('retries', 0)} reprises, {today.get('failed', 0)} ratés"
+            if "miss_no_flash" in today:
+                # Which kind: the flash not firing, or firing at the wrong moment.
+                out += (f" ; essais manqués : {today.get('miss_no_flash', 0)} sans éclair,"
+                        f" {today.get('miss_split', 0)} décalés")
+            out += ")"
     return out + "."
 
 

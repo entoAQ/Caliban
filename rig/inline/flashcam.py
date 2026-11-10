@@ -83,10 +83,14 @@ DEFAULTS = {
     "pulse_ms": 20,
     # After a miss, wait this long and fire again, up to `attempts` in all.
     # On the bench (2026-10-06, transistor trigger) about 1 shot in 11 missed
-    # at random; 10 s apart, six tries make a whole reading lost to it
-    # vanishingly rare, and a flash that is really off is still reported
-    # within about a minute.
-    "recharge_s": 10.0,
+    # at random, and 10 s gave AA cells time to recover. On mains at 1/128
+    # that is far more than the flash needs (the calibration tools retry
+    # after 1.5 s), and at a photo every 15 s a 10 s wait pushed the reading
+    # past its slot: on 2026-11-10 about 1 photo in 9 needed a retry, every one
+    # of them "no flash" with the trigger on time. 2 s keeps a retried reading
+    # inside its slot; whether a retry 2 s on lands as often as one 10 s on
+    # shows in the tally (loop.count_flash: retries, misses by kind).
+    "recharge_s": 2.0,
     "attempts": 6,
     # Acceptance: a frame is "flash-lit" when its mean is this much above the
     # frame taken without flash, and "whole" when every one of `bands`
@@ -155,11 +159,14 @@ REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
 
 class FlashNotFired(Exception):
     """No flash in the frame after every attempt: flash off, asleep, batteries
-    flat, or the trigger wiring has come loose."""
+    flat, or the trigger wiring has come loose. .missed as in capture()."""
+    missed = None
 
 
 class FlashTiming(Exception):
-    """The flash fired but kept landing outside the all-rows window."""
+    """The flash fired but kept landing outside the all-rows window.
+    .missed as in capture()."""
+    missed = None
 
 
 def camera_family():
@@ -407,6 +414,10 @@ def capture(path, settings=None, log=print, keep=None):
         amb_bands = _bands(dark, s["bands"])
 
         fired_any = False
+        # Attempts that gave no photo, by why: "no_flash" (no light at all:
+        # the flash did not fire) or "split" (it fired, but not across the
+        # whole frame: the timing).
+        missed = {"no_flash": 0, "split": 0}
         for attempt in range(1, s["attempts"] + 1):
             r = cam.capture_request()
             ts = r.get_metadata()["SensorTimestamp"]
@@ -466,7 +477,8 @@ def capture(path, settings=None, log=print, keep=None):
                     keep["array"] = array
                 coarse = array[::8, ::8]
                 return {"mean": round(mean, 1), "top": round(top, 1), "bottom": round(bottom, 1),
-                        "ambient": round(ambient, 1), "attempts": attempt, "late_ms": round(late_ms, 2),
+                        "ambient": round(ambient, 1), "attempts": attempt, "missed": missed,
+                        "late_ms": round(late_ms, 2),
                         # Share of the frame blown out in some channel: detail
                         # there is gone, and pale frass on pale larvae is the
                         # first thing lost. Aim well under a few percent.
@@ -487,11 +499,15 @@ def capture(path, settings=None, log=print, keep=None):
             log(f"flash attempt {attempt}: mean {mean:.0f} (ambient {ambient:.0f}) "
                 f"strips {' '.join(f'{v:.0f}' for v in shares)} fired {late_ms:+.2f} ms late "
                 f"-> {'split' if lit else 'no flash'}")
+            missed["split" if lit else "no_flash"] += 1
             time.sleep(s["recharge_s"])
 
         if fired_any:
-            raise FlashTiming(f"flash landed outside the exposure window {s['attempts']} times")
-        raise FlashNotFired(f"no flash in {s['attempts']} attempts (ambient {ambient:.0f})")
+            e = FlashTiming(f"flash landed outside the exposure window {s['attempts']} times")
+        else:
+            e = FlashNotFired(f"no flash in {s['attempts']} attempts (ambient {ambient:.0f})")
+        e.missed = missed
+        raise e
     finally:
         try:
             cam.stop()

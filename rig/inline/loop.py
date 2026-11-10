@@ -170,7 +170,8 @@ def take_photo(reading_id, state=None):
             measured = flashcam.capture(path, settings, log=log)
     except (flashcam.FlashNotFired, flashcam.FlashTiming) as e:
         if state is not None:
-            count_flash(state, settings["attempts"], None, lit=isinstance(e, flashcam.FlashTiming))
+            count_flash(state, settings["attempts"], None, lit=isinstance(e, flashcam.FlashTiming),
+                        missed=getattr(e, "missed", None))
         raise
     if state is not None:
         count_flash(state, measured.get("attempts", 1), measured)
@@ -203,10 +204,13 @@ def count_skipped(state, n):
     days[-1]["n"] += n
 
 
-def count_flash(state, firings, measured, keepalive=False, lit=False):
+def count_flash(state, firings, measured, keepalive=False, lit=False, missed=None):
     """Add one capture's firings to today's tally and the lifetime total.
     measured: what flashcam.capture returned, None when no photo came of it;
-    lit then says whether the flash fired at all (FlashTiming) or not."""
+    lit then says whether the flash fired at all (FlashTiming) or not.
+    missed: the attempts that gave no photo, by kind (flashcam.capture's
+    "missed", or the exception's), counted as miss_no_flash / miss_split --
+    the flash not firing, against it firing at the wrong moment."""
     today = datetime.now().date().isoformat()
     days = state.setdefault("flash_days", [])
     if not days or days[-1].get("d") != today:
@@ -220,6 +224,11 @@ def count_flash(state, firings, measured, keepalive=False, lit=False):
     total["flashes"] += firings
     if keepalive:
         day["keepalive"] += 1
+    if missed is None and measured is not None:
+        missed = measured.get("missed")
+    if isinstance(missed, dict):
+        for kind in ("no_flash", "split"):
+            day["miss_" + kind] = day.get("miss_" + kind, 0) + int(missed.get(kind) or 0)
     if measured is None:
         day["uneven" if lit else "failed"] += 1
         return
@@ -558,7 +567,8 @@ def line_running(state, cam_settings):
                         m = flashcam.capture(os.path.join(CAPTURE_DIR, "KEEPALIVE.jpg"),
                                              dict(cam_settings, attempts=2), log=log)
                 except (flashcam.FlashNotFired, flashcam.FlashTiming) as e:
-                    count_flash(state, 2, None, keepalive=True, lit=isinstance(e, flashcam.FlashTiming))
+                    count_flash(state, 2, None, keepalive=True, lit=isinstance(e, flashcam.FlashTiming),
+                                missed=getattr(e, "missed", None))
                     raise
                 count_flash(state, m.get("attempts", 1), m, keepalive=True)
                 state["last_flash_at"] = iso(now_utc())
