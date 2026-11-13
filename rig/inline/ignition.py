@@ -224,6 +224,10 @@ def _write(row):
                   last={"reading_id": row["reading_id"], "step": step, "camera_state": row["camera_state"]})
     if step != 0:
         _log(f"ignition: {row['reading_id']} Step {step:+d} ({row['decision_pct']} %)")
+    elif not status.get("written"):
+        _log(f"ignition: writing to {SERVER}/{DATABASE} as Cam{CAMERA_ID} "
+             f"(first row {row['reading_id']}, {row['camera_state']})")
+    status["written"] = status.get("written", 0) + 1
 
 
 def _writer():
