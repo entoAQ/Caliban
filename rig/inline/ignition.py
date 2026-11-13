@@ -23,9 +23,12 @@ within seconds, the next reading asks again before the product has settled.
 Never in the way of a reading: offer() only hands the row to a background
 thread, which keeps one connection open and gives up on a slow server after
 a few seconds. A failure is logged and shown in state["ignition"] (for the
-doctor); the reading is not affected. Gentle with the plant's server: at most
-one INSERT per reading that asks for a step, a heartbeat every 5 min, and one
-small SELECT by primary key before a step while the previous one may be open.
+doctor); the reading is not affected. Gentle with the plant's server: only
+ever INSERTs, never UPDATE or DELETE; at most one Step row per OPEN_FOR_S and
+one heartbeat per HEARTBEAT_S; one small SELECT by primary key before a step
+while the previous one may be open; on start, one SELECT of Cam1's newest row
+so the timing carries on across restarts; after a failure, nothing at all
+for RETRY_AFTER_S.
 
 Setup: /etc/caliban-inline.env, the same names as sgsc-app's ignition bridge:
     IGNITION_SQL_SERVER=dru-svr-sql-p01.sanimax.int   # unset: nothing is written
@@ -135,6 +138,9 @@ def offer(state, log=print):
 _conn = None
 _last_written_at = None     # UTC datetime of the last row written
 _open_step = None           # (CameraEntryId, ReadingTimeUtc) of the last Step row
+_resumed = False            # _resume_from_table() done since this start
+RETRY_AFTER_S = 60          # after a failure, nothing is tried for this long
+_retry_at = None
 
 
 def _connect():
@@ -170,8 +176,28 @@ def _step_still_open(now):
     return got is not None and got[0] is None
 
 
+def _resume_from_table():
+    """Once per start: carry on from Cam1's newest row in the table, so a
+    restart (or a loop restarting over and over) writes no extra rows. One
+    SELECT, on the (CameraId, ReadingTimeUtc) index."""
+    global _last_written_at, _open_step, _resumed
+    cur = _connect().cursor()
+    cur.execute("SELECT TOP 1 CameraEntryId, ReadingTimeUtc, Step, AppliedTimeUtc FROM dbo.CameraEntries "
+                "WHERE CameraId = %s ORDER BY ReadingTimeUtc DESC", (CAMERA_ID,))
+    got = cur.fetchone()
+    if got:
+        entry_id, at, step, applied = got
+        at = at.replace(tzinfo=timezone.utc)
+        _last_written_at = at
+        if step and applied is None:
+            _open_step = (str(entry_id), at)
+    _resumed = True
+
+
 def _write(row):
     global _last_written_at, _open_step
+    if not _resumed:
+        _resume_from_table()
     now = datetime.now(timezone.utc)
     step = row["step"]
     if step != 0 and _step_still_open(now):
@@ -201,20 +227,24 @@ def _write(row):
 
 
 def _writer():
-    global _offer
+    global _offer, _retry_at
     failing = False
     while True:
         with _lock:
             while _offer is None:
                 _lock.wait()
             row, _offer = _offer, None
+        if _retry_at is not None and datetime.now(timezone.utc) < _retry_at:
+            continue    # server failing: this row is dropped, a later one tries
         try:
             _write(row)
+            _retry_at = None
             if failing:
                 _log("ignition: writing again")
             failing = False
         except Exception as e:
             _drop_connection()
+            _retry_at = datetime.now(timezone.utc) + timedelta(seconds=RETRY_AFTER_S)
             status.update(ok=False, at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                           error=f"{type(e).__name__}: {e}"[:200])
             if not failing:
