@@ -190,6 +190,25 @@ before that date are NoIR readings.
 blown out in some channel. Keep it to a few percent: add diffusion over the
 flash or bounce it off the lined wall if it is higher.
 
+### Raw cut-outs for plastic (off by default)
+
+White plastic, wheat and larva gloss all clip to the same white in the photo,
+but the raw sensor frame may still hold their colour. With `"raw_crops": true`
+in `~/inline_camera.json`, every accepted photo (not the keep-alives) also
+saves up to 16 raw cut-outs of 32 px, with the same cut-out of the photo,
+around clipped spots that stand out from darker surroundings, to
+`~/captures/raw_crops/<photo>.npz`. About 40 KB a photo; saving stops past
+2 GB (`raw_crops_max_mb`). The photo, the readings and the flash timing are
+unchanged -- the cut-outs are taken after the frame is accepted, and any
+error there is logged and skipped.
+
+Switch on, watch a few readings in the log (`journalctl -u caliban-inline -f`:
+no "raw crops not saved", no extra flash misses), and switch off by setting it
+back to `false` -- the file is read at every capture, no restart needed. Then:
+
+    scp -r ttownshend@172.20.202.99:~/captures/raw_crops <folder>
+    python training/amas/raw_headroom.py <folder>
+
 ## Where readings are decided
 
 Since 2026-11-02, on the Pi. `decide.py` holds the rules Caliban's

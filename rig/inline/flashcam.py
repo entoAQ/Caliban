@@ -152,7 +152,32 @@ DEFAULTS = {
     # set up on. Set in ~/inline_camera.json; the flash check before it works
     # on the sensor's own rows and is unaffected.
     "rotate_180": False,
+    # Raw cut-outs of the bright spots, for plastic (2026-11-10). White
+    # plastic, wheat and larva gloss all clip to the same white in the JPEG:
+    # the colour gains and the tone curve push them past 255 even where the
+    # sensor itself is not full. The raw frame has 10-12 bits, so a spot that
+    # is 255 in the JPEG may still carry its colour there. With raw_crops on,
+    # every accepted photo saves up to raw_crops_max small raw cut-outs (and
+    # the same cut-out of the photo) around clipped spots that stand out from
+    # darker surroundings -- pieces, not bare-chute glare -- to
+    # RAW_CROP_DIR/<photo>.npz, for training/amas/raw_headroom.py. Off by
+    # default: switch on in ~/inline_camera.json. Stops saving past
+    # raw_crops_max_mb on disk. Keep-alive photos are skipped.
+    "raw_crops": False,
+    # 16 a photo, 32 px: all 14 known plastic pieces of 2026-10-26..11-08
+    # caught (8 a photo caught 8 -- gloss on larvae takes the places);
+    # ~12 a production photo, ~40 KB, a few hundred MB a day.
+    "raw_crops_max": 16,
+    # Areas never cut out, as (x0, y0, x1, y1) fractions of the saved photo:
+    # outside the analysed crop (product_crop) and the steel bar top right --
+    # the same as training/labelstudio/screen_plastic.py drops.
+    "raw_crop_skip": [[0, 0, 1, 0.22], [0, 0, 0.10, 1], [0.826, 0, 1, 0.303]],
+    "raw_crop_px": 32,
+    "raw_crops_max_mb": 2000,
 }
+
+RAW_CROP_DIR = os.path.join(HOME, "captures", "raw_crops")
+_raw_modes = {}   # sensor size -> picamera2 sensor mode, for the raw stream
 
 REFERENCE_FILE = os.path.join(HOME, "inline_reference.npy")
 
@@ -365,6 +390,88 @@ def keepalive(settings=None):
         flash.close()
 
 
+def _dir_mb(d):
+    try:
+        return sum(e.stat().st_size for e in os.scandir(d) if e.is_file()) / 1e6
+    except FileNotFoundError:
+        return 0.0
+
+
+def bright_spots(array, n, skip=(), rotated=False, cell=8, min_px=6, around_max=200):
+    """Up to n (x, y) centres, in `array`'s pixels, of clipped spots that
+    stand out from darker surroundings: the cells of `cell` px with the most
+    clipped whitish pixels (some channel at 250 or more, none under 200 --
+    white plastic clips in red and green while blue stays near 240, the
+    colour gains being 2.0 and 1.8), where the 5x5 cells around average under
+    `around_max` -- a piece or a husk on chute or among larvae, not the bare
+    chute clipping on an over-bright photo. `skip`: areas left out, as
+    fractions of the saved photo, i.e. turned half a turn when `rotated`.
+    Numpy only (no OpenCV on the Pi). Spots at least 6 cells apart."""
+    import numpy as np
+    h, w = array.shape[0] // cell * cell, array.shape[1] // cell * cell
+    a = array[:h, :w]
+    white = (a.max(axis=2) >= 250) & (a.min(axis=2) >= 200)
+    for x0, y0, x1, y1 in skip:
+        if rotated:
+            x0, y0, x1, y1 = 1 - x1, 1 - y1, 1 - x0, 1 - y0
+        white[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)] = False
+    count = white.reshape(h // cell, cell, w // cell, cell).sum(axis=(1, 3))
+    grey = a.mean(axis=2).reshape(h // cell, cell, w // cell, cell).mean(axis=(1, 3))
+    pad = np.pad(grey, 2, mode="edge")
+    around = sum(pad[i:i + grey.shape[0], j:j + grey.shape[1]] for i in range(5) for j in range(5)) / 25
+    # Gloss on a pale larva is faintly yellow where it clips (saturation 45+
+    # of 255), white plastic is not (36 and below; screen_plastic.GLOSS_S):
+    # whitish spots first, gloss only in the places left over.
+    sat = (a.max(axis=2).astype(np.int32) - a.min(axis=2)) * 255 // np.maximum(a.max(axis=2), 1)
+    sat_sum = np.where(white, sat, 0).reshape(h // cell, cell, w // cell, cell).sum(axis=(1, 3))
+    whitish = sat_sum < 44 * np.maximum(count, 1)
+    score = np.where((count >= min_px) & (around < around_max), count + 10000 * whitish, 0)
+    spots = []
+    for k in np.argsort(score, axis=None)[::-1]:
+        cy, cx = divmod(int(k), score.shape[1])
+        if score[cy, cx] == 0 or len(spots) >= n:
+            break
+        if all(abs(cy - y) >= 6 or abs(cx - x) >= 6 for y, x in spots):
+            spots.append((cy, cx))
+    return [(x * cell + cell // 2, y * cell + cell // 2) for y, x in spots]
+
+
+def _save_raw_crops(path, array, raw, meta, bits, fmt, s, log):
+    """Save raw and processed cut-outs around the photo's bright spots to
+    RAW_CROP_DIR/<photo>.npz (see DEFAULTS raw_crops). `array` and `raw` are
+    the same frame, both in the sensor's orientation."""
+    import numpy as np
+    if _dir_mb(RAW_CROP_DIR) > s["raw_crops_max_mb"]:
+        return
+    spots = bright_spots(array, s["raw_crops_max"], s.get("raw_crop_skip", ()), bool(s.get("rotate_180")))
+    if not spots:
+        return
+    h, w = array.shape[:2]
+    # Unpacked raw comes as bytes, two to a pixel, rows padded to a stride.
+    if raw.dtype == np.uint8:
+        raw = raw.view("<u2")
+    raw = raw[:h, :w]
+    half = s["raw_crop_px"] // 2
+    raws, rgbs, boxes = [], [], []
+    for x, y in spots:
+        # Even corner: the cut-out keeps the sensor's colour-filter pattern.
+        x0 = min(max(0, x - half), w - 2 * half) // 2 * 2
+        y0 = min(max(0, y - half), h - 2 * half) // 2 * 2
+        raws.append(raw[y0:y0 + 2 * half, x0:x0 + 2 * half].copy())
+        rgbs.append(array[y0:y0 + 2 * half, x0:x0 + 2 * half, ::-1].copy())   # BGR -> RGB
+        boxes.append((x0, y0, 2 * half, 2 * half))
+    os.makedirs(RAW_CROP_DIR, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    np.savez_compressed(
+        os.path.join(RAW_CROP_DIR, stem + ".npz"),
+        raw=np.stack(raws), rgb=np.stack(rgbs), boxes=np.array(boxes),
+        frame=np.array([w, h]), rotate_180=bool(s.get("rotate_180")),
+        bits=np.array(bits or 0), fmt=fmt,   # e.g. SRGGB10: the colour-filter order and depth
+        meta=json.dumps({k: meta.get(k) for k in ("SensorBlackLevels", "ColourGains", "ColourCorrectionMatrix",
+                                                  "ExposureTime", "AnalogueGain", "DigitalGain",
+                                                  "SensorTimestamp")}, default=str))
+
+
 def capture(path, settings=None, log=print, keep=None):
     """Take one flash-lit photo to `path` (JPEG). Returns a dict of what was
     measured, for the loop to keep and the screen's health chips to use.
@@ -385,9 +492,27 @@ def capture(path, settings=None, log=print, keep=None):
     period_ns = s["period_us"] * 1000
     flash = DigitalOutputDevice(s["flash_gpio"])
     cam = Picamera2()
+    want_raw = bool(s.get("raw_crops")) and not os.path.basename(path).startswith("KEEPALIVE")
+    raw_stream = {}
+    if want_raw:
+        try:
+            # The sensor mode the main stream uses, unpacked (16 bits a pixel,
+            # no compression) so the cut-outs are plain numbers.
+            size = tuple(s.get("sensor_size") or s["size"])
+            # Listing the modes reconfigures the camera once per mode (a second
+            # or two): done once per process, not at every capture.
+            if size not in _raw_modes:
+                _raw_modes[size] = next(m for m in cam.sensor_modes if tuple(m["size"]) == size)
+            mode = _raw_modes[size]
+            raw_stream = {"raw": {"format": mode["unpacked"], "size": size}}
+            raw_bits, raw_fmt = mode.get("bit_depth"), mode["unpacked"]
+        except Exception as e:
+            log(f"raw crops off for this capture: no raw stream ({e})")
+            want_raw = False
     try:
         config = cam.create_still_configuration(
             main={"size": tuple(s["size"]), "format": "RGB888"},
+            **raw_stream,
             **({"sensor": {"output_size": tuple(s["sensor_size"])}} if s.get("sensor_size") else {}),
             buffer_count=4,
             controls={
@@ -455,6 +580,8 @@ def capture(path, settings=None, log=print, keep=None):
                 r = cam.capture_request()
                 if r.get_metadata()["SensorTimestamp"] >= target_ts - period_ns // 2:
                     array = r.make_array("main")
+                    if want_raw:
+                        raw, raw_meta = r.make_array("raw"), r.get_metadata()
                     r.release()
                     break
                 r.release()
@@ -468,6 +595,13 @@ def capture(path, settings=None, log=print, keep=None):
             even = lit and min(shares) >= s["band_min_share"] * max(shares)
             fired_any |= lit
             if even:
+                if want_raw:
+                    # Before the half turn: the raw frame is in the sensor's
+                    # own orientation, and so is `array` until then.
+                    try:
+                        _save_raw_crops(path, array, raw, raw_meta, raw_bits, raw_fmt, s, log)
+                    except Exception as e:
+                        log(f"raw crops not saved: {e}")
                 if s.get("rotate_180"):
                     array = array[::-1, ::-1].copy()
                     top, bottom = bottom, top
