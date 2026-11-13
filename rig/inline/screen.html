@@ -491,7 +491,9 @@ function renderActions(actionable, r, ack) {
     box.innerHTML = '';
     box.dataset.sig = '';
     $('done').hidden = false;
-    const what = ack.choice === 'set' ? `Réglé à ${valueText(ack.setting, ack.unit)}` : (ACK_LABELS[ack.choice] || ack.choice);
+    let what = ack.choice === 'set' ? `Réglé à ${valueText(ack.setting, ack.unit)}` : (ACK_LABELS[ack.choice] || ack.choice);
+    // A fan move Ignition made (ignition.py, IGNITION_CONFIRMS=1), not a tap.
+    if (ack.by === 'ignition') what = `Ventilateur ajusté par Ignition (${ack.hz_before ?? '?'} → ${ack.hz_after ?? '?'} Hz)`;
     $('done').innerHTML = `✓ ${esc(what)}<small>${hhmm(ack.at)}</small>`;
     return;
   }

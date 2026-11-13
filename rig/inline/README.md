@@ -348,6 +348,21 @@ Without `IGNITION_SQL_SERVER` nothing is written. A failure never holds up a
 reading: it is logged once (`ignition: row not written: ...`) and kept in the
 state file under `ignition`.
 
+**When Ignition starts answering**, one more line in the env file, then
+`sudo systemctl restart caliban-inline`:
+
+| `IGNITION_CONFIRMS=` | What Ariel does with Ignition's answers |
+|---|---|
+| *(absent)* | Nothing; doesn't read them. The shadow run. |
+| `log` | Reads and logs each one (`ignition: answered ...`), nothing else. For checking Ignition's side. |
+| `1` | Also counts each fan move as a confirmation, exactly like a tap on the screen: the settle time starts, the screen shows « Ventilateur ajusté par Ignition », and it is recorded in Supabase. |
+
+A move is an applied step (`AppliedStep` +1/-1), or a Hz change nobody asked
+for (`HzBefore` differs from the last answer's `HzAfter`: by hand, or a
+start-up setpoint). A refusal (`AppliedStep` 0) is logged only. Set it back to
+`log` (or remove the line) and restart to go back to the operator alone.
+Operators should not also turn/confirm on the screen while it is `1`.
+
 ## Checking it from a laptop
 
 ```bash
