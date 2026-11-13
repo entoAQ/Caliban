@@ -43,6 +43,7 @@ import requests
 
 import decide
 import flashcam
+import ignition
 import screen
 
 CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
@@ -849,6 +850,11 @@ def main():
                     # time between them plus a capture.
                     slot = next_at if on_grid else now
                     wait = take_reading(state)
+                    # Cam1's row for Ignition (ignition.py): handed to a
+                    # background thread, so it never delays the next photo.
+                    ignition.offer(state, log)
+                    if ignition.ENABLED:
+                        state["ignition"] = dict(ignition.status)
                     on_grid = wait != IDLE_RECHECK_S
                     next_at = (slot if on_grid else now_utc()) + timedelta(seconds=wait)
                     state["next_at"] = iso(next_at)

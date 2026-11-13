@@ -323,6 +323,31 @@ With a USB keyboard, Alt+F4 closes the browser, but `lwrespawn` reopens it. To
 stop it for good, comment out the line in `~/.config/labwc/autostart` (Pi
 Connect shell or SSH) and reboot.
 
+## Ignition (Cam1)
+
+Since 2026-11-13 the loop also writes Ariel's requests to the destoner into the
+plant's `dbo.CameraEntries` (columns and rules: `ignition_camera_entries.sql`,
+writer: `ignition.py`). Ignition reads it as Cam1. Shadow for now: Ignition
+records, the fan is not moved, and the operator's screen is unchanged. To turn
+it on, add the server's details to `/etc/caliban-inline.env` (the same names as
+sgsc-app's Ignition bridge) and restart:
+
+```bash
+sudo apt install -y python3-pymssql   # or: sudo pip3 install --break-system-packages pymssql
+sudo tee -a /etc/caliban-inline.env >/dev/null <<'EOF'
+IGNITION_SQL_SERVER=dru-svr-sql-p01.sanimax.int
+IGNITION_SQL_DATABASE=<database>
+IGNITION_SQL_USER=CameraUser
+IGNITION_SQL_PASSWORD=<password>
+EOF
+sudo systemctl restart caliban-inline
+journalctl -u caliban-inline -f | grep ignition
+```
+
+Without `IGNITION_SQL_SERVER` nothing is written. A failure never holds up a
+reading: it is logged once (`ignition: row not written: ...`) and kept in the
+state file under `ignition`.
+
 ## Checking it from a laptop
 
 ```bash
