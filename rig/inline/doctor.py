@@ -505,13 +505,53 @@ def check_flash(full):
     if flash == "low":
         return check("flash", "Flash", "warn", f"Plus faible que d'habitude{lvl}.",
                      manual="Changer les 4 piles AA du flash (piles rechargeables chargées).")
+    if os.path.exists(FLASH_SWAP_FILE):
+        return check("flash", "Flash", "ok", "Flash remplacé : compteur remis à zéro à la prochaine photo.")
     if flash not in ("ok", None):
-        return check("flash", "Flash", "fail", "Ne se déclenche pas.", fix="test_flash",
+        return check("flash", "Flash", "fail", "Ne se déclenche pas." + flash_counts(state), fix="test_flash",
                      manual="1. Appuyer sur un bouton du flash pour le réveiller. "
-                            "2. S'il ne s'allume pas : changer les piles. 3. Puis « Tester le flash ».")
+                            "2. S'il ne s'allume pas : vérifier son alimentation. 3. Puis « Tester le flash ». "
+                            "4. S'il ne se déclenche toujours pas : le remplacer par le flash de rechange, "
+                            "puis « Flash remplacé ».")
+    rate, bad, n = flash_miss_rate(state)
+    if rate is not None and rate >= FLASH_MISS_FAIL:
+        return check("flash", "Flash", "fail",
+                     f"Rate {rate:.0%} des photos ({bad} sur les {n} dernières) : le flash est en fin de vie."
+                     + flash_counts(state), fix="flash_replaced",
+                     manual="Remplacer le flash par le flash de rechange, puis appuyer sur « Flash remplacé ».")
+    if rate is not None and rate >= FLASH_MISS_WARN:
+        return check("flash", "Flash", "warn",
+                     f"Commence à rater : {rate:.0%} des photos ({bad} sur les {n} dernières)."
+                     + flash_counts(state), fix="flash_replaced",
+                     manual="Le flash s'use : le remplacer dans la journée par le flash de rechange, "
+                            "puis appuyer sur « Flash remplacé ». Prévenir l'AQ s'il n'y a pas de rechange.")
     last = age_s(state.get("last_flash_at"))
     text = f"Dernier éclair il y a {minutes(last)}{lvl}." if last is not None else "OK."
     return check("flash", "Flash", "ok", text + flash_counts(state))
+
+
+# Flash wear, from loop.py's flash_recent (the last 200 reading captures, one
+# letter each: o first try, r retried, f no photo, u lit but uneven) and
+# flash_unit (firings since this flash went in). The first TT520III's
+# empty photo slots went 0.8 % (11-11), 5 % (11-12), 12 % (its last two
+# hours), then it stopped, at about 30,000 firings: 3 % would have warned
+# the evening of 11-11, a day and a half ahead. First guesses from one flash.
+FLASH_SWAP_FILE = os.path.join(HOME, "flash_replaced")
+FLASH_RECENT_MIN = 50
+FLASH_MISS_WARN = 0.03
+FLASH_MISS_FAIL = 0.10
+FLASH_UNIT_SPARE = 25000
+
+
+def flash_miss_rate(state):
+    """(share of recent captures that needed a retry or gave no photo, how
+    many, out of how many), or (None, 0, n) with too few to judge."""
+    recent = state.get("flash_recent") or ""
+    n = len(recent)
+    bad = n - recent.count("o")
+    if n < FLASH_RECENT_MIN:
+        return None, bad, n
+    return bad / n, bad, n
 
 
 def flash_counts(state):
@@ -532,7 +572,18 @@ def flash_counts(state):
                 out += (f" ; essais manqués : {today.get('miss_no_flash', 0)} sans éclair,"
                         f" {today.get('miss_split', 0)} décalés")
             out += ")"
-    return out + "."
+    out += "."
+    unit = state.get("flash_unit") or {}
+    if unit.get("flashes"):
+        out += (f" Ce flash : {unit['flashes']:,} éclairs depuis le {str(unit.get('since', ''))[:10]}"
+                .replace(",", " "))
+        rate, bad, n = flash_miss_rate(state)
+        if rate is not None:
+            out += f", {bad} raté(s) sur les {n} dernières photos"
+        out += "."
+        if unit["flashes"] >= FLASH_UNIT_SPARE:
+            out += " Le précédent a tenu environ 30 000 éclairs : avoir un flash de rechange prêt."
+    return out
 
 
 
@@ -875,6 +926,14 @@ def fix_test_flash():
     return False, f"La caméra n'a pas pris de photo : {res.get('error', '')[:150]}"
 
 
+def fix_flash_replaced():
+    # The loop owns inline_state.json and would write over a change made
+    # here; it picks this file up at its next firing (loop.flash_unit).
+    with open(FLASH_SWAP_FILE, "w") as f:
+        f.write(datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    return True, "Noté : le compteur du nouveau flash part de zéro à la prochaine photo."
+
+
 def fix_check_camera():
     """camcheck.py: listed, link errors, frame timing, how late the flash went
     out -- for a flash timing fault. Like the flash test, it needs the camera,
@@ -1045,6 +1104,7 @@ FIXES = {
     "restart_loop":   ("Redémarrer les lectures", fix_restart_loop),
     "test_flash":     ("Tester le flash", fix_test_flash),
     "test_photo":     ("Photo de contrôle", fix_test_flash),
+    "flash_replaced": ("Flash remplacé", fix_flash_replaced),
     "check_camera":   ("Vérifier la caméra", fix_check_camera),
     "send_logs":      ("Envoyer le journal", fix_send_logs),
     "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
@@ -1066,7 +1126,8 @@ if TRAY:
 # Never applied by "Tout réparer": the reboot is its own decision, the flash
 # test only means something after someone has woken the flash by hand, and
 # the code update restarts this process from under the rest of the run.
-NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code",
+# « Flash remplacé » only says what someone did with their hands.
+NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code", "flash_replaced",
                      "test_photo", "check_camera", "send_logs", "rollback_code"}
 # These end this process: say "started" to the server before running them.
 ENDS_PROCESS = {"reboot", "update_code", "rollback_code"}

@@ -194,6 +194,37 @@ def take_photo(reading_id, state=None):
 # Kept in the state file, so mirrored with it to inline_rig_status.
 FLASH_DAYS_KEPT = 60
 
+# Flash wear (2026-11-13). The first TT520III died after ~30,000 firings in
+# five weeks: when it fired it was as bright as ever, but from 11-10 more and
+# more triggers lit nothing -- retries, then empty photo slots (0.8 % on
+# 11-11, 5 % on 11-12, 12 % in its last two hours) -- until none did. Two
+# things are kept for the doctor's flash check: flash_recent, the last
+# FLASH_RECENT_N reading captures as one letter each (o first try, r retried,
+# f no photo, u lit but never a whole frame), for the miss rate; and
+# flash_unit, the firings since this flash went in, reset when the doctor's
+# « Flash remplacé » leaves FLASH_SWAP_FILE (the loop owns the state file, so
+# the doctor asks rather than writing it). Keep-alives count towards the unit
+# but not the rate: over the empty chute they are often uneven when fine.
+FLASH_RECENT_N = 200
+FLASH_SWAP_FILE = os.path.join(HOME, "flash_replaced")
+
+
+def flash_unit(state):
+    """This flash's firing count, started or restarted as FLASH_SWAP_FILE says."""
+    if os.path.exists(FLASH_SWAP_FILE):
+        try:
+            with open(FLASH_SWAP_FILE) as f:
+                since = f.read().strip()
+            os.remove(FLASH_SWAP_FILE)
+        except OSError:
+            since = ""
+        state["flash_unit"] = {"since": since or iso(now_utc()), "flashes": 0}
+        state["flash_recent"] = ""
+        log("flash replaced: firing count and miss rate start again")
+    # Before the first « Flash remplacé », counting starts with this code
+    # (the spare went in on 2026-11-13, a few hundred firings earlier).
+    return state.setdefault("flash_unit", {"since": iso(now_utc()), "flashes": 0})
+
 
 def count_skipped(state, n):
     """Add n skipped photo slots (SLOT_GRACE_S) to today's count, 14 days kept."""
@@ -223,8 +254,12 @@ def count_flash(state, firings, measured, keepalive=False, lit=False, missed=Non
     firings = max(1, int(firings or 1))
     day["flashes"] += firings
     total["flashes"] += firings
+    flash_unit(state)["flashes"] += firings
     if keepalive:
         day["keepalive"] += 1
+    else:
+        mark = ("u" if lit else "f") if measured is None else ("r" if firings > 1 else "o")
+        state["flash_recent"] = (state.get("flash_recent", "") + mark)[-FLASH_RECENT_N:]
     if missed is None and measured is not None:
         missed = measured.get("missed")
     if isinstance(missed, dict):

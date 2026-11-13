@@ -119,7 +119,7 @@ async function load() {
 }
 
 // Ask twice for these: they interrupt the rig for a minute or more.
-const RISKY = ['reboot', 'update_code', 'rollback_code'];
+const RISKY = ['reboot', 'update_code', 'rollback_code', 'flash_replaced'];
 // Buttons with nothing to show on this page: they bring back a log or a
 // photo for SGSC to display.
 const REMOTE_ONLY = ['send_logs'];
@@ -146,7 +146,7 @@ function render(rep) {
   s.innerHTML = rep.overall === 'ok' ? 'Tout fonctionne'
     : `${fails.length ? fails.length + ' panne(s)' : ''}${fails.length && bad.length > fails.length ? ', ' : ''}${bad.length > fails.length ? (bad.length - fails.length) + ' avertissement(s)' : ''}`
       + '<small>Commencer par « Tout réparer ». Si ça ne suffit pas, suivre les consignes en jaune.</small>';
-  $('repair-all').hidden = !bad.some(c => c.fix && !['reboot', 'test_flash', 'test_photo', 'update_code', 'rollback_code'].includes(c.fix));
+  $('repair-all').hidden = !bad.some(c => c.fix && !['reboot', 'test_flash', 'test_photo', 'update_code', 'rollback_code', 'flash_replaced'].includes(c.fix));
 
   $('problems').innerHTML = bad.map(c => `
     <div class="check ${c.status}">
