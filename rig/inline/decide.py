@@ -988,6 +988,11 @@ def inline_detector(raw, n_photos):
     crop = _fractions([det.get("crop")], 2, 1)
     if crop:
         out["crop"] = crop[0]
+    # The dust strip's outline (meo_detect.STRIP), (x, y) points, for SGSC
+    # to draw and to grey out the boxes centred in it.
+    outline = _fractions(det.get("strip_outline"), 2, 40)
+    if outline and len(outline) >= 3:
+        out["strip_outline"] = outline
     return out
 
 

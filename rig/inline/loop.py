@@ -348,9 +348,11 @@ def detect_burst(paths):
         return None
     detector_status.clear(); detector_status.update(ok=True, at=iso(now_utc()), error=None, version=meo_detect.version(),
                            photos=len(photos), s=round(sum(p["ms"] for p in photos) / 1000, 1))
-    # The measured area, as fractions of the photo, for SGSC to outline.
+    # The measured area and the dust strip, as fractions of the photo, for
+    # SGSC to outline.
     return {"version": meo_detect.version(), "photos": photos,
-            "crop": [meo_detect.CROP_LEFT, meo_detect.CROP_TOP]}
+            "crop": [meo_detect.CROP_LEFT, meo_detect.CROP_TOP],
+            "strip_outline": [list(p) for p in meo_detect.STRIP]}
 
 
 _detector_missing = None
