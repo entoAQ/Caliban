@@ -23,7 +23,7 @@ low trigger voltage. Keep it off the first rows of the breadboard (loose
 contacts), and solder it for the line -- push-fit joints do not survive the
 destoner's vibration.
 
-**Status:** screen, capture loop and the Caliban side are written and tested
+**Status (historical, before the Pi decided):** screen, capture loop and the Caliban side are written and tested
 against stand-ins. The camera part of the loop is provisional (a plain still,
 no flash sync) until the Camera Module 3 and the flash are on the bench, and
 every current prompt describes a dish, not a chute -- so readings run in
@@ -228,13 +228,12 @@ key. A stolen login can add readings and confirmations and overwrite Ariel's
 own status row, never change or delete a recorded reading, and `rig-upload`
 refuses a photo for a reading already recorded.
 
-`decide.py` was generated from Caliban's `app/main.py` until the App Service
-was retired (stopped 2026-11-09); it is now the source, and a rule change is
-made there only. Replay it over recorded readings before shipping one.
+`decide.py` began as a copy of Caliban's `app/main.py`; the App Service was
+stopped 2026-11-09 and deleted that month, `app/` with it, so `decide.py` is
+the only source. Replay a rule change over recorded readings before shipping.
 
-The switch is `ARIEL_DECIDES=1` in the env file. Without it the loop still
-posts to `CALIBAN_URL` as before -- kept only as the way back while the App
-Service is stopped, not deleted.
+`ARIEL_DECIDES=1` and `ARIEL_RIG_DB_URL` are both required in the env file:
+without them the loop refuses to start (there is no Caliban to fall back on).
 
 ## Setup
 

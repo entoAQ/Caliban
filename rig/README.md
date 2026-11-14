@@ -161,8 +161,7 @@ journalctl -u caliban-rig-netwatch -f     # silent while online
 ```
 
 Every minute it checks whether the internet answers
-(`https://www.google.com/generate_204`, or `CALIBAN_URL/health` first while
-that line is still in the env file). Offline for 5 minutes, it cycles the Wi-Fi radio once; offline for
+(`https://www.google.com/generate_204`). Offline for 5 minutes, it cycles the Wi-Fi radio once; offline for
 15, it reboots, at most once an hour. Added after 2026-09-30, when the Pi
 stayed off the network for over an hour after the plant Wi-Fi came back and
 only a reboot on site fixed it.
@@ -344,7 +343,7 @@ The Pi logs in to Postgres as `tray_rig`, a role that can read and finish
 capture commands and nothing more, and sends photos through `rig-upload`. It
 holds no service key: putting one on a device sitting in a factory is the
 thing this design exists to avoid. (Until 2026-10-30 it went through Caliban,
-which held the key; Caliban's App Service was stopped 2026-11-09.)
+which held the key; Caliban's App Service was stopped 2026-11-09 and later deleted.)
 
 ## Why the lab ME% arrives late
 

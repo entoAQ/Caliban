@@ -13,10 +13,12 @@
 #   offline  5 min   -> cycle the Wi-Fi radio, once per outage.
 #   offline 15 min   -> reboot, at most once an hour.
 #
-# "Online" means Caliban answered with any HTTP status at all, or failing
-# that, the internet did. A Caliban outage is not the Pi's problem, and
-# rebooting the Pi every hour because Azure is down would fix nothing while
-# killing anything someone was doing at the bench.
+# "Online" means the internet answered (Google's generate_204, any HTTP
+# status at all). It used to ask Caliban first; the App Service is gone, and
+# both Pis have run on the Google check alone since 2026-11-09. A cloud
+# outage is not the Pi's problem, so this never asks Supabase: rebooting the
+# Pi every hour because a service is down would fix nothing while killing
+# anything someone was doing at the bench.
 #
 # The hourly cap is the other half of that: if the plant Wi-Fi is down for a
 # day, the Pi reboots once an hour rather than every 15 minutes, which is
@@ -30,9 +32,6 @@
 
 set -uo pipefail
 
-# The tray rig's settings, or the inline rig's (Ariel) -- either names Caliban.
-ENV_FILE=/etc/caliban-rig.env
-[ -f "$ENV_FILE" ] || ENV_FILE=/etc/caliban-inline.env
 BUSY_FILE=/home/ttownshend/.caliban-rig-busy
 OFF_FILE=/home/ttownshend/.caliban-netwatch-off
 
@@ -59,14 +58,8 @@ if [ -f "$OFF_FILE" ]; then
     exit 0
 fi
 
-CALIBAN_URL=$(sed -n 's/^CALIBAN_URL=//p' "$ENV_FILE" 2>/dev/null | tr -d '"' | sed 's:/*$::')
-
 reachable() {
     local code
-    if [ -n "$CALIBAN_URL" ]; then
-        code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' "$CALIBAN_URL/health")
-        [ "$code" != "000" ] && return 0
-    fi
     code=$(curl -s -o /dev/null -m 15 -w '%{http_code}' https://www.google.com/generate_204)
     [ "$code" != "000" ]
 }
@@ -81,7 +74,7 @@ fi
 
 if [ ! -f "$RUN_DIR/down_since" ]; then
     echo "$now" > "$RUN_DIR/down_since"
-    echo "offline -- neither Caliban nor the internet answered"
+    echo "offline -- the internet did not answer"
     exit 0
 fi
 

@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """Inline rig capture loop -- photograph the chute, get a reading, feed the screen.
 
-Every few minutes: take a photo, send it to Caliban's /inline/readings, and
-write what comes back into ~/inline_state.json for screen.py to show. In
-between, forward the operator's confirmations from ~/inline_acks.jsonl to
-/inline/acks so they are recorded against the readings they answer.
+Every few minutes: take a photo, decide what the screen should say
+(decide.py), record the reading, and write the answer into
+~/inline_state.json for screen.py to show. In between, record the operator's
+confirmations from ~/inline_acks.jsonl against the readings they answer.
 
-Like the tray rig's poller, the Pi only ever reaches out: nothing on the plant
-network or in the cloud calls in. Unlike it, nobody asks for a photo -- the
-loop takes one on its own schedule, and Caliban sets that schedule
-(next_in_s in every reply, from system_config.inline_settings).
+The Pi only ever reaches out: nothing on the plant network or in the cloud
+calls in. Nobody asks for a photo -- the loop takes one on its own schedule,
+set by next_in_s in every answer (from system_config.inline_settings).
+
+Caliban's App Service decided and recorded until 2026-11-02, and was deleted
+in November 2026; its CALIBAN_URL path is gone from this file.
 
 Setup (see README.md):
     /etc/caliban-inline.env
-        CALIBAN_URL=https://your-caliban-host
-        INLINE_API_KEY=...                 # must match Caliban's INLINE_API_KEY
+        INLINE_API_KEY=...                 # must match SGSC's rig-upload key
+        ARIEL_RIG_DB_URL=postgresql://...  # login ariel_rig; needs python3-psycopg2
+        ARIEL_DECIDES=1                    # required: the loop refuses to start
+                                           # without it
         INLINE_FAKE_PHOTO=/path/to.jpg     # optional: send this file instead of
                                            # using the camera, to test the chain
-        ARIEL_RIG_DB_URL=postgresql://...  # optional: decide.py works each reading
-                                           # out here too and compares (shadow);
-                                           # needs python3-psycopg2
-        ARIEL_DECIDES=1                    # with ARIEL_RIG_DB_URL: the switch. The
-                                           # Pi decides and records each reading
-                                           # itself, and Caliban is no longer asked
-                                           # anything (CALIBAN_URL can then go)
 
 The photo itself is flashcam.py: a long exposure with the flash fired while
 every row of the rolling shutter is exposing, checked for "lit" and "lit
@@ -46,7 +43,6 @@ import flashcam
 import ignition
 import screen
 
-CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
 INLINE_API_KEY = os.environ.get("INLINE_API_KEY", "")
 FAKE_PHOTO = os.environ.get("INLINE_FAKE_PHOTO", "")
 
@@ -74,7 +70,6 @@ SLOT_GRACE_S = 3
 # Forwarding confirmations and the mirror take a network call each; not
 # started with less than this left before a slot.
 HOUSEKEEPING_S = 2
-REQUEST_TIMEOUT = 120      # an analysis with escalated rotations takes a while
 HISTORY_KEEP = 600         # the screen's two-hour trend at a reading every 15 s, with margin
 # A capture is a few seconds; with every flash retry used (6 tries, 10 s
 # apart, flashcam.DEFAULTS) about 65 s. Past this, libcamera has wedged inside
@@ -92,10 +87,6 @@ def now_utc():
 
 def iso(dt):
     return dt.isoformat(timespec="seconds")
-
-
-def headers():
-    return {"X-API-Key": INLINE_API_KEY}
 
 
 # --- State file ---------------------------------------------------------------
@@ -456,42 +447,15 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
         run_cm, run = ack_runs(acks, state.get("history"), below, "cm")
         run_qt, _ = ack_runs(acks, state.get("history"), below, "quarter")
         data["increase_run_cm"], data["increase_run_qt"], data["decrease_run"] = str(run_cm), str(run_qt), str(run)
-    if decide.DECIDES:
-        try:
-            return decide.record(data, paths, INLINE_API_KEY, log), None
-        except decide.Refused as e:
-            return None, f"{e.status}: {e.detail}"
-        except Exception as e:
-            if decide.unreachable(e):
-                # Shown as no connection, exactly as Caliban out of reach was.
-                raise requests.ConnectionError(f"database: {type(e).__name__}: {e}") from e
-            raise
-    shadow = decide.shadow_before(data, paths, log) if decide.DB_URL else None
-    handles = [open(p, "rb") for p in paths]
     try:
-        files = [("file" if i == 0 else "more", (os.path.basename(p), h, "image/jpeg"))
-                 for i, (p, h) in enumerate(zip(paths, handles))]
-        resp = requests.post(
-            f"{CALIBAN_URL}/inline/readings",
-            headers=headers(),
-            files=files,
-            data=data,
-            timeout=REQUEST_TIMEOUT,
-        )
-    finally:
-        for h in handles:
-            h.close()
-    if resp.ok:
-        reply, error = resp.json(), None
-    else:
-        try:
-            detail = resp.json().get("detail")
-        except ValueError:
-            detail = resp.text[:200]
-        reply, error = None, f"{resp.status_code}: {detail}"
-    if shadow:
-        decide.shadow_after(shadow, reading_id, reply, error, state if state is not None else {}, log)
-    return reply, error
+        return decide.record(data, paths, INLINE_API_KEY, log), None
+    except decide.Refused as e:
+        return None, f"{e.status}: {e.detail}"
+    except Exception as e:
+        if decide.unreachable(e):
+            # Shown as no connection, exactly as Caliban out of reach was.
+            raise requests.ConnectionError(f"database: {type(e).__name__}: {e}") from e
+        raise
 
 
 def forward_acks():
@@ -515,12 +479,8 @@ def forward_acks():
             batch.append(json.loads(l))
         except ValueError:
             log(f"skipping unreadable confirmation line: {l[:80]}")
-    if batch and decide.DECIDES:
+    if batch:
         decide.record_acks(batch)
-    elif batch:
-        resp = requests.post(f"{CALIBAN_URL}/inline/acks", headers=headers(),
-                             json=batch, timeout=30)
-        resp.raise_for_status()
     with open(ACK_SENT_FILE, "w") as f:
         f.write(str(len(lines)))
     log(f"forwarded {len(batch)} confirmation(s)")
@@ -550,12 +510,7 @@ def mirror_state(state):
     if sig == _mirror["sig"] and time.monotonic() - _mirror["at"] < MIRROR_EVERY_S:
         return
     try:
-        if decide.DECIDES:
-            decide.set_status(payload)
-        else:
-            resp = requests.post(f"{CALIBAN_URL}/inline/state", headers=headers(),
-                                 json={**payload, "device": "ariel"}, timeout=15)
-            resp.raise_for_status()
+        decide.set_status(payload)
         _mirror.update(sig=sig, at=time.monotonic())
         if _mirror["failing"]:
             log("mirror state sent again")
@@ -757,10 +712,9 @@ def take_reading(state):
     try:
         reply, error = request_reading(reading_id, paths, covers, det, state)
     except requests.RequestException as e:
-        log(f"{'database' if decide.DECIDES else 'Caliban'} unreachable for {reading_id}: {type(e).__name__}: {e}")
+        log(f"database unreachable for {reading_id}: {type(e).__name__}: {e}")
         set_health(state, network="down",
-                   message="Pas de connexion au nuage — lecture non analysée" if decide.DECIDES
-                   else "Pas de connexion à Caliban — lecture non analysée")
+                   message="Pas de connexion au nuage — lecture non analysée")
         # Sooner than a full interval: the network usually comes back quickly,
         # and every skipped reading is a gap on the screen.
         return min(interval, 60)
@@ -845,17 +799,15 @@ def take_reading(state):
 
 
 def main():
-    if decide.DECIDES and not decide.DB_URL:
-        sys.exit("ARIEL_DECIDES=1 needs ARIEL_RIG_DB_URL as well.")
-    if not INLINE_API_KEY or not (CALIBAN_URL or decide.DECIDES):
-        sys.exit("INLINE_API_KEY must be set, and CALIBAN_URL unless ARIEL_DECIDES=1.")
-    target = "decides here (ARIEL_DECIDES=1)" if decide.DECIDES else CALIBAN_URL
-    log(f"inline loop -> {target}" + (f"  (fake photo {FAKE_PHOTO})" if FAKE_PHOTO else ""))
+    # ARIEL_DECIDES stays required although there is no other path now: a Pi
+    # whose env file lost it should stop loudly, not look as if it runs.
+    if not (decide.DECIDES and decide.DB_URL and INLINE_API_KEY):
+        sys.exit("ARIEL_DECIDES=1, ARIEL_RIG_DB_URL and INLINE_API_KEY must all be set.")
+    log("inline loop -> decides here" + (f"  (fake photo {FAKE_PHOTO})" if FAKE_PHOTO else ""))
 
     state = load_state()
-    if decide.DECIDES:
-        # Nothing to compare with any more; the last tally would only go stale.
-        state.pop("decide_shadow", None)
+    # The shadow tally from before the switch (2026-11-02).
+    state.pop("decide_shadow", None)
     # A "low" left in the state file from before FLASH_LOW_WARN was turned off
     # would otherwise stay on the screen until a usable level came in.
     if not FLASH_LOW_WARN and state.get("health", {}).get("flash") == "low":

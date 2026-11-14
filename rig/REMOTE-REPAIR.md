@@ -11,11 +11,11 @@ are known or expected to fail, sorted by who fixes it:
 Written 2026-10-13. When a tool changes, change its row here.
 
 **Caliban, the App Service, is out of the picture since 2026-11-09** (stopped
-that day, to be deleted). Ariel decides on its Pi, the tray rig takes its
+that day, deleted later in November 2026). Ariel decides on its Pi, the tray rig takes its
 orders from the database, and both doctors report to SGSC's `rig-doctor`
 function, so the only cloud either rig needs is Supabase. Its section, its
 GitHub buttons (*Prospero — vérifier / redémarrer / journaux / revenir*) and
-`AZURE_CREDENTIALS` were removed from this file; the workflows go with the app.
+`AZURE_CREDENTIALS` were removed from this file, and the workflows went with the app.
 
 ## Where the buttons are
 

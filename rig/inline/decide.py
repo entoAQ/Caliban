@@ -1,24 +1,18 @@
 #!/usr/bin/env python3
 """What Ariel's screen should say about a reading, worked out on the Pi.
 
-Caliban did this until 2026-11-02; its App Service was stopped 2026-11-09. The
-detector already runs here (meo_detect.py), so all that was left up there was
+Caliban did this until 2026-11-02; its App Service was stopped 2026-11-09 and
+deleted in November 2026, app/main.py with it. The detector already runs here (meo_detect.py), so all that was left up there was
 these rules and a few writes. The rules below were copied from Caliban's
 app/main.py word for word: operators act on these instructions, and a rewrite
 could change one without anyone noticing. Only the queries differ.
 
-THIS FILE IS NOW THE SOURCE. It was generated from main.py, and changes were
-made in both until the App Service stopped; from here on a rule changes here
-only, and main.py's inline routes are dead code waiting to be deleted. Never
-regenerate this file from main.py: that would undo every change since.
+THIS FILE IS THE SOURCE. A rule changes here and nowhere else; main.py is in
+git history only (before the commit that deleted app/), for what a rule was.
 
-Shadow first: with ARIEL_RIG_DB_URL in /etc/caliban-inline.env, loop.py works out
-each reading here as well as asking Caliban, and compares the two. Caliban still
-decides and records everything. The login can only read (sgsc-app
-database/2026-11-01-ariel-rig-role.sql), so shadow can't touch production data.
-The tally lands in the state mirrored to inline_rig_status, as "decide_shadow".
-
-The switch: with ARIEL_DECIDES=1 as well, loop.py stops asking Caliban. record()
+It ran in shadow beside Caliban first (2026-11-02, 206 of 206 readings the same)
+and that comparison code is gone with Caliban. ARIEL_DECIDES=1 and
+ARIEL_RIG_DB_URL in /etc/caliban-inline.env are both required. record()
 decides here, sends the photos to SGSC's rig-upload function and records the
 reading through ariel_record_reading(); confirmations and the mirrored screen go
 through ariel_record_acks() and ariel_set_status() (sgsc-app
@@ -31,8 +25,7 @@ only they could reach. A decider other than "yolo" is refused, so settings that
 can't be read never turn into an instruction.
 
 Kept apart from loop.py so it can run and be tested without a camera. psycopg2 and
-Pillow are imported where they are used: a missing one costs the shadow run, never
-the loop.
+Pillow are imported where they are used, so the rules can be tested without them.
 """
 
 import datetime
@@ -41,7 +34,6 @@ import json
 import os
 import re
 import statistics
-import time
 from decimal import Decimal
 
 DB_URL = os.environ.get("ARIEL_RIG_DB_URL", "")
@@ -1330,9 +1322,8 @@ def record(data, paths, api_key, log):
     the reading. Returns the reply. Raises Refused like decide(), and a database
     error when it can't be reached (see unreachable)."""
     # First, because the settings lookup swallows a lost connection and falls
-    # back to defaults, which decide() refuses as unreadable settings: right for
-    # the shadow, but here the screen must say "no connection", as it did when
-    # Caliban was out of reach.
+    # back to defaults, which decide() refuses as unreadable settings, while the
+    # screen must say "no connection", as it did when Caliban was out of reach.
     _query("select 1 as up")
     reply, row = decide(data, paths)
     if row is None:
@@ -1363,72 +1354,3 @@ def record_acks(batch):
 def set_status(payload):
     """The screen's state, for SGSC's mirror (destoner-mirror.html)."""
     _query("select public.ariel_set_status(%s::jsonb) as done", (json.dumps(payload, default=str),))
-
-
-# --- Shadow: beside Caliban, compared on every reading -------------------------
-
-# recorded_id is the row Caliban just made; there is nothing to compare it with.
-NOT_COMPARED = {"recorded_id"}
-DIFFS_KEPT = 10
-
-
-def differences(pi, caliban):
-    """{field: [pi, caliban]} over both dicts' keys, JSON-shaped first so a tuple
-    and a list, or 1 and 1.0, are not a difference."""
-    a, b = json.loads(json.dumps(pi)), json.loads(json.dumps(caliban, default=str))
-    return {k: [a.get(k), b.get(k)] for k in sorted(set(a) | set(b))
-            if k not in NOT_COMPARED and a.get(k) != b.get(k)}
-
-
-def shadow_before(data, paths, log):
-    """Work the reading out here, before Caliban records it, so the window both
-    pool from is the same. Returns what shadow_after compares; never raises."""
-    started = time.monotonic()
-    out = {"reply": None, "row": None, "refused": None, "failed": None}
-    try:
-        out["reply"], out["row"] = decide(data, paths)
-    except Refused as e:
-        out["refused"] = f"{e.status}: {e.detail}"
-    except Exception as e:
-        out["failed"] = f"{type(e).__name__}: {e}"
-        log(f"shadow: {out['failed']}")
-    out["s"] = round(time.monotonic() - started, 2)
-    return out
-
-
-def shadow_after(shadow, reading_id, reply, error, state, log):
-    """Compare with what Caliban answered and recorded, and tally it in state.
-    Never raises: a fault here must not cost a reading."""
-    try:
-        t = state.setdefault("decide_shadow", {"since": _now_iso(), "same": 0, "different": 0, "failed": 0,
-                                               "row_same": 0, "row_different": 0, "diffs": []})
-        t["last_s"] = shadow["s"]
-        if shadow["failed"]:
-            t["failed"] += 1
-            t["last_failure"] = shadow["failed"][:200]
-            return
-        if error or shadow["refused"]:
-            diffs = {} if bool(error) == bool(shadow["refused"]) and error[:3] == shadow["refused"][:3] \
-                else {"refused": [shadow["refused"], error]}
-        else:
-            diffs = differences(shadow["reply"], reply)
-        if shadow["row"] and not error:
-            stored = _query("""select * from public.vision_band_estimates
-                               where source = 'inline' and lot_number_text = %s
-                                 and operator_instruction is not null limit 1""", (reading_id,))
-            row_diffs = differences(shadow["row"], {k: stored[0].get(k) for k in shadow["row"]}) if stored \
-                else {"row": ["expected", None]}
-            t["row_different" if row_diffs else "row_same"] += 1
-            diffs.update({f"row.{k}": v for k, v in row_diffs.items()})
-        if diffs:
-            t["different"] += 1
-            t["diffs"] = (t["diffs"] + [{"id": reading_id, **diffs}])[-DIFFS_KEPT:]
-            log(f"shadow {reading_id} differs: {json.dumps(diffs, default=str)[:600]}")
-        else:
-            t["same"] += 1
-    except Exception as e:
-        log(f"shadow comparison failed: {type(e).__name__}: {e}")
-
-
-def _now_iso():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")

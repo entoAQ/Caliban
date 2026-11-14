@@ -81,12 +81,11 @@ LOG_UNITS = ["caliban-inline", "caliban-inline-screen", "caliban-doctor",
 LOG_UNITS_TRAY = ["caliban-rig", "caliban-doctor", "caliban-rig-update", "caliban-rig-netwatch"]
 LOG_LINES = 300
 
-CALIBAN_URL = os.environ.get("CALIBAN_URL", "").rstrip("/")
-# Where reports go. DOCTOR_URL is sgsc-app's rig-doctor Edge Function, which has
-# the same /report, /ping and /attachment as Caliban's /doctor routes. Without
-# that line in the env file the rig reports to Caliban as it always did.
+# Where reports go: sgsc-app's rig-doctor Edge Function (/report, /ping,
+# /attachment). Caliban's /doctor routes did this until 2026-11-01; the App
+# Service is gone, and so is the CALIBAN_URL fallback.
 DOCTOR_URL = os.environ.get("DOCTOR_URL", "").rstrip("/")
-REPORT_API = DOCTOR_URL or (f"{CALIBAN_URL}/doctor" if CALIBAN_URL else "")
+REPORT_API = DOCTOR_URL
 # Which rig this is. Each reports with its own key, and the server tells them
 # apart by the key, never by anything the rig says about itself.
 DEVICE = os.environ.get("DOCTOR_DEVICE", "ariel")
@@ -219,7 +218,7 @@ def minutes(seconds):
 #   fix      the FIXES key that should cure it, if a button can
 #   manual   what a person has to do with their hands, when a button cannot
 #
-# `full` is False for the minute-by-minute report to Caliban: the slow or
+# `full` is False for the minute-by-minute report: the slow or
 # intrusive parts (listing the cameras, git fetch) only run when someone is
 # actually looking.
 
@@ -284,7 +283,7 @@ def check_clock(full):
         if up is not None and up < CLOCK_GRACE_S:
             return check("clock", "Horloge", "ok",
                          f"Synchronisation en cours (Pi démarré il y a {max(1, round(up / 60))} min).")
-        # A wrong clock breaks HTTPS to Caliban outright; it fixes itself once
+        # A wrong clock breaks HTTPS to the cloud outright; it fixes itself once
         # the network is back, and a reboot forces it.
         return check("clock", "Horloge", "warn", "Heure non synchronisée avec Internet.", fix="reboot")
     return check("clock", "Horloge", "ok", "Synchronisée.")
@@ -333,40 +332,25 @@ def function_status():
 
 
 def check_caliban(full):
-    # Ariel's readings still go to Caliban after its reports have moved, so it
-    # keeps watching Caliban until CALIBAN_URL comes out of its env file. The
-    # tray rig has no other use for Caliban.
-    if DOCTOR_URL and (TRAY or not CALIBAN_URL):
-        status = function_status()
-        if status is None:
-            return check("caliban", "Nuage (Supabase)", "fail", "Le nuage ne répond pas.",
-                         manual="Si le Wi-Fi est bon, la panne est dans le nuage, pas ici : prévenir l'AQ.")
-        if status >= 500:
-            return check("caliban", "Nuage (Supabase)", "fail", f"Le nuage répond en erreur ({status}).",
-                         manual="La panne est dans le nuage, pas ici : prévenir l'AQ.")
-        return check("caliban", "Nuage (Supabase)", "ok", "Répond.")
-    if not CALIBAN_URL:
-        return check("caliban", "Prospero (nuage)", "fail", "Adresse de Prospero absente sur ce Pi.",
+    # The id stays "caliban": SGSC's pages and alerts know the check by it.
+    if not DOCTOR_URL:
+        return check("caliban", "Nuage (Supabase)", "fail", "Adresse du nuage absente sur ce Pi.",
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
-    status, body = http_get(f"{CALIBAN_URL}/health", timeout=20)
+    status = function_status()
     if status is None:
-        return check("caliban", "Prospero (nuage)", "fail", "Prospero ne répond pas.",
+        return check("caliban", "Nuage (Supabase)", "fail", "Le nuage ne répond pas.",
                      manual="Si le Wi-Fi est bon, la panne est dans le nuage, pas ici : prévenir l'AQ.")
-    if status != 200:
-        return check("caliban", "Prospero (nuage)", "fail", f"Prospero répond en erreur ({status}).",
+    if status >= 500:
+        return check("caliban", "Nuage (Supabase)", "fail", f"Le nuage répond en erreur ({status}).",
                      manual="La panne est dans le nuage, pas ici : prévenir l'AQ.")
-    sha = (body.get("build_sha") or "")[:7] if isinstance(body, dict) else ""
-    return check("caliban", "Prospero (nuage)", "ok", f"Répond (version {sha or '?'}).")
+    return check("caliban", "Nuage (Supabase)", "ok", "Répond.")
 
 
 def check_key(full):
     if not API_KEY:
         return check("key", "Clé d'accès", "fail", "Clé absente sur ce Pi.",
                      manual=f"Installation incomplète : prévenir l'AQ (fichier {ENV_FILE}).")
-    if DOCTOR_URL:
-        status = function_status()
-    else:
-        status = http_get(f"{CALIBAN_URL}/doctor/ping", timeout=20, headers={"X-API-Key": API_KEY})[0]
+    status = function_status() if DOCTOR_URL else None
     if status is None:
         return check("key", "Clé d'accès", "off", "Non vérifiable sans le nuage.")
     if status == 401:
@@ -1241,7 +1225,7 @@ def report_once():
 
 def reporter():
     if not REPORT_API or not API_KEY:
-        log("no DOCTOR_URL or CALIBAN_URL, or no API_KEY: not reporting")
+        log("no DOCTOR_URL or no API_KEY: not reporting")
         return
     try:
         with open(INFLIGHT_FILE) as f:
