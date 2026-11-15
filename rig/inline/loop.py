@@ -382,9 +382,13 @@ LADDER_QT = {"increase_medium": 2, "increase_major": 2}
 RUN_GAP_S = 90 * 60
 # A run of DIMINUER older than this is over: a new shift starts afresh.
 DECREASE_RUN_MAX_S = 4 * 3600
+# A line stop at least this long also ends it: after a restart the chute
+# carries different product, so the DIMINUER turns before it say nothing
+# about now (2026-11-15: three in a row held DIMINUER back for hours).
+LINE_STOP_RESET_S = 10 * 60
 
 
-def ack_runs(acks, history, decrease_below, unit="cm"):
+def ack_runs(acks, history, decrease_below, unit="cm", reset_at=None):
     """(increase_run, decrease_run) for Caliban's turn limits (app/main.py
     inline_turn), from the confirmations, newest last; increase_run in
     `unit` ("cm" or "quarter"), from turns confirmed in that unit only.
@@ -394,7 +398,8 @@ def ack_runs(acks, history, decrease_below, unit="cm"):
     has an end, and the run is how far towards it this episode has gone.
     decrease_run: DIMINUER turns confirmed one after another, ended by any
     other confirmation, by a pooled ME% at decrease_below or above after the
-    last of them (history), or by being over DECREASE_RUN_MAX_S old."""
+    last of them (history), by being over DECREASE_RUN_MAX_S old, or by a
+    line stop of LINE_STOP_RESET_S or more ending after it (reset_at, ISO)."""
     now = now_utc()
 
     def at(a):
@@ -418,11 +423,14 @@ def ack_runs(acks, history, decrease_below, unit="cm"):
             run_cm += ladder.get(ins, base)
         newer = t
 
+    reset = at({"at": reset_at}) if reset_at else None
     run = 0
     for a in reversed(acks):
         t = at(a)
         if t is None or a.get("instruction") != "decrease" or a.get("choice") != "adjusted" \
                 or (now - t).total_seconds() > DECREASE_RUN_MAX_S:
+            break
+        if reset and t < reset:
             break
         if run == 0 and decrease_below is not None:
             back = [p for p in history or [] if p.get("decision_pct") is not None
@@ -466,7 +474,8 @@ def request_reading(reading_id, paths, covers=None, det=None, state=None):
                 data[f"last_ack_{key}"] = str(last[key])
         state = state or {}
         below = (state.get("thresholds") or {}).get("decrease_below")
-        run_cm, run = ack_runs(acks, state.get("history"), below, "cm")
+        run_cm, run = ack_runs(acks, state.get("history"), below, "cm",
+                               reset_at=(state.get("line") or {}).get("stop_reset_at"))
         run_qt, _ = ack_runs(acks, state.get("history"), below, "quarter")
         data["increase_run_cm"], data["increase_run_qt"], data["decrease_run"] = str(run_cm), str(run_qt), str(run)
     try:
@@ -609,6 +618,14 @@ def line_running(state, cam_settings):
     else:
         if line.get("running") is False:
             log(f"line running again (motion {m['score']})")
+            try:
+                stopped_s = (now_utc() - datetime.fromisoformat(line["since"])).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                stopped_s = 0
+            if stopped_s >= LINE_STOP_RESET_S:
+                # Ends any run of DIMINUER confirmed before the stop (ack_runs).
+                line["stop_reset_at"] = iso(now_utc())
+                log(f"stop of {stopped_s / 60:.0f} min: DIMINUER count reset")
         line.update(running=True if running else None, motion=m["score"], since=None)
     return running
 
