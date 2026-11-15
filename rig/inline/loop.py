@@ -339,15 +339,37 @@ def detect_burst(paths):
         return None
     detector_status.clear(); detector_status.update(ok=True, at=iso(now_utc()), error=None, version=meo_detect.version(),
                            photos=len(photos), s=round(sum(p["ms"] for p in photos) / 1000, 1))
-    # The measured area and the dust strip, as fractions of the photo, for
-    # SGSC to outline.
-    return {"version": meo_detect.version(), "photos": photos,
-            "crop": [meo_detect.CROP_LEFT, meo_detect.CROP_TOP],
-            "strip_outline": [list(p) for p in meo_detect.STRIP]}
+    # Camera view and focus, over the last VIEW_HISTORY photos, for the doctor
+    # (check_view, check_focus): one burst can be a heavy flow hiding the lip.
+    # Kept as three short lists, oldest first: the state also goes to the
+    # mirror screen every minute. "seen": the photo had a background to look
+    # on (None before it has one), and the lip showed on it.
+    for p in photos:
+        v = p.get("view")
+        _view_history.append((None if v is None else v.get("off"),
+                              None if v is None else v.get("off") is not None, p.get("crisp")))
+    del _view_history[:-VIEW_HISTORY]
+    view = meo_detect.load_view()
+    lip = view.get("lip")
+    detector_status["view"] = {"off": [h[0] for h in _view_history], "seen": [h[1] for h in _view_history],
+                               "crisp": [h[2] for h in _view_history], "source": view.get("source"),
+                               "fitted_at": view.get("at"), "angle": (lip or {}).get("angle")}
+    # The measured area, the dust strip and the lip, as fractions of the
+    # photo, for SGSC to outline.
+    out = {"version": meo_detect.version(), "photos": photos,
+           "crop": [meo_detect.CROP_LEFT, meo_detect.CROP_TOP],
+           "strip_outline": [list(p) for p in meo_detect.STRIP]}
+    if lip:
+        out["lip_outline"] = meo_detect.lip_outline(lip)
+    return out
 
 
 _detector_missing = None
 _background = None
+# Photos the doctor's view and focus checks look back over: ~30 minutes at a
+# photo every 20 s.
+VIEW_HISTORY = 90
+_view_history = []
 # The last burst's detector result, kept in the state file for the doctor
 # (doctor.py check_detector): ok, when, how long, or what went wrong.
 detector_status = {}

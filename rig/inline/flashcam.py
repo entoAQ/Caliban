@@ -330,10 +330,27 @@ def save_reference():
     import numpy as np
     s = load_settings()
     keep = {}
-    m = capture(os.path.join(HOME, "captures", "inline", "REFERENCE.jpg"), s, keep=keep)
+    photo = os.path.join(HOME, "captures", "inline", "REFERENCE.jpg")
+    m = capture(photo, s, keep=keep)
     np.save(REFERENCE_FILE, _tiles(keep["array"], s["coverage_grid"]))
     print(f"reference saved to {REFERENCE_FILE} (mean {m['mean']:.0f}); "
           f"photo in ~/captures/inline/REFERENCE.jpg")
+    # The destoner's lip on the same empty chute, whole: the detector leaves
+    # it out of the full-frame numbers, and the doctor's view check watches
+    # for it moving (meo_detect.save_view).
+    try:
+        import meo_detect
+        view = meo_detect.save_view(photo)
+    except Exception as e:
+        print(f"lip not fitted ({type(e).__name__}: {e}); the previous view is kept")
+        return
+    if view is None:
+        print("no lip found on the reference photo; the previous view is kept "
+              f"({meo_detect.load_view().get('source') or 'none'})")
+    else:
+        lip = view["lip"]
+        print(f"lip fitted: {lip['angle']} deg, {100 * lip['share']:.1f}% of the frame, "
+              f"saved to {meo_detect.VIEW_FILE} -- the doctor's view check starts from it")
 
 
 def _blocks(gray, n=8):

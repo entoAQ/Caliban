@@ -571,9 +571,11 @@ def flash_counts(state):
 
 
 
-# Seconds per burst above which the detector is called slow: a burst of 8
-# took 5 s on 2026-10-18, so 20 s means something is wrong (heat, memory).
-DETECTOR_SLOW_S = 20
+# Seconds per photo above which the detector is called slow. Per photo, as a
+# burst is 1 to 8: ~1.3 s on 2026-11-14 with the crop's 6 tiles, ~3.5 s
+# expected with the full frame's 12 (meo_detect.full_tiles). A photo comes
+# every 20 s, so 8 s means something is wrong (heat, memory).
+DETECTOR_SLOW_S = 8
 
 
 def check_detector(full):
@@ -594,10 +596,90 @@ def check_detector(full):
                      fix="restart_loop")
     s, n = d.get("s"), d.get("photos")
     detail = f"{n} photo(s) en {s} s (modèle {d.get('version')}), il y a {minutes(age_s(d.get('at')))}."
-    if s is not None and s > DETECTOR_SLOW_S:
+    if s is not None and n and s / n > DETECTOR_SLOW_S:
         return check("detector", "Détecteur MEO", "warn", "Lent : " + detail,
                      manual="Vérifier la température du Pi (vcgencmd measure_temp) et la mémoire libre (free -h).")
     return check("detector", "Détecteur MEO", "ok", detail)
+
+
+# The camera's view (meo_detect.view_check over the loop's last photos): the
+# share of the lip's metal seen inside the line fitted on the reference.
+# 0.0 on every background of the view since the 11-13 lens fix, 0.43-0.46
+# with the 11-08 view against it (2026-11-14), so 0.2 is a turned camera.
+# Photos with no lip seen are counted apart: a heavy flow hides part of it,
+# never all of it for long, so VIEW_UNSEEN of the last photos (~20 of the
+# last ~30 minutes, a photo every 20 s) means it left the frame or the
+# camera is blurred.
+VIEW_OFF_WARN = 0.2
+VIEW_UNSEEN = 60
+# meo_detect.crispness, median of the last photos: 0.31-0.35 sharp (11-08 and
+# after the 11-13 lens fix), 0.18 when the lens had worked loose (11-13
+# morning), so below 0.26 the focus has started to go.
+FOCUS_WARN = 0.26
+# Photos the view and focus medians are taken over: ~10 minutes.
+VIEW_RECENT = 30
+
+REFERENCE_HOWTO = (f"À l'arrêt, goulotte vide : python3 {os.path.join(REPO, 'rig', 'inline', 'flashcam.py')} "
+                   "reference (refait aussi la référence de la goulotte vide).")
+
+
+def _view_history():
+    d = load_state().get("detector") or {}
+    return d.get("view") or {}
+
+
+def check_view(full):
+    """Is the camera still pointing where the lip was fitted (camera turned,
+    mount loose)? From the loop's last photos (loop.py detect_burst)."""
+    v = _view_history()
+    seen = v.get("seen") or []
+    if not seen:
+        return check("view", "Orientation caméra", "off", "Pas encore de photos mesurées depuis le démarrage.")
+    ref = ("référence du " + str(v.get("fitted_at") or "")[:10]) if v.get("source") == "inline_view.json" \
+        else "position par défaut du 2026-11-14 (pas encore de référence prise sur ce Pi)"
+    offs = [o for o in (v.get("off") or [])[-VIEW_RECENT:] if o is not None]
+    unseen = sum(1 for s in seen if s is False)
+    if offs:
+        off = sorted(offs)[len(offs) // 2]
+        if off >= VIEW_OFF_WARN:
+            return check("view", "Orientation caméra", "warn",
+                         f"La lèvre du séparateur n'est plus où elle était ({off:.0%} de son métal "
+                         f"à l'intérieur de la ligne, {ref}) : la caméra a probablement tourné ou bougé.",
+                         manual="Vérifier la fixation de la caméra et de l'objectif sur place. Si la "
+                                "nouvelle vue est voulue : " + REFERENCE_HOWTO)
+    if unseen >= VIEW_UNSEEN:
+        return check("view", "Orientation caméra", "warn",
+                     f"Lèvre du séparateur introuvable sur {unseen} des {len(seen)} dernières photos : "
+                     f"caméra tournée, ou image floue (voir Mise au point).",
+                     manual="Vérifier la caméra sur place. Si la nouvelle vue est voulue : " + REFERENCE_HOWTO)
+    if not offs and unseen:
+        return check("view", "Orientation caméra", "off",
+                     f"Lèvre du séparateur cachée sur les {min(unseen, VIEW_RECENT)} dernières photos "
+                     f"(gros débit, ou image floue) : pas de conclusion pour l'instant.")
+    if not offs:
+        return check("view", "Orientation caméra", "off",
+                     "Pas assez de photos récentes pour voir la lèvre (il en faut 5 en 15 minutes).")
+    return check("view", "Orientation caméra", "ok", f"Lèvre du séparateur à sa place ({ref}, "
+                 f"angle {v.get('angle')}°).")
+
+
+def check_focus(full):
+    """Is the image still sharp (meo_detect.crispness)? From the loop's last
+    photos: the 11-10..11-13 loose lens took three days to notice."""
+    vals = [c for c in (_view_history().get("crisp") or [])[-VIEW_RECENT:] if c is not None]
+    if not vals:
+        return check("focus", "Mise au point", "off", "Pas encore de photos mesurées depuis le démarrage.")
+    c = sorted(vals)[len(vals) // 2]
+    if c < FOCUS_WARN:
+        return check("focus", "Mise au point", "warn",
+                     f"Image floue : netteté {c:.2f} (normale 0,31 à 0,35, alerte sous "
+                     f"{FOCUS_WARN:.2f}) ".replace(".", ",") +
+                     f"sur les {len(vals)} dernières photos.",
+                     manual="Vérifier sur place que l'objectif n'a pas pris de jeu (bague de mise au "
+                            "point, filetage), refaire la mise au point (flashcam.py focus-live), puis "
+                            + REFERENCE_HOWTO)
+    return check("focus", "Mise au point", "ok",
+                 f"Netteté {c:.2f}".replace(".", ",") + f" sur les {len(vals)} dernières photos.")
 
 
 def tray_busy():
@@ -683,7 +765,7 @@ def check_calibration(full):
 
 CHECKS_ARIEL = [check_power, check_disk, check_clock, check_wifi, check_caliban, check_key,
                 check_update, check_screen, check_kiosk, check_loop, check_camera, check_flash,
-                check_detector]
+                check_detector, check_view, check_focus]
 CHECKS_TRAY = [check_power, check_disk_tray, check_clock, check_wifi, check_caliban, check_key,
                check_update, check_poller, check_camera_tray, check_tof, check_calibration]
 CHECKS = CHECKS_TRAY if TRAY else CHECKS_ARIEL

@@ -940,13 +940,32 @@ def inline_detector(raw, n_photos):
         # Without the dust (Ariel's meo_detect.Background), once it has a
         # background, and without the dust strip (meo_detect.STRIP); a
         # malformed one is dropped, never the reading.
-        for key in ("clean", "strip"):
+        # "full": the whole frame without the destoner's lip
+        # (meo_detect.full_tiles), recorded beside the crop, never used to
+        # decide yet; its boxes are only the ones outside the crop.
+        for key in ("clean", "strip", "full"):
             try:
                 c = ph[key]
                 row[key] = {"meo_px": max(0.0, float(c["meo_px"])), "meo_n": max(0, int(c["meo_n"])),
                             "product_px": max(0, int(c["product_px"]))}
             except (KeyError, TypeError, ValueError):
-                pass
+                continue
+            if key == "full":
+                full_boxes = _fractions(c.get("boxes"), 5, 200)
+                if full_boxes is not None:
+                    row[key]["boxes"] = full_boxes
+        # Camera checks (meo_detect.view_check, crispness), per photo, so a
+        # lot's readings can be told apart by view and focus afterwards.
+        try:
+            row["crisp"] = None if ph.get("crisp") is None else round(float(ph["crisp"]), 3)
+        except (TypeError, ValueError):
+            pass
+        try:
+            v = ph["view"]
+            row["view"] = {"metal": round(float(v["metal"]), 4),
+                           "off": None if v.get("off") is None else round(float(v["off"]), 3)}
+        except (KeyError, TypeError, ValueError):
+            pass
         # MEO and product as surface (meo_detect.AREA_WARM), with and
         # without the strip: recorded for the area ME% under study, never
         # used to decide.
@@ -985,6 +1004,10 @@ def inline_detector(raw, n_photos):
     outline = _fractions(det.get("strip_outline"), 2, 40)
     if outline and len(outline) >= 3:
         out["strip_outline"] = outline
+    # The destoner's lip left out of "full" (meo_detect.lip_outline).
+    lip = _fractions(det.get("lip_outline"), 2, 8)
+    if lip and len(lip) >= 3:
+        out["lip_outline"] = lip
     return out
 
 
@@ -1044,6 +1067,13 @@ def yolo_band_result(group, det, settings, reading_id):
             extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
             meo, product, pieces = s_meo, s_product, s_pieces
             version += "+strip"
+    # The whole frame without the lip, when every photo has it: recorded
+    # with its own ratio for comparison against the lab, never decided on.
+    full = [p.get("full") for p in det["photos"]]
+    if all(full):
+        f_meo, f_product, f_pieces = sums(full)
+        extra["full"] = {"meo_px": f_meo, "product_px": f_product, "meo_n": f_pieces,
+                         "ratio_pct": round(100 * f_meo / f_product, 4) if f_product > 0 else None}
     # Bicolore over the whole crop's product, when every photo has it: a raw
     # share (no scale), shown in SGSC per photo and per lot, never decided on.
     bi = [p.get("bicolore") for p in det["photos"]]

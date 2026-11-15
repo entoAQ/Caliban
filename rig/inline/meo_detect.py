@@ -53,6 +53,38 @@ MAX_BOXES = 150
 STRIP = [(0.173, 0.0), (0.173, 0.018), (0.291, 0.118), (0.415, 0.195), (0.560, 0.279),
          (0.705, 0.341), (0.839, 0.397), (1.0, 0.49), (1.0, 0.0)]
 _strips = {}
+# The metal lip of the destoner's exit (a steel edge across the top right of
+# the frame). find_lip(): the bright grey pixels in pieces touching the
+# frame's edge, LIP_MIN to LIP_MAX of the frame, a straight line fitted along
+# them, and everything beyond their inner edge (plus LIP_MARGIN of the
+# photo's width) is lip -- on the 10-26..11-10 view that also takes the
+# copper wall behind it. The flash's hot spot is as bright and grey but never
+# touches the edge. Fitted once on the empty-chute photo (flashcam.py
+# reference) and kept in VIEW_FILE, as the lip is then whole: under a heavy
+# flow the larvae hide most of it, and a fit on what is left can follow the
+# frame's edge instead (2026-11-14 06:00: 4 deg against 19.3). Going below
+# LIP_MIN once took 44% of a blurred frame, hence LIP_MAX too.
+LIP_GREY_MIN, LIP_GREY_SPREAD, LIP_BLUE_MAX = 140, 40, 8
+LIP_MIN, LIP_MAX = 0.001, 0.15
+LIP_MARGIN = 0.012
+# The camera's view: {"lip": find_lip()'s dict, "at"}, written by flashcam.py
+# reference; DEFAULT_VIEW_FILE (in git) until it is, fitted on a 10-photo
+# median of 2026-11-14 15:25 local (low flow, the view since the 11-13 lens
+# fix). Background.view_check() looks for metal inside the lip's line by
+# more than VIEW_OFF_PX: it moves in when the camera turns, while larvae
+# over the lip only hide it.
+VIEW_FILE = os.path.join(os.path.expanduser("~"), "inline_view.json")
+DEFAULT_VIEW_FILE = os.path.join(HERE, "view.json")
+VIEW_OFF_PX = 40
+_view = {}
+# The whole frame, measured beside the crop ("full", recorded only, never
+# decides -- yet): the crop's 3 x 2 tiles as they are, plus FULL_TOP tiles of
+# the same size along the top band and FULL_LEFT down the left strip, so every
+# tile is the size the model was trained on. Tiles overlap; each pixel has
+# one owner tile (_owners) and a box counts only from the tile that owns its
+# centre, so nothing is counted twice.
+FULL_TOP, FULL_LEFT = 4, 2
+_owners = {}
 # A box is bigger than the piece in it: on Tim's boxes of 2026-10-24..26 the
 # warm pixels (red over blue by more than this, dark ones included) fill
 # ~0.68 of the box, the bare chute and the pieces' shadows the rest.
@@ -233,15 +265,41 @@ class Background:
     def step(self, w):
         return max(1, round(w / self.WIDTH))
 
-    def dust(self, shape, now):
-        """Dust mask at the reduced size for a photo of `shape`, or None."""
+    def median(self, shape, now):
+        """The chute without the product, at the reduced size, for a photo of
+        `shape`, or None until there are MIN recent photos."""
         self.frames = [(t, f) for t, f in self.frames if now - t < self.MAX_AGE_S][-self.KEEP:]
         step = self.step(shape[1])
         same = [f for _, f in self.frames if f.shape == (-(-shape[0] // step), -(-shape[1] // step), 3)]
         if len(same) < self.MIN:
             return None
         # The middle value by partition: a fraction of np.median's time on the Pi.
-        return product_mask(np.partition(np.stack(same), len(same) // 2, axis=0)[len(same) // 2])
+        return np.partition(np.stack(same), len(same) // 2, axis=0)[len(same) // 2]
+
+    def dust(self, shape, now, med=None):
+        """Dust mask at the reduced size for a photo of `shape`, or None."""
+        med = self.median(shape, now) if med is None else med
+        return None if med is None else product_mask(med)
+
+    def view_check(self, shape, med, lip):
+        """On this median, the metal seen ("metal", share of the frame) and
+        the share of it inside the lip's line by more than VIEW_OFF_PX
+        ("off"): ~0 while the camera is where the lip was fitted, None with
+        too little metal to tell. None without a median or a lip."""
+        if med is None or lip is None:
+            return None
+        step = self.step(shape[1])
+        metal = _metal(med)
+        rh, rw = metal.shape
+        if metal.sum() < LIP_MIN * rh * rw:
+            return {"metal": round(float(metal.mean()), 4), "off": None}
+        h, w = shape[:2]
+        v, u = np.nonzero(metal)
+        # Photo px inside the line (the half-plane's normal is a unit vector
+        # once b is scaled back by w / h).
+        inside = w * (lip["a"] * (u + 0.5) * step / w + lip["b"] * (v + 0.5) * step / h - lip["k"])
+        return {"metal": round(float(metal.mean()), 4),
+                "off": round(float((inside > VIEW_OFF_PX).mean()), 3)}
 
     def add(self, a, now):
         step = self.step(a.shape[1])
@@ -371,6 +429,193 @@ def strip_mask(h, w):
     return _strips[(h, w)]
 
 
+def find_lip(med, step, shape):
+    """The lip (see LIP_MIN) on a photo or Background median `med` (reduced
+    by `step` from a photo of `shape`), or None when it does not show.
+    Returned as the half-plane a*u + b*v < k in photo fractions (u = x / w,
+    v = y / h), its angle in degrees and its share of the frame."""
+    metal = _metal(med)
+    rh, rw = metal.shape
+    if metal.sum() < LIP_MIN * rh * rw:
+        return None
+    v, u = np.nonzero(metal)
+    pts = np.stack([u, v], axis=1).astype(float) * step        # photo px
+    c = pts.mean(axis=0)
+    d = np.linalg.svd(pts - c, full_matrices=False)[2][0]       # along the lip
+    nrm = np.array([-d[1], d[0]])
+    h, w = shape[:2]
+    if np.dot(np.array([w / 2, h / 2]) - c, nrm) < 0:
+        nrm = -nrm                                              # towards the frame's centre
+    # Inner edge in photo px, then the half-plane in photo fractions divided
+    # by the width, so it holds at any size of the same frame.
+    edge = float(np.percentile((pts - c) @ nrm, 99) + LIP_MARGIN * w + c @ nrm)
+    lip = {"a": float(nrm[0]), "b": float(nrm[1] * h / w), "k": edge / w,
+           "angle": round(float(np.degrees(np.arctan2(d[1], d[0])) % 180), 1)}
+    share = float(lip_mask(lip, rh, rw).mean())
+    if share > LIP_MAX:
+        return None
+    lip["share"] = round(share, 4)
+    return lip
+
+
+def _metal(img):
+    """Bright neutral grey pixels in pieces of at least LIP_MIN of the frame
+    that touch its edge: the lip (and the bar on older views). The flash's
+    hot spot is as bright, and on a near-empty chute reaches the bottom edge,
+    but the chute is blue: blue over red ~+19 there, ~0 on the metal
+    (2026-11-14), hence LIP_BLUE_MAX."""
+    f = img.astype(np.int16)
+    mn, mx = f.min(axis=2), f.max(axis=2)
+    grey = (mn > LIP_GREY_MIN) & (mx - mn < LIP_GREY_SPREAD) & (f[..., 2] - f[..., 0] < LIP_BLUE_MAX)
+    rh, rw = grey.shape
+    out = np.zeros((rh, rw), bool)
+    for runs in _components(grey).values():
+        if sum(b - a + 1 for _, a, b in runs) < LIP_MIN * rh * rw:
+            continue
+        if not any(r in (0, rh - 1) or a == 0 or b == rw - 1 for r, a, b in runs):
+            continue
+        for r, a, b in runs:
+            out[r, a:b + 1] = True
+    return out
+
+
+def load_view():
+    """VIEW_FILE, or DEFAULT_VIEW_FILE until a reference is taken; {} when
+    neither reads. Re-read when the file changes."""
+    for path in (VIEW_FILE, DEFAULT_VIEW_FILE):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if _view.get("key") != (path, mtime):
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            _view.clear()
+            _view.update(key=(path, mtime), data={**data, "source": os.path.basename(path)})
+        return _view["data"]
+    return {}
+
+
+def save_view(photo_path):
+    """Fit the lip on an empty-chute photo (flashcam.py reference) and write
+    VIEW_FILE. Returns the view written, or None (the old one kept) when no
+    lip shows."""
+    a = np.asarray(Image.open(photo_path).convert("RGB"))
+    step = max(1, round(a.shape[1] / Background.WIDTH))
+    lip = find_lip(a[::step, ::step], step, a.shape)
+    if lip is None:
+        return None
+    view = {"lip": lip, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "photo": os.path.basename(photo_path)}
+    with open(VIEW_FILE + ".tmp", "w") as f:
+        json.dump(view, f, indent=1)
+    os.replace(VIEW_FILE + ".tmp", VIEW_FILE)
+    return view
+
+
+def lip_mask(lip, h, w):
+    """The lip's half-plane as a boolean mask of an h x w image."""
+    v, u = np.mgrid[0:h, 0:w]
+    return lip["a"] * (u + 0.5) / w + lip["b"] * (v + 0.5) / h < lip["k"]
+
+
+_lip_cache = {}
+
+
+def _lip_px(lip, h, w):
+    """lip_mask at the photo's size, the last one kept (the lip rarely moves)."""
+    if lip is None:
+        return None
+    key = (lip["a"], lip["b"], lip["k"], h, w)
+    if key not in _lip_cache:
+        _lip_cache.clear()
+        _lip_cache[key] = lip_mask(lip, h, w)
+    return _lip_cache[key]
+
+
+def lip_outline(lip):
+    """The lip's half-plane clipped to the photo, as (x, y) fractions."""
+    def inside(p):
+        return lip["a"] * p[0] + lip["b"] * p[1] < lip["k"]
+    corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    out = []
+    for p, q in zip(corners, corners[1:] + corners[:1]):
+        if inside(p):
+            out.append(p)
+        if inside(p) != inside(q):
+            fp = lip["a"] * p[0] + lip["b"] * p[1] - lip["k"]
+            fq = lip["a"] * q[0] + lip["b"] * q[1] - lip["k"]
+            t = fp / (fp - fq)
+            out.append((p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])))
+    return [[round(x, 4), round(y, 4)] for x, y in out]
+
+
+def _half(a):
+    h, w = a.shape[0] // 2 * 2, a.shape[1] // 2 * 2
+    a = a[:h, :w]
+    return (a[0::2, 0::2] + a[1::2, 0::2] + a[0::2, 1::2] + a[1::2, 1::2]) / 4
+
+
+def _laplacian(a):
+    return a[1:-1, :-2] + a[1:-1, 2:] + a[:-2, 1:-1] + a[2:, 1:-1] - 4 * a[1:-1, 1:-1]
+
+
+def crispness(a, product):
+    """How sharp the photo is: fine over coarse Laplacian energy (at half and
+    quarter size) on the outlines of the product, so it does not depend on
+    how much product there is. None with too little product. 2026-11-14:
+    0.31-0.35 sharp (11-08, and from the 11-13 lens fix), 0.18 on the
+    blurred 11-13 morning, +/-0.01 photo to photo. doctor.py check_focus
+    compares it with the reference taken when the view was accepted."""
+    g = a.astype(np.float32).mean(axis=2)
+    n = _neighbours(product)
+    edge = n.any(axis=0) & ~n.all(axis=0)
+    g1, g2 = _half(g), _half(_half(g))
+    e1 = edge[:g1.shape[0] * 2:2, :g1.shape[1] * 2:2]
+    e1 = e1 | np.roll(e1, 1, axis=0) | np.roll(e1, 1, axis=1)
+    e2 = e1[:g2.shape[0] * 2:2, :g2.shape[1] * 2:2]
+    l1, l2 = _laplacian(g1)[e1[1:-1, 1:-1]], _laplacian(g2)[e2[1:-1, 1:-1]]
+    if l1.size < 200 or l2.size < 50:
+        return None
+    return round(float(np.var(l1) / max(float(np.var(l2)), 1e-6)), 3)
+
+
+def full_tiles(h, w):
+    """The full frame's tiles as (x0, y0, x1, y1) photo px: the crop's
+    ROWS x COLS first, exactly as measure() cuts them, then FULL_TOP along the
+    top band and FULL_LEFT down the left strip, each the crop tiles' size."""
+    ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
+    ch, cw = h - oy, w - ox
+    rects = [(ox + c * cw // COLS, oy + r * ch // ROWS, ox + (c + 1) * cw // COLS, oy + (r + 1) * ch // ROWS)
+             for r in range(ROWS) for c in range(COLS)]
+    tw, th = cw // COLS, ch // ROWS
+    rects += [(x, 0, x + tw, th) for x in (round(i * (w - tw) / (FULL_TOP - 1)) for i in range(FULL_TOP))]
+    rects += [(0, y, tw, y + th) for y in (round(th + i * (h - 2 * th) / max(1, FULL_LEFT - 1)) for i in range(FULL_LEFT))]
+    return rects
+
+
+def owners(h, w):
+    """Per pixel, the index into full_tiles() of the tile that counts it: the
+    crop's own tiles inside the crop, outside it the nearest tile centre
+    among the extra tiles that cover the pixel."""
+    if (h, w) not in _owners:
+        rects = full_tiles(h, w)
+        own = np.full((h, w), -1, np.int16)
+        for k, (x0, y0, x1, y1) in enumerate(rects[:ROWS * COLS]):
+            own[y0:y1, x0:x1] = k
+        v, u = np.mgrid[0:h, 0:w]
+        best = np.full((h, w), np.inf)
+        for k, (x0, y0, x1, y1) in enumerate(rects[ROWS * COLS:], ROWS * COLS):
+            d = np.hypot(u - (x0 + x1) / 2, v - (y0 + y1) / 2)
+            take = (own < ROWS * COLS) & (own != -1)
+            ok = (u >= x0) & (u < x1) & (v >= y0) & (v < y1) & ~take & (d < best)
+            own[ok], best[ok] = k, d[ok]
+        _owners[(h, w)] = own
+    return _owners[(h, w)]
+
+
 def measure(path, background=None, at=None):
     """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"};
     "strip": the same three counts without STRIP (boxes centred in it and its
@@ -381,6 +626,13 @@ def measure(path, background=None, at=None):
     area they cover (each pixel once) and the boxes themselves, shown only,
     never in the MEO numbers. "larve": larva_length(), for the lot's density
     estimate.
+
+    "full": meo_px / meo_n / product_px over the whole frame without the
+    lip (full_tiles, load_view), and "boxes" the MEO boxes it adds outside
+    the crop; recorded beside the crop's numbers, which still decide.
+    "view": with a Background, view_check() -- is the lip still where it
+    was fitted. "crisp": crispness() over the whole frame, for the focus
+    check.
 
     boxes: each MEO box as [x0, y0, x1, y1, score], x and y as fractions of
     the whole photo's width and height -- the same on the full photo and on
@@ -393,24 +645,43 @@ def measure(path, background=None, at=None):
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
     now = time.time() if at is None else at
-    dust = background.dust(a.shape, now) if background is not None else None
+    med = background.median(a.shape, now) if background is not None else None
+    dust = product_mask(med) if med is not None else None
     step = background.step(w) if background is not None else 1
+    lip = load_view().get("lip")
+    lip_px = _lip_px(lip, h, w)
     # MEO area is the area the boxes cover, each pixel once: the model often
     # boxes one clump two or three times (a box inside a bigger one has a low
     # IoU, so NMS keeps both), and summing them read 13% more MEO than the
     # boxes cover on 1205 photos of 2026-10-24..26, up to 50% on a clumpy one.
-    covered, covered_clean, covered_strip, covered_bi = (np.zeros((h, w), bool) for _ in range(4))
-    clean_n = strip_n = 0
+    covered, covered_clean, covered_strip, covered_bi, covered_full = (np.zeros((h, w), bool) for _ in range(5))
+    clean_n = strip_n = full_n = 0
+    full_boxes = []
     strip = strip_mask(h, w)
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
     ch, cw = crop.shape[:2]
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
+    rects = full_tiles(h, w)
+    tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
+    own = owners(h, w)
     meo_n, boxes, bi_boxes = 0, [], []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
-        tx, ty = ox + (k % COLS) * cw // COLS, oy + (k // COLS) * ch // ROWS
+        tx, ty = rects[k][:2]
+        in_crop = k < ROWS * COLS
         for c, x0, y0, x1, y1, score in found:
+            cy, cx = min(h - 1, int(ty + (y0 + y1) / 2)), min(w - 1, int(tx + (x0 + x1) / 2))
+            if c == MEO and own[cy, cx] == k and not (lip_px is not None and lip_px[cy, cx]):
+                covered_full[max(0, int(round(ty + y0))):int(round(ty + y1)),
+                             max(0, int(round(tx + x0))):int(round(tx + x1))] = True
+                full_n += 1
+                if not in_crop:
+                    full_boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
+                                       round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4),
+                                       round(float(score), 2)])
+            if not in_crop:
+                continue
             if c == BICOLORE:
                 covered_bi[max(0, int(round(ty + y0))):int(round(ty + y1)),
                            max(0, int(round(tx + x0))):int(round(tx + x1))] = True
@@ -432,7 +703,8 @@ def measure(path, background=None, at=None):
                 boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
                               round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
     boxes = sorted(boxes, key=lambda b: -b[4])[:MAX_BOXES]
-    product = product_mask(crop)
+    product_all = product_mask(a)
+    product = product_all[oy:, ox:]
     not_strip = ~strip[oy:, ox:]
     out = {"meo_px": float(covered.sum()), "meo_n": int(meo_n), "product_px": int(product.sum()),
            "boxes": boxes,
@@ -455,6 +727,19 @@ def measure(path, background=None, at=None):
     out["area"] = {"meo_px": int(meo_area.sum()), "product_px": int((product | meo_area).sum())}
     out["area_strip"] = {"meo_px": int(meo_area_strip.sum()),
                          "product_px": int(((product | meo_area) & not_strip).sum())}
+    product_full = product_all if lip_px is None else product_all & ~lip_px
+    out["full"] = {"meo_px": float(covered_full.sum()), "meo_n": int(full_n),
+                   "product_px": int(product_full.sum()),
+                   "boxes": sorted(full_boxes, key=lambda b: -b[4])[:MAX_BOXES]}
+    if background is not None:
+        view = background.view_check(a.shape, med, lip)
+        if view is not None:
+            out["view"] = view
+    try:
+        out["crisp"] = crispness(a, product_all)
+    except Exception as e:
+        print(f"crispness failed: {type(e).__name__}: {e}", flush=True)
+        out["crisp"] = None
     if dust is not None:
         full = dust.repeat(step, axis=0).repeat(step, axis=1)[int(h * CROP_TOP):h, int(w * CROP_LEFT):w]
         out["clean"] = {"meo_px": float(covered_clean.sum()), "meo_n": int(clean_n),
