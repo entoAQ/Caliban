@@ -619,8 +619,8 @@ FOCUS_WARN = 0.26
 # Photos the view and focus medians are taken over: ~10 minutes.
 VIEW_RECENT = 30
 
-REFERENCE_HOWTO = (f"À l'arrêt, goulotte vide : python3 {os.path.join(REPO, 'rig', 'inline', 'flashcam.py')} "
-                   "reference (refait aussi la référence de la goulotte vide).")
+REFERENCE_HOWTO = ("ligne arrêtée et goulotte vide, bouton « Nouvelle référence (goulotte vide) » "
+                   f"(ou python3 {os.path.join(REPO, 'rig', 'inline', 'flashcam.py')} reference).")
 
 
 def _view_history():
@@ -992,6 +992,42 @@ def fix_test_flash():
     return False, f"La caméra n'a pas pris de photo : {res.get('error', '')[:150]}"
 
 
+REFERENCE_SCRIPT = "import json, flashcam; print(json.dumps(flashcam.save_reference()))"
+
+
+def fix_take_reference():
+    """flashcam.py reference from the button: the empty-chute photo and the
+    destoner's lip fitted on it (the view check's starting point). Needs the
+    camera, so the loop lets go first and is put back only if it was
+    running. flashcam refuses, keeping the old reference, when the photo
+    shows product. Never in "Tout réparer": only someone at the line knows
+    the chute is empty and the view is the one wanted."""
+    was_running = is_active(LOOP)
+    if was_running:
+        sudo_systemctl("stop", LOOP)
+        time.sleep(2)
+    try:
+        rc, out = run([sys.executable, "-c", REFERENCE_SCRIPT], timeout=120, cwd=HERE)
+    finally:
+        if was_running:
+            sudo_systemctl("start", LOOP)
+    res = last_json(out)
+    if res is None:
+        return False, f"Référence impossible : {out[-200:]}"
+    photo = {"attachment_file": res["photo"]} if res.get("photo") else {}
+    share = f"{100 * (res.get('share') or 0):.1f}".replace(".", ",")
+    if not res.get("ok"):
+        return False, (f"Refusé : la goulotte n'est pas vide ({share} % de produit sur la photo). "
+                       "L'ancienne référence est gardée. Vider la goulotte, ligne arrêtée, puis réessayer."), photo
+    if res.get("lip"):
+        angle = f"{res['lip']['angle']:.1f}".replace(".", ",")
+        return True, (f"Nouvelle référence prise (goulotte vide, {share} % de produit). Lèvre du séparateur "
+                      f"repérée à {angle}° : l'orientation de la caméra sera surveillée à partir d'elle."), photo
+    return True, (f"Nouvelle référence prise (goulotte vide, {share} % de produit), mais la lèvre du "
+                  "séparateur n'est pas visible : l'ancienne position est gardée pour la surveillance "
+                  "de l'orientation."), photo
+
+
 def fix_flash_replaced():
     # The loop owns inline_state.json and would write over a change made
     # here; it picks this file up at its next firing (loop.flash_unit).
@@ -1172,6 +1208,7 @@ FIXES = {
     "test_photo":     ("Photo de contrôle", fix_test_flash),
     "flash_replaced": ("Flash remplacé", fix_flash_replaced),
     "check_camera":   ("Vérifier la caméra", fix_check_camera),
+    "take_reference": ("Nouvelle référence (goulotte vide)", fix_take_reference),
     "send_logs":      ("Envoyer le journal", fix_send_logs),
     "rollback_code":  ("Revenir à la version précédente", fix_rollback_code),
     "reboot":         ("Redémarrer le Pi", fix_reboot),
@@ -1194,7 +1231,7 @@ if TRAY:
 # the code update restarts this process from under the rest of the run.
 # « Flash remplacé » only says what someone did with their hands.
 NOT_IN_REPAIR_ALL = {"reboot", "test_flash", "update_code", "flash_replaced",
-                     "test_photo", "check_camera", "send_logs", "rollback_code"}
+                     "test_photo", "check_camera", "send_logs", "rollback_code", "take_reference"}
 # These end this process: say "started" to the server before running them.
 ENDS_PROCESS = {"reboot", "update_code", "rollback_code"}
 

@@ -39,6 +39,7 @@ touching the code; anything missing takes the defaults below.
     python3 flashcam.py sweep           # measure the firing window for this camera and save it
     python3 flashcam.py daylight        # colour from the camera's own calibration at flash colour
     python3 flashcam.py reference       # flash photo of the EMPTY chute, for the product check
+    python3 flashcam.py reference --force   # the same, even with product in view
     python3 flashcam.py motion          # line-running scores, to set motion_threshold
 """
 
@@ -323,34 +324,50 @@ def flash_level(array, settings):
     return round(float(np.median(lum[bare] / ref_lum[bare])), 3)
 
 
-def save_reference():
-    """Flash photo of the EMPTY chute, kept as what "no product" looks like.
-    Take it with the line stopped and the chute clear; redo it if the camera,
-    the flash, the aperture or the chute surface changes."""
+def save_reference(force=False):
+    """Flash photo of the EMPTY chute, kept as what "no product" looks like,
+    and the destoner's lip fitted on it (meo_detect.save_view). Take it with
+    the line stopped and the chute clear; redo it if the camera, the flash,
+    the aperture or the chute surface changes. Refused, the old reference and
+    view kept, when the photo shows product (over min_product, as a reading
+    would skip it), unless force. Returns {"ok", "share", "lip", "why",
+    "photo"}; also run from the doctor's "Nouvelle référence" button."""
     import numpy as np
     s = load_settings()
     keep = {}
     photo = os.path.join(HOME, "captures", "inline", "REFERENCE.jpg")
-    m = capture(photo, s, keep=keep)
+    trial = os.path.join(HOME, "captures", "inline", "REFERENCE-try.jpg")
+    m = capture(trial, s, keep=keep)
+    share = round(float(product_share(keep["array"], s)), 3)
+    if share > s["min_product"] and not force:
+        print(f"refused: {share:.1%} of the view is product (empty chute under "
+              f"{s['min_product']:.0%}); the previous reference is kept. Photo: {trial}")
+        return {"ok": False, "why": "product", "share": share, "photo": trial}
+    os.replace(trial, photo)
     np.save(REFERENCE_FILE, _tiles(keep["array"], s["coverage_grid"]))
-    print(f"reference saved to {REFERENCE_FILE} (mean {m['mean']:.0f}); "
+    print(f"reference saved to {REFERENCE_FILE} (mean {m['mean']:.0f}, product {share:.1%}); "
           f"photo in ~/captures/inline/REFERENCE.jpg")
+    out = {"ok": True, "share": share, "lip": None, "photo": photo}
     # The destoner's lip on the same empty chute, whole: the detector leaves
     # it out of the full-frame numbers, and the doctor's view check watches
-    # for it moving (meo_detect.save_view).
+    # for it moving.
     try:
         import meo_detect
         view = meo_detect.save_view(photo)
     except Exception as e:
         print(f"lip not fitted ({type(e).__name__}: {e}); the previous view is kept")
-        return
+        out["why"] = "lip_error"
+        return out
     if view is None:
         print("no lip found on the reference photo; the previous view is kept "
               f"({meo_detect.load_view().get('source') or 'none'})")
+        out["why"] = "no_lip"
     else:
         lip = view["lip"]
+        out["lip"] = {"angle": lip["angle"], "share": lip["share"]}
         print(f"lip fitted: {lip['angle']} deg, {100 * lip['share']:.1f}% of the frame, "
               f"saved to {meo_detect.VIEW_FILE} -- the doctor's view check starts from it")
+    return out
 
 
 def _blocks(gray, n=8):
@@ -999,7 +1016,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "sweep":
         sweep()
     elif len(sys.argv) > 1 and sys.argv[1] == "reference":
-        save_reference()
+        save_reference(force="--force" in sys.argv[2:])
     elif len(sys.argv) > 1 and sys.argv[1] == "motion":
         # Calibration: run once with the line running and once stopped, and
         # set motion_threshold between the two sets of scores.
