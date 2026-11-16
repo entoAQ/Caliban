@@ -145,10 +145,16 @@ def session():
 
 
 def product_mask(a):
-    """a: H x W x 3 RGB uint8. Warm, saturated, not dark (flashcam.product_share)."""
-    f = a.astype(np.float32)
-    mx, mn = f.max(axis=2), f.min(axis=2)
-    return ((mx - mn) / np.maximum(mx, 1) > 0.28) & (f[..., 0] > f[..., 2] + 15) & (mx > 50)
+    """a: H x W x 3 RGB uint8. Warm, saturated, not dark (flashcam.product_share).
+
+    Saturation (mx - mn) / mx > 0.28 is tested as 25 (mx - mn) > 7 mx in
+    integers: the same pixels as the float version (no ratio of two 8-bit
+    values lies close enough to 7/25 for float32 to round across it), in
+    about half its time on a full photo (2026-11-16)."""
+    r, g, b = (a[..., i].astype(np.int16) for i in range(3))
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    return (25 * (mx - mn) > 7 * np.maximum(mx, 1)) & (r > b + 15) & (mx > 50)
 
 
 def _letterbox(tile):
@@ -616,7 +622,7 @@ def owners(h, w):
     return _owners[(h, w)]
 
 
-def measure(path, background=None, at=None):
+def measure(path, background=None, at=None, extras=True):
     """One photo -> {"meo_px", "meo_n", "product_px", "ms", "boxes"};
     "strip": the same three counts without STRIP (boxes centred in it and its
     product pixels); "area" and "area_strip": MEO and product pixels as
@@ -640,7 +646,13 @@ def measure(path, background=None, at=None):
 
     at: when the photo was taken (time.time() scale), for the background's
     age limit; now when not given -- right on Ariel, which measures as it
-    shoots. lot_estimate.py passes it, measuring days-old photos."""
+    shoots. lot_estimate.py passes it, measuring days-old photos.
+
+    extras=False leaves out "full" and "larve", the two recorded-only
+    studies: half the model runs (the full frame's extra tiles) and the
+    larva search: about half the time of a photo (2026-11-16 profile). The loop asks for them on
+    every EXTRAS_EVERY-th photo (loop.py); everything that decides, and the
+    camera checks ("view", "crisp"), is the same either way."""
     t0 = time.monotonic()
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
@@ -663,8 +675,9 @@ def measure(path, background=None, at=None):
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
     rects = full_tiles(h, w)
-    tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
-    own = owners(h, w)
+    if extras:
+        tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
+        own = owners(h, w)
     meo_n, boxes, bi_boxes = 0, [], []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
@@ -672,7 +685,7 @@ def measure(path, background=None, at=None):
         in_crop = k < ROWS * COLS
         for c, x0, y0, x1, y1, score in found:
             cy, cx = min(h - 1, int(ty + (y0 + y1) / 2)), min(w - 1, int(tx + (x0 + x1) / 2))
-            if c == MEO and own[cy, cx] == k and not (lip_px is not None and lip_px[cy, cx]):
+            if extras and c == MEO and own[cy, cx] == k and not (lip_px is not None and lip_px[cy, cx]):
                 covered_full[max(0, int(round(ty + y0))):int(round(ty + y1)),
                              max(0, int(round(tx + x0))):int(round(tx + x1))] = True
                 full_n += 1
@@ -714,11 +727,12 @@ def measure(path, background=None, at=None):
                         "boxes": sorted(bi_boxes, key=lambda b: -b[4])[:MAX_BOXES]}}
     # Never at the cost of the reading: the MEO numbers above decide, this
     # only feeds an estimate.
-    try:
-        out["larve"] = larva_length(product)
-    except Exception as e:
-        print(f"larva_length failed: {type(e).__name__}: {e}", flush=True)
-        out["larve"] = {"n": 0, "len_p75": None}
+    if extras:
+        try:
+            out["larve"] = larva_length(product)
+        except Exception as e:
+            print(f"larva_length failed: {type(e).__name__}: {e}", flush=True)
+            out["larve"] = {"n": 0, "len_p75": None}
     # Surface area: MEO pixels are the warm ones inside the boxes, product
     # the larvae and that MEO (dark frass mostly fails product_mask).
     f = crop.astype(np.int16)
@@ -727,10 +741,11 @@ def measure(path, background=None, at=None):
     out["area"] = {"meo_px": int(meo_area.sum()), "product_px": int((product | meo_area).sum())}
     out["area_strip"] = {"meo_px": int(meo_area_strip.sum()),
                          "product_px": int(((product | meo_area) & not_strip).sum())}
-    product_full = product_all if lip_px is None else product_all & ~lip_px
-    out["full"] = {"meo_px": float(covered_full.sum()), "meo_n": int(full_n),
-                   "product_px": int(product_full.sum()),
-                   "boxes": sorted(full_boxes, key=lambda b: -b[4])[:MAX_BOXES]}
+    if extras:
+        product_full = product_all if lip_px is None else product_all & ~lip_px
+        out["full"] = {"meo_px": float(covered_full.sum()), "meo_n": int(full_n),
+                       "product_px": int(product_full.sum()),
+                       "boxes": sorted(full_boxes, key=lambda b: -b[4])[:MAX_BOXES]}
     if background is not None:
         view = background.view_check(a.shape, med, lip)
         if view is not None:

@@ -318,7 +318,7 @@ def detect_burst(paths):
     if _detector_missing:
         detector_status.clear(); detector_status.update(ok=False, at=iso(now_utc()), error=_detector_missing)
         return None
-    global _background
+    global _background, _measured
     try:
         import meo_detect
         # One background for the life of the loop: the photos of the last
@@ -327,7 +327,10 @@ def detect_burst(paths):
         # numbers when its inline_settings.dust_mask is on.
         if _background is None:
             _background = meo_detect.Background()
-        photos = [meo_detect.measure(p, _background) for p in paths]
+        photos = []
+        for p in paths:
+            photos.append(meo_detect.measure(p, _background, extras=_measured % EXTRAS_EVERY == 0))
+            _measured += 1
     except ImportError as e:
         log(f"MEO detector not available ({e}): readings go without it")
         _detector_missing = f"absent : {e}"
@@ -366,6 +369,12 @@ def detect_burst(paths):
 
 _detector_missing = None
 _background = None
+# The recorded-only studies (meo_detect.measure extras: the full frame and
+# the larva length) on every EXTRAS_EVERY-th photo, not every photo: they
+# were half the detector's 2.3 s on Ariel (2026-11-16 profile), and a 45-min
+# lab window still gets ~45 of them. What decides is measured on every photo.
+EXTRAS_EVERY = 3
+_measured = 0
 # Photos the doctor's view and focus checks look back over: ~30 minutes at a
 # photo every 20 s.
 VIEW_HISTORY = 90
