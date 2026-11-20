@@ -987,6 +987,17 @@ def inline_detector(raw, n_photos):
             row["bicolore"] = bi
         except (KeyError, TypeError, ValueError):
             pass
+        # Plastique (meo_detect.PLASTIQUE): count and boxes, recorded to
+        # compare with the lab's plastic counts. Never used to decide.
+        try:
+            c = ph["plastique"]
+            pl = {"n": max(0, int(c["n"]))}
+            pl_boxes = _fractions(c.get("boxes"), 5, 200)
+            if pl_boxes is not None:
+                pl["boxes"] = pl_boxes
+            row["plastique"] = pl
+        except (KeyError, TypeError, ValueError):
+            pass
         # The isolated larvae's length (meo_detect.larva_length), which SGSC
         # turns into the lot's density estimate. Never used to decide here.
         try:
@@ -1082,6 +1093,11 @@ def yolo_band_result(group, det, settings, reading_id):
         bi_px = sum(b["px"] for b in bi)
         extra["bicolore"] = {"n": sum(b["n"] for b in bi), "px": bi_px, "product_px": total_product,
                              "ratio_pct": round(100 * bi_px / total_product, 4)}
+    # Plastique pieces over the group, when every photo has the count:
+    # recorded only, never decided on.
+    pl = [p.get("plastique") for p in det["photos"]]
+    if all(pl):
+        extra["plastique"] = {"n": sum(x["n"] for x in pl)}
     ratio = meo / product
     estimate = round(settings["yolo_scale"] * 100 * ratio, 2)
     result = {

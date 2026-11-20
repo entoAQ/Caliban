@@ -97,6 +97,11 @@ MEO = 0  # class 0 of MEO / Peau / Incertain / Bicolore / Poussière
 # "bicolore", for SGSC to show on the photos and per lot; nothing decides on
 # it (2026-10-27, 4 Bicolore boxes in validation so far).
 BICOLORE = 3
+# Plastique (class 5, labelled since 2026-11-03, 48 boxes by 2026-11-20):
+# a piece of plastic. Sent beside MEO as "plastique" (count and boxes) to see
+# whether the model starts finding the pieces the lab counts (plastic_nc);
+# nothing decides on it and it is never in the MEO numbers.
+PLASTIQUE = 5
 LARVA_MIN_SHARE = 0.05  # larva_length(): a nearly empty chute says little
 LARVA_MIN = 3           # isolated larvae needed on a photo
 
@@ -630,7 +635,8 @@ def measure(path, background=None, at=None, extras=True):
     photos, "clean": the same without the dust (see Background). The photo
     then joins the background. "bicolore": the Bicolore boxes' count, the
     area they cover (each pixel once) and the boxes themselves, shown only,
-    never in the MEO numbers. "larve": larva_length(), for the lot's density
+    never in the MEO numbers. "plastique": the Plastique boxes' count and
+    the boxes, recorded the same way. "larve": larva_length(), for the lot's density
     estimate.
 
     "full": meo_px / meo_n / product_px over the whole frame without the
@@ -678,7 +684,7 @@ def measure(path, background=None, at=None, extras=True):
     if extras:
         tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
         own = owners(h, w)
-    meo_n, boxes, bi_boxes = 0, [], []
+    meo_n, boxes, bi_boxes, pl_boxes = 0, [], [], []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
         tx, ty = rects[k][:2]
@@ -699,6 +705,9 @@ def measure(path, background=None, at=None, extras=True):
                 covered_bi[max(0, int(round(ty + y0))):int(round(ty + y1)),
                            max(0, int(round(tx + x0))):int(round(tx + x1))] = True
                 bi_boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
+                                 round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
+            if c == PLASTIQUE:
+                pl_boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
                                  round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4), round(float(score), 2)])
             if c == MEO:
                 cover = (slice(max(0, int(round(ty + y0))), int(round(ty + y1))),
@@ -724,7 +733,8 @@ def measure(path, background=None, at=None, extras=True):
            "strip": {"meo_px": float(covered_strip.sum()), "meo_n": int(strip_n),
                      "product_px": int((product & not_strip).sum())},
            "bicolore": {"n": len(bi_boxes), "px": int(covered_bi.sum()),
-                        "boxes": sorted(bi_boxes, key=lambda b: -b[4])[:MAX_BOXES]}}
+                        "boxes": sorted(bi_boxes, key=lambda b: -b[4])[:MAX_BOXES]},
+           "plastique": {"n": len(pl_boxes), "boxes": sorted(pl_boxes, key=lambda b: -b[4])[:MAX_BOXES]}}
     # Never at the cost of the reading: the MEO numbers above decide, this
     # only feeds an estimate.
     if extras:
