@@ -369,10 +369,11 @@ def detect_burst(paths):
 
 _detector_missing = None
 _background = None
-# The recorded-only studies (meo_detect.measure extras: the full frame and
-# the larva length) on every EXTRAS_EVERY-th photo, not every photo: they
-# were half the detector's 2.3 s on Ariel (2026-11-16 profile), and a 45-min
-# lab window still gets ~45 of them. What decides is measured on every photo.
+# The recorded-only larva length (meo_detect.measure extras) on every
+# EXTRAS_EVERY-th photo, not every photo: a 45-min lab window still gets ~45
+# of them. What decides is measured on every photo -- since 2026-11-20 that
+# includes the full frame's extra tiles ("sud"), the other half of what
+# extras used to cost (2.3 s a photo with both on Ariel, 2026-11-16).
 EXTRAS_EVERY = 3
 _measured = 0
 # Photos the doctor's view and focus checks look back over: ~30 minutes at a

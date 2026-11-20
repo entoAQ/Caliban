@@ -45,13 +45,18 @@ IOU = {"yolox": 0.45, "yolo11": 0.7}  # each family's own default
 # Boxes sent per photo for review (SGSC draws them on the photo); a photo
 # with more than this keeps the most confident ones. The area uses them all.
 MAX_BOXES = 150
-# The strip below the chute's lip where dust piles up (Tim's outline on a
-# photo of 2026-10-26), as (x, y) fractions of the photo. It holds ~16% of
-# the measured product but 22-39% of the MEO area (2026-10-24..26). measure()
-# sends the numbers without it as "strip"; Caliban uses them with
-# inline_settings.exclude_strip.
-STRIP = [(0.173, 0.0), (0.173, 0.018), (0.291, 0.118), (0.415, 0.195), (0.560, 0.279),
-         (0.705, 0.341), (0.839, 0.397), (1.0, 0.49), (1.0, 0.0)]
+# The strip below the chute's lip where dust piles up, as (x, y) fractions
+# of the photo: everything above Tim's line. The first outline (a photo of
+# 2026-10-26, the view before the 11-10 shift) held ~16% of the measured
+# product but 22-39% of the MEO area (2026-10-24..26):
+#   (0.173, 0.0), (0.173, 0.018), (0.291, 0.118), (0.415, 0.195), (0.560, 0.279),
+#   (0.705, 0.341), (0.839, 0.397), (1.0, 0.49), (1.0, 0.0)
+# Since 2026-11-20 a straight line drawn on the view kept after the 11-13
+# lens fix, from (0.1785, 0) on the top edge to (1.0, 0.466) on the right.
+# measure() sends the crop's numbers without it as "strip" (Caliban:
+# inline_settings.exclude_strip), and the whole frame below it as "sud"
+# (inline_settings.read_south).
+STRIP = [(0.1785, 0.0), (1.0, 0.466), (1.0, 0.0)]
 _strips = {}
 # The metal lip of the destoner's exit (a steel edge across the top right of
 # the frame). find_lip(): the bright grey pixels in pieces touching the
@@ -77,8 +82,9 @@ VIEW_FILE = os.path.join(os.path.expanduser("~"), "inline_view.json")
 DEFAULT_VIEW_FILE = os.path.join(HERE, "view.json")
 VIEW_OFF_PX = 40
 _view = {}
-# The whole frame, measured beside the crop ("full", recorded only, never
-# decides -- yet): the crop's 3 x 2 tiles as they are, plus FULL_TOP tiles of
+# The whole frame ("full": without the lip, recorded only; "sud": without
+# the lip and STRIP, which Caliban decides on with read_south): the crop's
+# 3 x 2 tiles as they are, plus FULL_TOP tiles of
 # the same size along the top band and FULL_LEFT down the left strip, so every
 # tile is the size the model was trained on. Tiles overlap; each pixel has
 # one owner tile (_owners) and a box counts only from the tile that owns its
@@ -641,7 +647,10 @@ def measure(path, background=None, at=None, extras=True):
 
     "full": meo_px / meo_n / product_px over the whole frame without the
     lip (full_tiles, load_view), and "boxes" the MEO boxes it adds outside
-    the crop; recorded beside the crop's numbers, which still decide.
+    the crop; recorded only. "sud": the same three over the whole frame
+    without the lip and STRIP (everything below Tim's line), on every
+    photo; Caliban decides on it with read_south, on the crop's numbers
+    otherwise. Its boxes outside the crop are those of "full" not in STRIP.
     "view": with a Background, view_check() -- is the lip still where it
     was fitted. "crisp": crispness() over the whole frame, for the focus
     check.
@@ -654,11 +663,10 @@ def measure(path, background=None, at=None, extras=True):
     age limit; now when not given -- right on Ariel, which measures as it
     shoots. lot_estimate.py passes it, measuring days-old photos.
 
-    extras=False leaves out "full" and "larve", the two recorded-only
-    studies: half the model runs (the full frame's extra tiles) and the
-    larva search: about half the time of a photo (2026-11-16 profile). The loop asks for them on
-    every EXTRAS_EVERY-th photo (loop.py); everything that decides, and the
-    camera checks ("view", "crisp"), is the same either way."""
+    extras=False leaves out "larve", the larva search (recorded only; about
+    a quarter of a photo's time, 2026-11-16 profile). The loop asks for it on
+    every EXTRAS_EVERY-th photo (loop.py). The full frame's extra tiles run on
+    every photo since "sud" can decide (2026-11-20), so "full" comes free."""
     t0 = time.monotonic()
     a = np.asarray(Image.open(path).convert("RGB"))
     h, w = a.shape[:2]
@@ -672,8 +680,9 @@ def measure(path, background=None, at=None, extras=True):
     # boxes one clump two or three times (a box inside a bigger one has a low
     # IoU, so NMS keeps both), and summing them read 13% more MEO than the
     # boxes cover on 1205 photos of 2026-10-24..26, up to 50% on a clumpy one.
-    covered, covered_clean, covered_strip, covered_bi, covered_full = (np.zeros((h, w), bool) for _ in range(5))
-    clean_n = strip_n = full_n = 0
+    covered, covered_clean, covered_strip, covered_bi, covered_full, covered_sud = (
+        np.zeros((h, w), bool) for _ in range(6))
+    clean_n = strip_n = full_n = sud_n = 0
     full_boxes = []
     strip = strip_mask(h, w)
     crop = a[int(h * CROP_TOP):, int(w * CROP_LEFT):]
@@ -681,9 +690,8 @@ def measure(path, background=None, at=None, extras=True):
     tiles = [np.ascontiguousarray(crop[r * ch // ROWS:(r + 1) * ch // ROWS, c * cw // COLS:(c + 1) * cw // COLS])
              for r in range(ROWS) for c in range(COLS)]
     rects = full_tiles(h, w)
-    if extras:
-        tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
-        own = owners(h, w)
+    tiles += [np.ascontiguousarray(a[y0:y1, x0:x1]) for x0, y0, x1, y1 in rects[ROWS * COLS:]]
+    own = owners(h, w)
     meo_n, boxes, bi_boxes, pl_boxes = 0, [], [], []
     ox, oy = int(w * CROP_LEFT), int(h * CROP_TOP)
     for k, found in enumerate(detect_tiles(tiles)):
@@ -691,10 +699,14 @@ def measure(path, background=None, at=None, extras=True):
         in_crop = k < ROWS * COLS
         for c, x0, y0, x1, y1, score in found:
             cy, cx = min(h - 1, int(ty + (y0 + y1) / 2)), min(w - 1, int(tx + (x0 + x1) / 2))
-            if extras and c == MEO and own[cy, cx] == k and not (lip_px is not None and lip_px[cy, cx]):
-                covered_full[max(0, int(round(ty + y0))):int(round(ty + y1)),
-                             max(0, int(round(tx + x0))):int(round(tx + x1))] = True
+            if c == MEO and own[cy, cx] == k and not (lip_px is not None and lip_px[cy, cx]):
+                cover = (slice(max(0, int(round(ty + y0))), int(round(ty + y1))),
+                         slice(max(0, int(round(tx + x0))), int(round(tx + x1))))
+                covered_full[cover] = True
                 full_n += 1
+                if not strip[cy, cx]:
+                    covered_sud[cover] = True
+                    sud_n += 1
                 if not in_crop:
                     full_boxes.append([round(float(tx + x0) / w, 4), round(float(ty + y0) / h, 4),
                                        round(float(tx + x1) / w, 4), round(float(ty + y1) / h, 4),
@@ -751,11 +763,12 @@ def measure(path, background=None, at=None, extras=True):
     out["area"] = {"meo_px": int(meo_area.sum()), "product_px": int((product | meo_area).sum())}
     out["area_strip"] = {"meo_px": int(meo_area_strip.sum()),
                          "product_px": int(((product | meo_area) & not_strip).sum())}
-    if extras:
-        product_full = product_all if lip_px is None else product_all & ~lip_px
-        out["full"] = {"meo_px": float(covered_full.sum()), "meo_n": int(full_n),
-                       "product_px": int(product_full.sum()),
-                       "boxes": sorted(full_boxes, key=lambda b: -b[4])[:MAX_BOXES]}
+    product_full = product_all if lip_px is None else product_all & ~lip_px
+    out["full"] = {"meo_px": float(covered_full.sum()), "meo_n": int(full_n),
+                   "product_px": int(product_full.sum()),
+                   "boxes": sorted(full_boxes, key=lambda b: -b[4])[:MAX_BOXES]}
+    out["sud"] = {"meo_px": float(covered_sud.sum()), "meo_n": int(sud_n),
+                  "product_px": int((product_full & ~strip).sum())}
     if background is not None:
         view = background.view_check(a.shape, med, lip)
         if view is not None:

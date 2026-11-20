@@ -244,6 +244,14 @@ INLINE_DEFAULTS = {
     # fits it as yolo_scale_strip. The readings' prompt_version gets "+strip",
     # so a window never pools them with readings measured the other way.
     "exclude_strip": False,
+    # The whole frame below Tim's line instead of the crop (meo_detect "sud":
+    # everything but STRIP and the destoner's lip; Ariel sends it on every
+    # photo from 2026-11-20). Takes precedence over exclude_strip and
+    # dust_mask. The ratio is not the crop's, so yolo_scale must be set to
+    # the scale fitted on it in the same update that turns this on. The
+    # readings' prompt_version gets "+sud", so a window never pools them
+    # with readings measured on the crop.
+    "read_south": False,
 }
 
 
@@ -603,7 +611,7 @@ def inline_settings():
                 pass
         for key in ("offline_alert", "teams", "ai_fallback", "adaptive_turns", "dust_mask", "decision_drop_one",
                     "interval_always",
-                    "exclude_strip"):
+                    "exclude_strip", "read_south"):
             if isinstance(overrides.get(key), bool):
                 settings[key] = overrides[key]
         # A straight line from the prompt's value to lab ME%, fitted on lots
@@ -943,7 +951,8 @@ def inline_detector(raw, n_photos):
         # "full": the whole frame without the destoner's lip
         # (meo_detect.full_tiles), recorded beside the crop, never used to
         # decide yet; its boxes are only the ones outside the crop.
-        for key in ("clean", "strip", "full"):
+        # "sud": the whole frame below Tim's line (read_south).
+        for key in ("clean", "strip", "full", "sud"):
             try:
                 c = ph[key]
                 row[key] = {"meo_px": max(0.0, float(c["meo_px"])), "meo_n": max(0, int(c["meo_n"])),
@@ -1078,6 +1087,18 @@ def yolo_band_result(group, det, settings, reading_id):
             extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
             meo, product, pieces = s_meo, s_product, s_pieces
             version += "+strip"
+    # The whole frame below the line (inline_settings.read_south), when every
+    # photo has it; ahead of the strip and the dust mask.
+    sud = [p.get("sud") for p in det["photos"]]
+    if all(sud):
+        u_meo, u_product, u_pieces = sums(sud)
+        extra["sud"] = {"meo_px": u_meo, "product_px": u_product, "meo_n": u_pieces,
+                        "ratio_pct": round(100 * u_meo / u_product, 4) if u_product > 0 else None}
+        if settings["read_south"] and u_product > 0:
+            if "raw" not in extra:
+                extra["raw"] = {"meo_px": meo, "product_px": product, "meo_n": pieces}
+            meo, product, pieces = u_meo, u_product, u_pieces
+            version = f"yolo-{det['version']}+sud"
     # The whole frame without the lip, when every photo has it: recorded
     # with its own ratio for comparison against the lab, never decided on.
     full = [p.get("full") for p in det["photos"]]
@@ -1109,8 +1130,9 @@ def yolo_band_result(group, det, settings, reading_id):
         "justification": f"Détecteur : {pieces} morceau(x) de MEO sur {len(group)} photo(s).",
         "measures": {"yolo": {**det, "ratio_pct": round(100 * ratio, 4), "scale": settings["yolo_scale"],
                               "meo_px": round(meo, 1), "product_px": product, "meo_n": pieces,
-                              "dust_mask": "raw" in extra and not version.endswith("+strip"),
-                              "strip_excluded": version.endswith("+strip"), **extra}},
+                              "dust_mask": "raw" in extra and not version.endswith(("+strip", "+sud")),
+                              "strip_excluded": version.endswith("+strip"),
+                              "south": version.endswith("+sud"), **extra}},
     }
     return [result], False, photo_mean, photo_std
 
